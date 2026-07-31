@@ -384,9 +384,7 @@ class TestRequestHandlingBehavior:
         assert result.status_code == 502
 
     @pytest.mark.asyncio
-    async def test_unknown_model_maps_to_404(
-        self, proxy: GatewayProxy, mocker
-    ) -> None:
+    async def test_unknown_model_maps_to_404(self, proxy: GatewayProxy, mocker) -> None:
         """M1: unknown model -> 404 (never a 502 provider error)."""
         result = await proxy.handle_chat_completion(
             {"model": "definitely-not-a-model-xyz"}, "sk_test_abc", {}
@@ -447,9 +445,7 @@ class TestRequestHandlingBehavior:
         )
 
         async def _forward(model: str, body: dict, stream: bool = False):
-            raise RateLimitExceededError(
-                BudgetScope(kind="key", key="key1"), "tpm", 60
-            )
+            raise RateLimitExceededError(BudgetScope(kind="key", key="key1"), "tpm", 60)
 
         proxy.forward = AsyncMock(side_effect=_forward)  # type: ignore[method-assign]
         result = await proxy.handle_chat_completion(
@@ -575,6 +571,7 @@ class TestForwardBehavior:
     ) -> None:
         """BLOCKER 3: stream=true must aggregate chunk usage so the request
         is recorded at real cost, not $0 (budget bypass)."""
+
         async def _chunks():
             yield SimpleNamespace(
                 model="gpt-4o",
@@ -607,6 +604,7 @@ class TestForwardBehavior:
     ) -> None:
         """BLOCKER 3: streaming without any usage chunk -> usage None, no
         crash (provider did not emit usage)."""
+
         async def _chunks():
             yield SimpleNamespace(model="gpt-4o", choices=[])
 

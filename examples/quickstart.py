@@ -51,6 +51,7 @@ class _FakeResponse:
     def model_dump(self) -> dict:
         return self._body
 
+
 BUDGETS_YAML = """\
 scopes:
   - scope: {kind: key, key: "key1"}

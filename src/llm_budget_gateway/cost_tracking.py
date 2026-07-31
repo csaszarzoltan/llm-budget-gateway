@@ -207,9 +207,7 @@ class CostStore:
                     (since_epoch,),
                 ).fetchone()
                 return float(row[0])
-            column = {"key": "api_key", "user": "user_id", "team": "team"}.get(
-                kind
-            )
+            column = {"key": "api_key", "user": "user_id", "team": "team"}.get(kind)
             if column is None:
                 raise ValueError(f"unknown scope kind: {kind!r}")
             row = self._conn.execute(
@@ -239,9 +237,7 @@ class CostTracker:
     async def spend_since(self, scope_key: str, since_epoch: int) -> float:
         """Return total spend for ``scope_key`` in the window (off the event
         loop)."""
-        return await asyncio.to_thread(
-            self._store.spend_since, scope_key, since_epoch
-        )
+        return await asyncio.to_thread(self._store.spend_since, scope_key, since_epoch)
 
     def build_record(
         self,

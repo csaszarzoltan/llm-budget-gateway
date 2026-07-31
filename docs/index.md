@@ -9,6 +9,7 @@ gateway owns the enforcement, not the provider connectivity.
 |---|---|
 | [Getting Started](getting-started.md) | Install, configure, run, first request |
 | [Proxy Setup](proxy-setup.md) | Endpoints, environment config, HTTP semantics, security |
+| [Preflight Cost Estimation](cost-estimation.md) | Predict request cost before dispatch |
 | [Cost Tracking](cost-tracking.md) | Pricing baseline + overrides, SQLite ledger, spend queries |
 | [Budget Configuration](budget-configuration.md) | YAML scopes, soft/hard limits, TPM/RPM ceilings, windows |
 | [Fallback Chains](fallback-chains.md) | Typed chains, error classification, cooldowns, context pre-checks |
@@ -62,3 +63,21 @@ virtualenv and print their own output:
 - [Product UI suite](product-ui.md) - six accessible operational workspaces and recovery patterns.
 - [Governance and automation suite](governance-suite.md) - identity, evidence, FinOps, guarded recovery and privacy controls.
 - [Enterprise control suite](enterprise-control-suite.md) - approvals, evidence, SCIM, model routing, privacy cases and tool governance.
+
+- [Operations Suite](operations-suite.md) - prompt versions, retries, quotas, catalogs and SLOs.
+- [Operations API](api/operations-api.md) - authentication and endpoint guide.
+- [Operations Research](research/operations-research-2026-07-31.md) - evidence and RICE prioritization.
+
+- [Quality Suite](quality-suite.md) - evaluations, gates, traces, batches and audit reports.
+- [Quality API](api/quality-api.md) - authentication and OpenAPI usage.
+- [Quality Research](research/quality-research-2026-07-31.md) - evidence and RICE decisions.
+
+- [Security Center](security-center.md)
+- [Security API](api/security-api.md)
+- [Security Research](research/security-research-2026-07-31.md)
+
+- [Resilience Center](resilience-center.md)
+
+- [Optimization Center](optimization-center.md)
+
+- [Collaboration Center](collaboration-center.md)

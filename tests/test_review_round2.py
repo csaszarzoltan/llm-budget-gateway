@@ -110,6 +110,7 @@ class TestStreamSse:
     ) -> None:
         """BLOCKER A: forward must serialize drained chunks into SSE lines
         (str), not raw litellm chunk objects (StreamingResponse.encode crash)."""
+
         async def _chunks():
             yield SimpleNamespace(
                 model="gpt-4o",
@@ -162,9 +163,7 @@ class TestProviderTimeout:
         assert "timed out" in resp.text
 
     @pytest.mark.asyncio
-    async def test_forward_hung_upstream_raises_provider_timeout(
-        self, mocker
-    ) -> None:
+    async def test_forward_hung_upstream_raises_provider_timeout(self, mocker) -> None:
         """MEDIUM B unit: forward surfaces a ProviderTimeoutError when the
         upstream does not respond within Settings.provider_timeout."""
         settings = Settings(virtual_keys={"sk-test": "key1"}, provider_timeout=0.05)
@@ -263,9 +262,7 @@ class TestEmbeddingsRouting:
         assert result.usage.prompt_tokens == 7
 
     @pytest.mark.asyncio
-    async def test_embeddings_http_layer_returns_200(
-        self, tmp_path, mocker
-    ) -> None:
+    async def test_embeddings_http_layer_returns_200(self, tmp_path, mocker) -> None:
         """MEDIUM C: POST /v1/embeddings through create_app is served by
         aembedding (200 JSON), not misrouted to acompletion."""
         app = create_app(settings=_app_settings(tmp_path))

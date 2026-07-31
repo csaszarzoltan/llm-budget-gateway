@@ -472,6 +472,7 @@ class TestSoftExceededBehavior:
         """M2: soft_exceeded must not raise RuntimeError when called from
         within a running event loop with a real async tracker (only the dict
         fast-path used to work; asyncio.run in-loop crashed)."""
+
         class AsyncTracker:
             def __init__(self, spend: dict[str, float]) -> None:
                 self.spend_since_calls = 0

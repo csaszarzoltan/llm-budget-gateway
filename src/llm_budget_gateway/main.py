@@ -18,6 +18,7 @@ from .budget_enforcement import (
     load_budget_configs,
 )
 from .config import Settings
+from .cost_estimation import CostEstimator
 from .cost_tracking import CostCalculator, CostStore, CostTracker, ModelPrice, PriceMap
 from .gateway_proxy import GatewayProxy, ProviderResponse
 from .model_fallback import FallbackConfig, FallbackManager
@@ -57,6 +58,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         counter_store=InMemoryCounterStore(),
     )
 
+    estimator = CostEstimator(calculator, manager)
     proxy = GatewayProxy(
         settings=settings,
         cost_tracker=tracker,
@@ -95,6 +97,34 @@ def create_app(settings: Settings | None = None) -> FastAPI:
             body, _bearer_token(request), dict(request.headers)
         )
         return _provider_response(response)
+
+    @app.post("/v1/cost-estimates")
+    async def cost_estimates(request: Request) -> Response:
+        body = await _read_json_body(request)
+        if isinstance(body, ProviderResponse):
+            return _provider_response(body)
+        try:
+            proxy.resolve_scopes(_bearer_token(request), dict(request.headers))
+        except Exception:
+            return _provider_response(
+                GatewayProxy._error_response(
+                    401, "invalid or missing api key", str(body.get("model", ""))
+                )
+            )
+        if not proxy._model_known(str(body.get("model", ""))):
+            return _provider_response(
+                GatewayProxy._error_response(
+                    404,
+                    f"unknown model: {body.get('model', '')}",
+                    str(body.get("model", "")),
+                )
+            )
+        try:
+            return JSONResponse(estimator.estimate(body).as_dict())
+        except ValueError as exc:
+            return _provider_response(
+                GatewayProxy._error_response(400, str(exc), str(body.get("model", "")))
+            )
 
     @app.get("/v1/models")
     async def list_models() -> JSONResponse:
@@ -139,9 +169,7 @@ async def _read_json_body(request: Request) -> dict | ProviderResponse:
     try:
         body = await request.json()
     except (json.JSONDecodeError, ValueError):
-        return GatewayProxy._error_response(
-            400, "request body is not valid JSON", ""
-        )
+        return GatewayProxy._error_response(400, "request body is not valid JSON", "")
     if not isinstance(body, dict):
         return GatewayProxy._error_response(
             400, "request body must be a JSON object", ""

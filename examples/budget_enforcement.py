@@ -111,9 +111,7 @@ def hard_budget_demo() -> None:
             window="30s",
         ),
     ]
-    tracker = _FakeTracker(
-        {"key:keyA": 40.0, "team:eng": 400.0, "global:default": 0.0}
-    )
+    tracker = _FakeTracker({"key:keyA": 40.0, "team:eng": 400.0, "global:default": 0.0})
     enforcer = BudgetEnforcer(configs=configs, cost_tracker=tracker)
 
     scopes = [
@@ -140,8 +138,7 @@ def hard_budget_demo() -> None:
 
     exceeded = enforcer.soft_exceeded(scopes)
     print(
-        f"  soft_exceeded(scopes) -> {[s.scope_key() for s in exceeded]} "
-        f"(never raises)"
+        f"  soft_exceeded(scopes) -> {[s.scope_key() for s in exceeded]} (never raises)"
     )
 
 

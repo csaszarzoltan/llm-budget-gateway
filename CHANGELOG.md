@@ -101,3 +101,98 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ### [0.5.0] - 2026-07-31
 - Added four-eyes approval orchestration and continuous compliance evidence freshness.
 - Added SCIM lifecycle, access reviews, quality-aware routing, privacy request cases, and governed agent tool runs.
+
+## [0.6.0] - 2026-07-31
+
+### Added
+- Authenticated `POST /v1/cost-estimates` preflight API with explicit unknown-pricing state.
+- Unit tests, user guide, and market-research decision record.
+
+
+## [0.7.0] - 2026-07-31
+
+### Added
+- Local PII redaction API with category-safe audit metadata.
+- Tenant-isolated exact response cache with canonical keys and TTL expiry.
+- HMAC-SHA256 signed webhook envelopes and constant-time verification.
+- Explainable spend anomaly detection and constrained cost-aware routing.
+- Responsive light/dark Gateway Intelligence dashboard with accessible states.
+- Multi-source research, five ADRs, OpenAPI guide, FAQ, migration, validation, GitLab, and contribution documentation.
+
+### Changed
+- Development dependencies now include pytest-cov and the package version is 0.7.0.
+
+### Security
+- PII processing remains local; cache records are tenant-scoped; signed events are tamper-evident.
+
+
+## [0.8.0] - 2026-07-31
+
+### Added
+- Immutable tenant-isolated prompt registry with deterministic A/B assignment.
+- Bounded full-jitter retry decisions with attempt, delay and elapsed-time ceilings.
+- Actionable quota diagnostics for financial, token, request and availability failures.
+- Validated model catalog metadata for pricing, context, capabilities and regions.
+- SLO availability and error-budget burn monitoring.
+- Authenticated Operations API and responsive light/dark WCAG-oriented dashboard.
+- Market research, specifications, five ADRs, OpenAPI guide, migration and GitLab delivery record.
+
+### Changed
+- Package version increased to 0.8.0.
+
+### Security
+- Operations endpoints fail closed when `GATEWAY_OPERATIONS_API_KEY` is absent.
+- Prompt metadata removes secret and authorization fields before persistence.
+
+
+## [0.9.0] - 2026-07-31
+
+### Added
+- Deterministic rule-based evaluation runs with tenant-isolated immutable history.
+- CI-ready release quality and regression gates.
+- Privacy-safe trace and session identifier resolution.
+- Single-model batch manifest validation and discounted cost planning.
+- Schema-versioned, redacted, integrity-protected audit reports.
+- Authenticated Quality API and responsive light/dark accessible dashboard.
+- Research, feature specifications, five ADRs, API, migration and GitLab documentation.
+
+### Changed
+- Package version increased to 0.9.0.
+
+### Security
+- Quality endpoints fail closed when `GATEWAY_EVALUATION_API_KEY` is absent.
+- Audit exports strip prompt, authorization and secret fields and redact embedded keys.
+
+
+## [1.0.0] - 2026-07-31
+
+### Added
+- Local secret detection and redaction.
+- Durable webhook replay protection.
+- Fail-closed provider compliance.
+- Change risk scoring and security posture grades.
+- Authenticated responsive Security Center.
+
+### Security
+- Endpoints fail closed without an API key; secret values are not persisted.
+
+
+## [1.1.0] - 2026-07-31
+### Added
+- Adaptive concurrency, dead-letter replay, maintenance windows, config doctor, incident timelines and accessible Resilience Center.
+### Security
+- APIs fail closed without `GATEWAY_RESILIENCE_API_KEY`; dead letters remove sensitive fields.
+
+
+## [1.2.0] - 2026-07-31
+### Added
+- Prompt compression, savings attribution, privacy-aware cache advice, budget forecasting, quality-safe optimization experiments, and accessible Optimization Center.
+### Security
+- APIs fail closed without `GATEWAY_OPTIMIZATION_API_KEY`.
+
+
+## [1.3.0] - 2026-07-31
+### Added
+- Project-scoped RBAC, one-time invitations, key lifecycle guidance, member budget/key caps, delegated approvals, and accessible Collaboration Center.
+### Security
+- APIs fail closed without `GATEWAY_COLLABORATION_API_KEY`; invitation plaintext is never persisted.

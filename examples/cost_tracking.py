@@ -77,9 +77,7 @@ def ledger_demo() -> None:
         import sqlite3
 
         mode = (
-            sqlite3.connect(str(db_path))
-            .execute("PRAGMA journal_mode")
-            .fetchone()[0]
+            sqlite3.connect(str(db_path)).execute("PRAGMA journal_mode").fetchone()[0]
         )
         print(f"  journal_mode={mode}")
         tracker = CostTracker(
@@ -134,14 +132,10 @@ def ledger_demo() -> None:
         spend_key2 = asyncio.run(tracker.spend_since("key:key2", 0))
         spend_global = asyncio.run(tracker.spend_since("global:default", 0))
         print(
-            f"  spend_since('key:key1')  = ${spend_key1:.6f}   "
-            f"(2 x $0.0125 = $0.025)"
+            f"  spend_since('key:key1')  = ${spend_key1:.6f}   (2 x $0.0125 = $0.025)"
         )
         print(f"  spend_since('key:key2')  = ${spend_key2:.6f}   (1 x $0.00125)")
-        print(
-            f"  spend_since('global:default') = ${spend_global:.6f}   "
-            f"(all keys)"
-        )
+        print(f"  spend_since('global:default') = ${spend_global:.6f}   (all keys)")
         store.close()
     finally:
         shutil.rmtree(tmp, ignore_errors=True)

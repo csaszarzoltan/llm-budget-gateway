@@ -34,9 +34,7 @@ class _FakeProxy:
     async def forward(self, model: str, body: dict) -> ProviderResponse:
         self.calls.append(model)
         if model in self.fail:
-            raise RateLimitExceededError(
-                BudgetScope(kind="key", key="keyA"), "rpm", 60
-            )
+            raise RateLimitExceededError(BudgetScope(kind="key", key="keyA"), "rpm", 60)
         return ProviderResponse(
             status_code=200,
             body={"id": f"cmpl-{model}", "model": model},
@@ -106,9 +104,7 @@ def dispatch_demo() -> None:
     proxy2 = _FakeProxy(fail={"gpt-4o"})
     try:
         asyncio.run(
-            manager2.dispatch(
-                proxy2, "gpt-4o", body, "sk", {}, disable_fallbacks=True
-            )
+            manager2.dispatch(proxy2, "gpt-4o", body, "sk", {}, disable_fallbacks=True)
         )
     except RateLimitExceededError as exc:
         print(f"  models called: {proxy2.calls}")
@@ -122,8 +118,7 @@ def dispatch_demo() -> None:
     except RateLimitExceededError as exc:
         print(f"  models called: {proxy3.calls}")
         print(
-            f"  raised: RateLimitExceededError({exc.limit_type}) "
-            f"-> 502 at HTTP layer"
+            f"  raised: RateLimitExceededError({exc.limit_type}) -> 502 at HTTP layer"
         )
 
 
@@ -146,8 +141,7 @@ def context_precheck_demo() -> None:
     )
     response = asyncio.run(manager.dispatch(proxy, "gpt-4o", big_body, "sk", {}))
     print(
-        f"  dispatch called only: {proxy.calls} "
-        f"(small-context model skipped pre-call)"
+        f"  dispatch called only: {proxy.calls} (small-context model skipped pre-call)"
     )
     print(f"  served by: {response.model}")
 

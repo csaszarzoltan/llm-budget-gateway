@@ -166,9 +166,7 @@ class GatewayProxy:
             return self._error_response(412, str(exc), model)
 
         try:
-            response = await self._forward_with_fallback(
-                model, body, api_key, headers
-            )
+            response = await self._forward_with_fallback(model, body, api_key, headers)
         except ProviderTimeoutError:
             logger.warning("provider timeout request=%s model=%s", request_id, model)
             await self._record(
@@ -268,8 +266,7 @@ class GatewayProxy:
                 )
         except TimeoutError as exc:
             raise ProviderTimeoutError(
-                f"upstream provider timed out after "
-                f"{self._settings.provider_timeout}s"
+                f"upstream provider timed out after {self._settings.provider_timeout}s"
             ) from exc
 
         usage: TokenUsage | None = None
@@ -293,9 +290,7 @@ class GatewayProxy:
             )
             if resp_usage is not None:
                 prompt_tokens = getattr(resp_usage, "prompt_tokens", 0) or 0
-                completion_tokens = (
-                    getattr(resp_usage, "completion_tokens", 0) or 0
-                )
+                completion_tokens = getattr(resp_usage, "completion_tokens", 0) or 0
                 total_tokens = getattr(resp_usage, "total_tokens", 0) or (
                     prompt_tokens + completion_tokens
                 )
@@ -318,9 +313,7 @@ class GatewayProxy:
             latency_ms=latency_ms,
         )
 
-    async def _drain_stream(
-        self, response: object
-    ) -> tuple[list, TokenUsage | None]:
+    async def _drain_stream(self, response: object) -> tuple[list, TokenUsage | None]:
         """Consume an async streaming iterator, aggregating chunk usage.
 
         Each chunk must arrive within ``Settings.provider_timeout`` seconds;
@@ -346,9 +339,7 @@ class GatewayProxy:
                         "completion_tokens": (
                             getattr(chunk_usage, "completion_tokens", 0) or 0
                         ),
-                        "total_tokens": (
-                            getattr(chunk_usage, "total_tokens", 0) or 0
-                        ),
+                        "total_tokens": (getattr(chunk_usage, "total_tokens", 0) or 0),
                     }
                 )
         usage = accumulate_usage(usage_parts) if usage_parts else None
@@ -370,8 +361,7 @@ class GatewayProxy:
                 return
             except TimeoutError as exc:
                 raise ProviderTimeoutError(
-                    f"upstream stream stalled for "
-                    f"{self._settings.provider_timeout}s"
+                    f"upstream stream stalled for {self._settings.provider_timeout}s"
                 ) from exc
             yield chunk
 
