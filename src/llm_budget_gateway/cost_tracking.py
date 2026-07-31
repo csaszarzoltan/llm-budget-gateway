@@ -7,7 +7,9 @@ analysis brief §4 P0-2.
 
 from __future__ import annotations
 
+import asyncio
 import sqlite3
+import threading
 import time
 from dataclasses import dataclass
 
@@ -135,80 +137,92 @@ class CostCalculator:
 class CostStore:
     """SQLite ledger, WAL mode. Table cost_records with indexes on
     (timestamp), (api_key, timestamp).
+
+    The connection is created with ``check_same_thread=False`` and every
+    operation is serialized under ``self._lock`` so the store can safely be
+    driven from worker threads (see ``CostTracker`` which offloads sync I/O
+    off the event loop).
     """
 
     def __init__(self, db_path: str) -> None:
         self._db_path = db_path
-        self._conn = sqlite3.connect(db_path)
+        self._lock = threading.Lock()
+        self._conn = sqlite3.connect(db_path, check_same_thread=False)
         self._conn.row_factory = sqlite3.Row
-        self._conn.execute("PRAGMA journal_mode=WAL")
-        self._conn.execute(_CREATE_TABLE)
-        self._conn.execute(
-            "CREATE INDEX IF NOT EXISTS idx_cost_records_timestamp "
-            "ON cost_records (timestamp)"
-        )
-        self._conn.execute(
-            "CREATE INDEX IF NOT EXISTS idx_cost_records_api_key_timestamp "
-            "ON cost_records (api_key, timestamp)"
-        )
-        self._conn.commit()
+        with self._lock:
+            self._conn.execute("PRAGMA journal_mode=WAL")
+            self._conn.execute(_CREATE_TABLE)
+            self._conn.execute(
+                "CREATE INDEX IF NOT EXISTS idx_cost_records_timestamp "
+                "ON cost_records (timestamp)"
+            )
+            self._conn.execute(
+                "CREATE INDEX IF NOT EXISTS idx_cost_records_api_key_timestamp "
+                "ON cost_records (api_key, timestamp)"
+            )
+            self._conn.commit()
 
     def insert(self, record: UsageRecord) -> None:
         """Persist one usage record (upsert on request_id)."""
-        self._conn.execute(
-            """
-            INSERT OR REPLACE INTO cost_records (
-                request_id, api_key, user_id, team, model, provider,
-                prompt_tokens, completion_tokens, total_tokens,
-                input_cost, output_cost, total_cost,
-                latency_ms, status, timestamp
-            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-            """,
-            (
-                record.request_id,
-                record.api_key,
-                record.user_id,
-                record.team,
-                record.model,
-                record.provider,
-                record.prompt_tokens,
-                record.completion_tokens,
-                record.total_tokens,
-                record.input_cost,
-                record.output_cost,
-                record.total_cost,
-                record.latency_ms,
-                record.status,
-                record.timestamp,
-            ),
-        )
-        self._conn.commit()
+        with self._lock:
+            self._conn.execute(
+                """
+                INSERT OR REPLACE INTO cost_records (
+                    request_id, api_key, user_id, team, model, provider,
+                    prompt_tokens, completion_tokens, total_tokens,
+                    input_cost, output_cost, total_cost,
+                    latency_ms, status, timestamp
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                """,
+                (
+                    record.request_id,
+                    record.api_key,
+                    record.user_id,
+                    record.team,
+                    record.model,
+                    record.provider,
+                    record.prompt_tokens,
+                    record.completion_tokens,
+                    record.total_tokens,
+                    record.input_cost,
+                    record.output_cost,
+                    record.total_cost,
+                    record.latency_ms,
+                    record.status,
+                    record.timestamp,
+                ),
+            )
+            self._conn.commit()
 
     def spend_since(self, scope_key: str, since_epoch: int) -> float:
         """Sum total_cost for records matching ``scope_key`` with
         timestamp >= since_epoch.
         """
         kind, _, key = scope_key.partition(":")
-        if kind == "global":
+        with self._lock:
+            if kind == "global":
+                row = self._conn.execute(
+                    "SELECT COALESCE(SUM(total_cost), 0) FROM cost_records "
+                    "WHERE timestamp >= ?",
+                    (since_epoch,),
+                ).fetchone()
+                return float(row[0])
+            column = {"key": "api_key", "user": "user_id", "team": "team"}.get(
+                kind
+            )
+            if column is None:
+                raise ValueError(f"unknown scope kind: {kind!r}")
             row = self._conn.execute(
-                "SELECT COALESCE(SUM(total_cost), 0) FROM cost_records "
-                "WHERE timestamp >= ?",
-                (since_epoch,),
+                f"SELECT COALESCE(SUM(total_cost), 0) FROM cost_records "
+                f"WHERE {column} = ? AND timestamp >= ?",
+                (key, since_epoch),
             ).fetchone()
             return float(row[0])
-        column = {"key": "api_key", "user": "user_id", "team": "team"}.get(kind)
-        if column is None:
-            raise ValueError(f"unknown scope kind: {kind!r}")
-        row = self._conn.execute(
-            f"SELECT COALESCE(SUM(total_cost), 0) FROM cost_records "
-            f"WHERE {column} = ? AND timestamp >= ?",
-            (key, since_epoch),
-        ).fetchone()
-        return float(row[0])
 
     def close(self) -> None:
         """Close the underlying SQLite connection."""
-        self._conn.close()
+        with self._lock:
+            self._conn.close()
 
 
 class CostTracker:
@@ -219,12 +233,15 @@ class CostTracker:
         self._calculator = calculator
 
     async def record(self, usage: UsageRecord) -> None:
-        """Persist a usage record (async wrapper over CostStore.insert)."""
-        self._store.insert(usage)
+        """Persist a usage record (off the event loop)."""
+        await asyncio.to_thread(self._store.insert, usage)
 
     async def spend_since(self, scope_key: str, since_epoch: int) -> float:
-        """Return total spend for ``scope_key`` in the window."""
-        return self._store.spend_since(scope_key, since_epoch)
+        """Return total spend for ``scope_key`` in the window (off the event
+        loop)."""
+        return await asyncio.to_thread(
+            self._store.spend_since, scope_key, since_epoch
+        )
 
     def build_record(
         self,

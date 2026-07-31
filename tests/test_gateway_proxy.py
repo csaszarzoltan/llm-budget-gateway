@@ -26,6 +26,7 @@ from llm_budget_gateway.budget_enforcement import (
 from llm_budget_gateway.config import Settings
 from llm_budget_gateway.gateway_proxy import ApiKeyError, GatewayProxy, ProviderResponse
 from llm_budget_gateway.main import create_app
+from llm_budget_gateway.model_fallback import FallbackConfig, FallbackManager
 
 # ---------------------------------------------------------------------------
 # Fixtures
@@ -323,6 +324,86 @@ class TestRequestHandlingBehavior:
         )
         assert result.status_code == 502
 
+    @pytest.mark.asyncio
+    async def test_unknown_model_maps_to_404(
+        self, proxy: GatewayProxy, mocker
+    ) -> None:
+        """M1: unknown model -> 404 (never a 502 provider error)."""
+        result = await proxy.handle_chat_completion(
+            {"model": "definitely-not-a-model-xyz"}, "sk_test_abc", {}
+        )
+        assert result.status_code == 404
+
+    @pytest.mark.asyncio
+    async def test_429_on_primary_served_by_fallback_chain(
+        self, settings: Settings, mocker
+    ) -> None:
+        """BLOCKER 1: _handle must route through FallbackManager.dispatch —
+        a 429 on gpt-4o is served by the next chain model end-to-end."""
+        manager = FallbackManager(
+            [FallbackConfig(model="gpt-4o", chain=["gpt-3.5-turbo"])]
+        )
+        proxy = GatewayProxy(
+            settings=settings,
+            cost_tracker=Mock(),
+            budget_enforcer=Mock(),
+            fallback_manager=manager,
+        )
+
+        async def _forward(model: str, body: dict, stream: bool = False):
+            if model == "gpt-4o":
+                raise RateLimitExceededError(
+                    BudgetScope(kind="key", key="key1"), "tpm", 60
+                )
+            return ProviderResponse(200, {}, {}, model, None, 5)
+
+        proxy.forward = AsyncMock(side_effect=_forward)  # type: ignore[method-assign]
+        result = await proxy.handle_chat_completion(
+            {"model": "gpt-4o", "messages": [{"role": "user", "content": "hi"}]},
+            "sk_test_abc",
+            {},
+        )
+        assert result.status_code == 200
+        assert result.model == "gpt-3.5-turbo"
+        # the primary was attempted first, then the fallback
+        assert [c.args[0] for c in proxy.forward.call_args_list] == [
+            "gpt-4o",
+            "gpt-3.5-turbo",
+        ]
+
+    @pytest.mark.asyncio
+    async def test_429_chain_exhaustion_maps_to_502(
+        self, settings: Settings, mocker
+    ) -> None:
+        """BLOCKER 1: when every chain model 429s, the last error surfaces
+        as a 502 provider error."""
+        manager = FallbackManager(
+            [FallbackConfig(model="gpt-4o", chain=["gpt-3.5-turbo"])]
+        )
+        proxy = GatewayProxy(
+            settings=settings,
+            cost_tracker=Mock(),
+            budget_enforcer=Mock(),
+            fallback_manager=manager,
+        )
+
+        async def _forward(model: str, body: dict, stream: bool = False):
+            raise RateLimitExceededError(
+                BudgetScope(kind="key", key="key1"), "tpm", 60
+            )
+
+        proxy.forward = AsyncMock(side_effect=_forward)  # type: ignore[method-assign]
+        result = await proxy.handle_chat_completion(
+            {"model": "gpt-4o", "messages": [{"role": "user", "content": "hi"}]},
+            "sk_test_abc",
+            {},
+        )
+        assert result.status_code == 502
+        assert [c.args[0] for c in proxy.forward.call_args_list] == [
+            "gpt-4o",
+            "gpt-3.5-turbo",
+        ]
+
 
 class TestForwardBehavior:
     @pytest.mark.asyncio
@@ -343,6 +424,26 @@ class TestForwardBehavior:
         assert result.usage.prompt_tokens == 10
 
     @pytest.mark.asyncio
+    async def test_forward_uses_param_model_over_body_model(
+        self, proxy: GatewayProxy, mocker
+    ) -> None:
+        """BLOCKER 1: forward must honor the ``model`` param (the fallback
+        candidate), not the body's model — otherwise dispatch would re-call
+        the failing primary model."""
+        litellm = mocker.patch("litellm.acompletion", new=AsyncMock())
+        litellm.return_value = SimpleNamespace(
+            usage=SimpleNamespace(
+                prompt_tokens=10, completion_tokens=5, total_tokens=15
+            ),
+            model="gpt-3.5-turbo",
+        )
+        body = {"model": "gpt-4o", "messages": [{"role": "user", "content": "hi"}]}
+        result = await proxy.forward("gpt-3.5-turbo", body)
+        kwargs = litellm.await_args.kwargs
+        assert kwargs["model"] == "gpt-3.5-turbo"
+        assert result.model == "gpt-3.5-turbo"
+
+    @pytest.mark.asyncio
     async def test_forward_streaming_passthrough(
         self, proxy: GatewayProxy, mocker
     ) -> None:
@@ -353,6 +454,111 @@ class TestForwardBehavior:
         )
         assert isinstance(result, ProviderResponse)
         assert result.body is not None
+
+    @pytest.mark.asyncio
+    async def test_forward_strips_injection_fields(
+        self, proxy: GatewayProxy, mocker
+    ) -> None:
+        """BLOCKER 2: api_key/base_url/headers in the client body must never
+        reach litellm (provider auth/endpoint come from gateway settings)."""
+        litellm = mocker.patch("litellm.acompletion", new=AsyncMock())
+        litellm.return_value = SimpleNamespace(
+            usage=SimpleNamespace(
+                prompt_tokens=10, completion_tokens=5, total_tokens=15
+            ),
+            model="gpt-4o",
+        )
+        body = {
+            "model": "gpt-4o",
+            "messages": [{"role": "user", "content": "hi"}],
+            "api_key": "sk-client-injected",
+            "api_base": "https://evil.example.com",
+            "base_url": "https://evil.example.com",
+            "headers": {"Authorization": "Bearer sk-client-injected"},
+            "temperature": 0.2,
+        }
+        await proxy.forward("gpt-4o", body)
+        kwargs = litellm.await_args.kwargs
+        assert "api_key" not in kwargs
+        assert "api_base" not in kwargs
+        assert "base_url" not in kwargs
+        assert "headers" not in kwargs
+        assert kwargs["messages"] == [{"role": "user", "content": "hi"}]
+        assert kwargs["temperature"] == 0.2
+
+    @pytest.mark.asyncio
+    async def test_forward_strips_injection_fields_for_completions(
+        self, proxy: GatewayProxy, mocker
+    ) -> None:
+        """BLOCKER 2: completions-style body with api_key/base_url stripped."""
+        litellm = mocker.patch("litellm.acompletion", new=AsyncMock())
+        litellm.return_value = SimpleNamespace(
+            usage=SimpleNamespace(
+                prompt_tokens=10, completion_tokens=5, total_tokens=15
+            ),
+            model="gpt-4o",
+        )
+        body = {
+            "model": "gpt-4o",
+            "prompt": "hello",
+            "api_key": "sk-client-injected",
+            "base_url": "https://evil.example.com",
+        }
+        await proxy.forward("gpt-4o", body)
+        kwargs = litellm.await_args.kwargs
+        assert "api_key" not in kwargs
+        assert "base_url" not in kwargs
+        assert kwargs["prompt"] == "hello"
+
+    @pytest.mark.asyncio
+    async def test_forward_streaming_aggregates_usage(
+        self, proxy: GatewayProxy, mocker
+    ) -> None:
+        """BLOCKER 3: stream=true must aggregate chunk usage so the request
+        is recorded at real cost, not $0 (budget bypass)."""
+        async def _chunks():
+            yield SimpleNamespace(
+                model="gpt-4o",
+                usage=SimpleNamespace(
+                    prompt_tokens=10, completion_tokens=5, total_tokens=15
+                ),
+            )
+            yield SimpleNamespace(
+                model="gpt-4o",
+                usage=SimpleNamespace(
+                    prompt_tokens=0, completion_tokens=3, total_tokens=3
+                ),
+            )
+
+        litellm = mocker.patch("litellm.acompletion", new=AsyncMock())
+        litellm.return_value = _chunks()
+        result = await proxy.forward(
+            "gpt-4o", {"model": "gpt-4o", "stream": True}, stream=True
+        )
+        assert isinstance(result, ProviderResponse)
+        assert result.usage is not None
+        assert result.usage.prompt_tokens == 10
+        assert result.usage.completion_tokens == 8
+        assert result.usage.total_tokens == 18
+        assert isinstance(result.body, list)
+
+    @pytest.mark.asyncio
+    async def test_forward_streaming_no_usage_chunks_stays_none(
+        self, proxy: GatewayProxy, mocker
+    ) -> None:
+        """BLOCKER 3: streaming without any usage chunk -> usage None, no
+        crash (provider did not emit usage)."""
+        async def _chunks():
+            yield SimpleNamespace(model="gpt-4o", choices=[])
+
+        litellm = mocker.patch("litellm.acompletion", new=AsyncMock())
+        litellm.return_value = _chunks()
+        result = await proxy.forward(
+            "gpt-4o", {"model": "gpt-4o", "stream": True}, stream=True
+        )
+        assert result.usage is None
+        assert isinstance(result.body, list)
+        assert result.model == "gpt-4o"
 
 
 class TestResolveScopesBehavior:

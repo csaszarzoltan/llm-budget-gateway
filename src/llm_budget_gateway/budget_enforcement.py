@@ -214,15 +214,32 @@ class BudgetEnforcer:
         """Best-effort synchronous spend lookup.
 
         Prefers an in-memory ``spend`` dict on the tracker (test doubles);
-        otherwise drives the async tracker on a fresh event loop.
+        otherwise drives the async tracker on a fresh event loop. When a loop
+        is already running (real request path), the coroutine is executed on a
+        worker thread's own loop so ``asyncio.run`` never raises RuntimeError.
         """
         spend_dict = getattr(self.cost_tracker, "spend", None)
         if isinstance(spend_dict, dict):
             return float(spend_dict.get(scope.scope_key(), 0.0))
-        # asyncio.run requires no running loop; soft_exceeded is a sync API.
         import asyncio
+        import threading
 
-        return asyncio.run(self.cost_tracker.spend_since(scope.scope_key(), 0))
+        coro = self.cost_tracker.spend_since(scope.scope_key(), 0)
+        try:
+            asyncio.get_running_loop()
+        except RuntimeError:
+            return asyncio.run(coro)
+        # soft_exceeded is a sync API, but we're inside a running loop — run
+        # the coroutine on a fresh thread with its own loop.
+        result: dict[str, float] = {}
+
+        def _runner() -> None:
+            result["spend"] = asyncio.run(coro)
+
+        thread = threading.Thread(target=_runner)
+        thread.start()
+        thread.join()
+        return result["spend"]
 
 
 def load_budget_configs(path: str | Path) -> list[BudgetConfig]:

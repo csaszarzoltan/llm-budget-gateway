@@ -448,6 +448,30 @@ class TestSoftExceededBehavior:
         )
         assert enforcer.soft_exceeded([scope]) == []
 
+    @pytest.mark.asyncio
+    async def test_soft_exceeded_with_real_async_tracker_inside_running_loop(
+        self,
+    ) -> None:
+        """M2: soft_exceeded must not raise RuntimeError when called from
+        within a running event loop with a real async tracker (only the dict
+        fast-path used to work; asyncio.run in-loop crashed)."""
+        class AsyncTracker:
+            def __init__(self, spend: dict[str, float]) -> None:
+                self.spend_since_calls = 0
+                self._spend = spend
+
+            async def spend_since(self, scope_key: str, since_epoch: int) -> float:
+                self.spend_since_calls += 1
+                return self._spend.get(scope_key, 0.0)
+
+        scope = BudgetScope(kind="key", key="sk_live_abc")
+        cfg = BudgetConfig(scope=scope, soft_limit=25.0, hard_limit=100.0, window="30d")
+        tracker = AsyncTracker({"key:sk_live_abc": 40.0})
+        enforcer = BudgetEnforcer(configs=[cfg], cost_tracker=tracker)
+        # sync call from within an async test (running loop active) must work
+        assert enforcer.soft_exceeded([scope]) == [scope]
+        assert tracker.spend_since_calls == 1
+
 
 class TestReconcileBehavior:
     @pytest.mark.asyncio
