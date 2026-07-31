@@ -221,3 +221,29 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [5.0.0] - 2026-07-31
 ### Added
 - Twenty assurance capabilities, authenticated API, responsive accessible dashboard, research, roadmap, validation, migration, API, GitLab, and ADR documentation.
+
+### [6.0.0] - 2026-07-31
+
+#### Added
+- Ten deterministic Delivery Center capabilities, authenticated API, tests, user guide, API guide, and migration guide.
+
+#### Security
+- Calls fail closed without `GATEWAY_DELIVERY_API_KEY`; environment checks return names only.
+
+### [7.0.0] - 2026-07-31
+
+#### Added
+- Ten Scale Center capabilities, fail-closed tenant-authenticated API, unit/API tests, user guide, API guide, and migration guide.
+
+#### Security
+- Scale endpoints fail closed without `GATEWAY_SCALE_API_KEY`; tenant shard results use SHA-256 fingerprints instead of plaintext tenant identifiers.
+
+### [7.1.0] - 2026-07-31
+
+#### Added
+- Unified responsive browser console covering all 15 workspaces and registered capabilities.
+- Global search, command palette, workspace filters, health checks, light/dark themes and a universal API runner with cURL generation.
+- Machine-readable console catalog, accessibility contracts, UI/API tests and user documentation.
+
+#### Security
+- The console embeds no credentials or third-party assets; bearer keys are kept in browser session storage only.

@@ -91,3 +91,11 @@ virtualenv and print their own output:
 
 - [Assurance Center](assurance-center.md)
 - [Assurance API](api/assurance-api.md)
+
+- [Delivery Center](delivery-center.md) - executable production readiness and release controls.
+- [Delivery API](api/delivery-api.md) - authentication, capabilities, and errors.
+
+- [Scale Center](scale-center.md) - multi-instance topology, migration, residency, and recovery controls.
+- [Scale API](api/scale-api.md) - capabilities, authentication, and errors.
+
+- [Unified Gateway Console](unified-console.md) - searchable UI, health checks, command palette and universal API runner.
