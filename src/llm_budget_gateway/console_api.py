@@ -68,7 +68,7 @@ def create_console_app(manager: ServiceManager | None = None) -> FastAPI:
         service_manager.stop_all()
 
     app = FastAPI(
-        title="LLM Budget Gateway Console", version="7.2.0", lifespan=lifespan
+        title="LLM Budget Gateway Console", version="8.0.0", lifespan=lifespan
     )
 
     @app.get("/health")
@@ -84,7 +84,7 @@ def create_console_app(manager: ServiceManager | None = None) -> FastAPI:
     async def console_catalog() -> dict[str, object]:
         centers = catalog()
         return {
-            "version": "7.2.0",
+            "version": "8.0.0",
             "centers": centers,
             "center_count": len(centers),
             "capability_count": sum(len(center["capabilities"]) for center in centers),

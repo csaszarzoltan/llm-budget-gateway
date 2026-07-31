@@ -7,8 +7,6 @@ analysis brief §4 P0-1.
 
 from __future__ import annotations
 
-from .gateway_home import install_gateway_home
-
 import json
 
 from fastapi import FastAPI, Request
@@ -22,6 +20,7 @@ from .budget_enforcement import (
 from .config import Settings
 from .cost_estimation import CostEstimator
 from .cost_tracking import CostCalculator, CostStore, CostTracker, ModelPrice, PriceMap
+from .gateway_home import install_gateway_home
 from .gateway_proxy import GatewayProxy, ProviderResponse
 from .model_fallback import FallbackConfig, FallbackManager
 

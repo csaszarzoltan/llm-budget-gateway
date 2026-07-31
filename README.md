@@ -550,3 +550,11 @@ Roadmap items must preserve current public contracts, fail closed at privilege a
 ## License
 
 The project identifies its license as MIT. See the repository licensing metadata and add a root `LICENSE` file before external redistribution if your distribution process requires the full license text in the source archive.
+
+## Activation Center 8.0
+
+Ten privacy-safe onboarding controls cover setup progress, environment templates, provider readiness, ports, configuration, first requests, starter budgets, persona profiles, diagnostics, and activation gates. See [docs/activation-center.md](docs/activation-center.md).
+
+## Product Adoption Center 9.0
+
+Ten privacy-safe product-validation controls cover funnels, retention, feature adoption, experiments, feedback themes, pricing signals, staged rollout, success thresholds, and integrity-protected reports. See [docs/adoption-center.md](docs/adoption-center.md).

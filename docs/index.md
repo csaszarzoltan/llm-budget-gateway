@@ -99,3 +99,9 @@ virtualenv and print their own output:
 - [Scale API](api/scale-api.md) - capabilities, authentication, and errors.
 
 - [Unified Gateway Console](unified-console.md) - searchable UI, health checks, command palette and universal API runner.
+
+- [Activation Center](activation-center.md) - guided setup and fail-closed activation controls.
+- [Activation API](api/activation-api.md) - capability and authentication reference.
+
+- [Product Adoption Center](adoption-center.md) - product validation and rollout decisions.
+- [Product Adoption API](api/adoption-api.md) - authenticated capability reference.

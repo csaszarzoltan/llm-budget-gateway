@@ -247,3 +247,19 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 #### Security
 - The console embeds no credentials or third-party assets; bearer keys are kept in browser session storage only.
+
+### [8.0.0] - 2026-07-31
+
+#### Added
+- Ten Activation Center capabilities, authenticated API, tests, user guide, API guide, and migration guide.
+
+#### Security
+- Credential readiness exposes names only; diagnostic bundles drop unapproved fields; API fails closed without a server key.
+
+### [9.0.0] - 2026-07-31
+
+#### Added
+- Ten Product Adoption Center capabilities, authenticated API, tests, user guide, API guide, and migration guide.
+
+#### Security
+- Feedback accepts bounded categories only; reports contain aggregate metrics and deterministic hashes; API fails closed without a key.

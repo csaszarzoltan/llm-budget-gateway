@@ -87,6 +87,6 @@ async def test_console_api_serves_page_catalog_and_health():
     assert page.status_code == 200
     assert "LLM Budget Gateway Console" in page.text
     payload = result.json()
-    assert payload["version"] == "7.1.0"
+    assert payload["version"] == "8.0.0"
     assert payload["center_count"] == 15
     assert payload["capability_count"] == sum(len(x.capabilities) for x in CENTERS)
