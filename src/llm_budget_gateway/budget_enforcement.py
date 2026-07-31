@@ -12,6 +12,7 @@ from __future__ import annotations
 
 import calendar
 import time
+from collections import OrderedDict
 from collections.abc import Callable
 from dataclasses import dataclass
 from pathlib import Path
@@ -24,6 +25,11 @@ if TYPE_CHECKING:  # pragma: no cover
     from .cost_tracking import CostTracker, UsageRecord
 
 _SCOPE_KINDS = ("global", "team", "user", "key")
+
+#: Bounded-cache cap for window-bucket counters. Oldest buckets are evicted
+#: past this size so long uptime does not grow memory without bound (review
+#: minor: InMemoryCounterStore keys were never pruned).
+_MAX_COUNTER_BUCKETS = 10_000
 
 
 @dataclass(frozen=True)
@@ -87,18 +93,27 @@ class CounterStore(Protocol):
 class InMemoryCounterStore:
     """Thread-safe dict-based CounterStore for v0.1 single-node operation.
 
-    Window buckets are keyed ``f"{scope_key}:{window}:{bucket_epoch}"``.
+    Window buckets are keyed ``f"{scope_key}:{window}:{bucket_epoch}"``. The
+    backing map is an LRU-bounded OrderedDict: past ``_MAX_COUNTER_BUCKETS``
+    the oldest bucket is evicted on write, bounding memory on long uptime.
     """
 
     def __init__(self) -> None:
-        self._counters: dict[str, int] = {}
+        self._counters: OrderedDict[str, int] = OrderedDict()
         self._lock = Lock()
 
     def increment(self, key: str, amount: int = 1) -> int:
         """Atomically add ``amount`` to ``key`` and return the new value."""
         with self._lock:
-            value = self._counters.get(key, 0) + amount
-            self._counters[key] = value
+            if key in self._counters:
+                value = self._counters[key] + amount
+                self._counters[key] = value
+                self._counters.move_to_end(key)
+            else:
+                value = amount
+                self._counters[key] = value
+            while len(self._counters) > _MAX_COUNTER_BUCKETS:
+                self._counters.popitem(last=False)
             return value
 
     def get(self, key: str) -> int:

@@ -352,6 +352,23 @@ class TestCheckSyncBehavior:
         )
 
 
+class TestInMemoryCounterStorePruning:
+    def test_oldest_buckets_evicted_past_cap(self) -> None:
+        """Review minor: window-bucket keys must be pruned so long uptime does
+        not grow memory without bound (oldest bucket evicted first)."""
+        from llm_budget_gateway.budget_enforcement import _MAX_COUNTER_BUCKETS
+
+        store = InMemoryCounterStore()
+        for i in range(_MAX_COUNTER_BUCKETS + 5):
+            store.increment(f"key:sk:30s:{i}", 1)
+        # newest buckets still present
+        assert store.get(f"key:sk:30s:{_MAX_COUNTER_BUCKETS + 4}") == 1
+        assert store.get(f"key:sk:30s:{_MAX_COUNTER_BUCKETS}") == 1
+        # the five oldest buckets were evicted (read back as zero)
+        for i in range(5):
+            assert store.get(f"key:sk:30s:{i}") == 0
+
+
 class TestCheckHardBehavior:
     @pytest.fixture
     def key_scope(self) -> BudgetScope:

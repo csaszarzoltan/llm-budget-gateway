@@ -90,10 +90,20 @@ def create_app(settings: Settings | None = None) -> FastAPI:
 
     @app.get("/v1/models")
     async def list_models() -> JSONResponse:
+        # Aligned with the M1 decision (_model_known): the gateway accepts
+        # gateway-configured models (overrides + fallback chains) AND any
+        # litellm-known model (forwarded via litellm anyway), so the listing
+        # mirrors exactly what the request path will serve.
         models: set[str] = set(settings.pricing_overrides)
         for cfg in fallback_configs:
             models.add(cfg.model)
             models.update(cfg.chain)
+        try:
+            import litellm
+
+            models.update(litellm.model_cost)
+        except Exception:  # pragma: no cover - litellm is a hard dep
+            pass
         return JSONResponse(
             {
                 "object": "list",

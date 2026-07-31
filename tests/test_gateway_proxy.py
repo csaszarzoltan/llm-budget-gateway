@@ -12,6 +12,7 @@ Normative interface: analysis/analysis-brief.md §4 P0-1.
 from __future__ import annotations
 
 import inspect
+import json
 from dataclasses import fields, is_dataclass
 from types import SimpleNamespace
 from unittest.mock import AsyncMock, Mock
@@ -24,6 +25,13 @@ from llm_budget_gateway.budget_enforcement import (
     RateLimitExceededError,
 )
 from llm_budget_gateway.config import Settings
+from llm_budget_gateway.cost_tracking import (
+    CostCalculator,
+    CostStore,
+    CostTracker,
+    ModelPrice,
+    PriceMap,
+)
 from llm_budget_gateway.gateway_proxy import ApiKeyError, GatewayProxy, ProviderResponse
 from llm_budget_gateway.main import create_app
 from llm_budget_gateway.model_fallback import FallbackConfig, FallbackManager
@@ -279,6 +287,57 @@ class TestRequestHandlingBehavior:
         )
         assert isinstance(result, ProviderResponse)
         assert result.status_code == 401
+
+    @pytest.mark.asyncio
+    async def test_client_errors_do_not_leak_key_or_exception_text(
+        self, settings: Settings
+    ) -> None:
+        """M4: client-visible errors are generic. The submitted api key must
+        not be echoed back (401) and raw provider exception text must not be
+        forwarded (502) — details stay in server-side logs."""
+        secret = "sk_test_supersecretvalue123"
+        proxy = GatewayProxy(
+            settings=settings,
+            cost_tracker=Mock(),
+            budget_enforcer=Mock(),
+            fallback_manager=Mock(),
+        )
+        result = await proxy.handle_chat_completion(
+            {"model": "gpt-4o", "messages": [{"role": "user", "content": "hi"}]},
+            secret,
+            {},
+        )
+        assert result.status_code == 401
+        body_401 = json.dumps(result.body)
+        assert secret not in body_401
+        assert "unknown api key" not in body_401
+
+        # provider failure path: a real manager routes through dispatch, and
+        # the raw exception text (incl. the submitted key) must not leak.
+        proxy2 = GatewayProxy(
+            settings=settings,
+            cost_tracker=Mock(),
+            budget_enforcer=Mock(),
+            fallback_manager=FallbackManager([]),
+        )
+
+        async def _boom(model: str, body: dict, stream: bool = False):
+            raise RuntimeError(
+                f"litellm AuthenticationError: {secret} invalid, "
+                "base_url https://evil.example.com refused"
+            )
+
+        proxy2.forward = AsyncMock(side_effect=_boom)  # type: ignore[method-assign]
+        result2 = await proxy2.handle_chat_completion(
+            {"model": "gpt-4o", "messages": [{"role": "user", "content": "hi"}]},
+            "sk_test_abc",
+            {},
+        )
+        assert result2.status_code == 502
+        body_502 = json.dumps(result2.body)
+        assert secret not in body_502
+        assert "AuthenticationError" not in body_502
+        assert "evil.example.com" not in body_502
 
     @pytest.mark.asyncio
     async def test_budget_exhausted_maps_to_412(
@@ -559,6 +618,66 @@ class TestForwardBehavior:
         assert result.usage is None
         assert isinstance(result.body, list)
         assert result.model == "gpt-4o"
+
+
+class TestStreamingCostRecording:
+    @pytest.mark.asyncio
+    async def test_stream_true_records_aggregated_usage(
+        self, settings: Settings, tmp_path, mocker
+    ) -> None:
+        """BLOCKER 3: stream=true through handle_chat_completion must produce
+        a cost record with non-zero (aggregated) usage so spend_since reflects
+        streamed spend — no dollar hard-budget bypass."""
+        store = CostStore(str(tmp_path / "ledger.db"))
+        calculator = CostCalculator(
+            PriceMap(
+                overrides={
+                    "gpt-4o": ModelPrice(
+                        input_cost_per_million=1.0, output_cost_per_million=2.0
+                    )
+                }
+            )
+        )
+        tracker = CostTracker(store=store, calculator=calculator)
+        proxy = GatewayProxy(
+            settings=settings,
+            cost_tracker=tracker,
+            budget_enforcer=Mock(),
+            fallback_manager=FallbackManager([]),
+        )
+
+        async def _chunks():
+            yield SimpleNamespace(
+                model="gpt-4o",
+                usage=SimpleNamespace(
+                    prompt_tokens=10, completion_tokens=5, total_tokens=15
+                ),
+            )
+            yield SimpleNamespace(
+                model="gpt-4o",
+                usage=SimpleNamespace(
+                    prompt_tokens=0, completion_tokens=3, total_tokens=3
+                ),
+            )
+
+        litellm = mocker.patch("litellm.acompletion", new=AsyncMock())
+        litellm.return_value = _chunks()
+
+        result = await proxy.handle_chat_completion(
+            {
+                "model": "gpt-4o",
+                "messages": [{"role": "user", "content": "hi"}],
+                "stream": True,
+            },
+            "sk_test_abc",
+            {},
+        )
+        assert result.status_code == 200
+        assert result.usage is not None
+        assert result.usage.total_tokens == 18
+        # the aggregated usage was persisted: spend_since reflects streamed spend
+        assert store.spend_since("key:key1", 0) > 0.0
+        store.close()
 
 
 class TestResolveScopesBehavior:
