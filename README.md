@@ -121,3 +121,9 @@ The control center now defines six responsive, WCAG-oriented product pages: guid
 Version 0.4 adds a tenant-scoped governance service covering approval-gated automation recommendations, deterministic compliance evidence packages, identity membership authorization, explainable FinOps anomaly forecasts, guarded reliability recovery, and retention/residency enforcement. The implementation is in `llm_budget_gateway.governance.GovernanceService`; it uses additive SQLite tables, redacts prompt/secret fields, requires explicit roles, and never applies automation without approval. Existing data-plane and control-plane APIs remain compatible.
 
 Run `PYTHONPATH=src python -m pytest -q tests/test_governance_suite.py`.
+
+## Enterprise control suite
+
+Version 0.5 adds four-eyes approvals with expiry and idempotency, continuous control evidence with freshness reporting and deterministic integrity hashes, tenant-isolated SCIM provisioning and access reviews, explainable quality/cost/latency model selection, privacy export/delete cases with legal holds, and approval-gated agent tool execution with per-tool cost ceilings. The additive implementation lives in `llm_budget_gateway.enterprise_features.EnterprisePlatform`. Existing gateway, control-plane, governance, and UI contracts remain unchanged.
+
+Run `PYTHONPATH=src python -m pytest -q tests/test_enterprise_features.py`.

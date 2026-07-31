@@ -97,3 +97,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Added approval-gated automation and reliability recommendations.
 - Added tenant identity membership authorization and deterministic evidence exports.
 - Added explainable spend anomaly forecasts and privacy retention/residency enforcement.
+
+### [0.5.0] - 2026-07-31
+- Added four-eyes approval orchestration and continuous compliance evidence freshness.
+- Added SCIM lifecycle, access reviews, quality-aware routing, privacy request cases, and governed agent tool runs.

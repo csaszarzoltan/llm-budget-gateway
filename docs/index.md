@@ -61,3 +61,4 @@ virtualenv and print their own output:
 - [Control Center](control-center.md) - dashboard, admin API, RBAC, reservations, policy, alerts and routing.
 - [Product UI suite](product-ui.md) - six accessible operational workspaces and recovery patterns.
 - [Governance and automation suite](governance-suite.md) - identity, evidence, FinOps, guarded recovery and privacy controls.
+- [Enterprise control suite](enterprise-control-suite.md) - approvals, evidence, SCIM, model routing, privacy cases and tool governance.
