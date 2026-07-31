@@ -17,8 +17,12 @@ class Settings(BaseSettings):
     database_url: str = "sqlite:///./gateway.db"
     budget_config_path: str = "budgets.yaml"
     virtual_keys: dict[str, str] = {}  # api_key -> key_id (v0.1 static table)
-    user_header_mappings: dict[str, str] = {}  # header_name -> scope_kind ("user"|"team")
-    pricing_overrides: dict[str, dict] = {}  # model -> {"input_cost_per_million": x, "output_cost_per_million": y}
+    user_header_mappings: dict[
+        str, str
+    ] = {}  # header_name -> scope_kind ("user"|"team")
+    pricing_overrides: dict[
+        str, dict
+    ] = {}  # model -> {"input_cost_per_million": x, "output_cost_per_million": y}
     fallback_configs: list[dict] = []  # raw FallbackConfig dicts
 
     model_config = SettingsConfigDict(env_prefix="GATEWAY_")

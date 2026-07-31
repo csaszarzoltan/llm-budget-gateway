@@ -29,7 +29,6 @@ from llm_budget_gateway.cost_tracking import (
     accumulate_usage,
 )
 
-
 # ---------------------------------------------------------------------------
 # Fixtures
 # ---------------------------------------------------------------------------
@@ -240,7 +239,15 @@ class TestCostTrackerInterface:
             "latency_ms",
             "status",
         ]
-        for name in ("request_id", "scope", "model", "provider", "usage", "latency_ms", "status"):
+        for name in (
+            "request_id",
+            "scope",
+            "model",
+            "provider",
+            "usage",
+            "latency_ms",
+            "status",
+        ):
             assert sig.parameters[name].kind == inspect.Parameter.KEYWORD_ONLY
         assert "UsageRecord" in str(sig.return_annotation)
 
@@ -260,20 +267,29 @@ class TestCostMathBehavior:
         ],
     )
     def test_calculate_matches_litellm_baseline(
-        self, calculator: CostCalculator, model: str, prompt_tokens: int, completion_tokens: int
+        self,
+        calculator: CostCalculator,
+        model: str,
+        prompt_tokens: int,
+        completion_tokens: int,
     ) -> None:
         import litellm
 
         price = litellm.model_cost[model]
         expected_input = prompt_tokens * price["input_cost_per_token"]
         expected_output = completion_tokens * price["output_cost_per_token"]
-        input_cost, output_cost, total_cost = calculator.calculate(model, prompt_tokens, completion_tokens)
+        input_cost, output_cost, total_cost = calculator.calculate(
+            model, prompt_tokens, completion_tokens
+        )
         assert input_cost == pytest.approx(expected_input, abs=1e-9)
         assert output_cost == pytest.approx(expected_output, abs=1e-9)
         assert total_cost == pytest.approx(expected_input + expected_output, abs=1e-9)
 
     def test_calculate_override_wins(self, price_map: PriceMap) -> None:
-        price_map.add_override("gpt-4o", ModelPrice(input_cost_per_million=100.0, output_cost_per_million=200.0))
+        price_map.add_override(
+            "gpt-4o",
+            ModelPrice(input_cost_per_million=100.0, output_cost_per_million=200.0),
+        )
         calculator = CostCalculator(price_map)
         input_cost, output_cost, total = calculator.calculate("gpt-4o", 1000, 500)
         assert input_cost == pytest.approx(1000 * 100.0 / 1e6, abs=1e-9)
@@ -301,13 +317,17 @@ class TestCostStoreBehavior:
 
     def test_spend_since_respects_window(self, store: CostStore) -> None:
         store.insert(_sample_record(total_cost=1.0, timestamp=1_700_000_000))
-        store.insert(_sample_record(request_id="req-2", total_cost=2.0, timestamp=1_700_000_100))
+        store.insert(
+            _sample_record(request_id="req-2", total_cost=2.0, timestamp=1_700_000_100)
+        )
         old = store.spend_since("key:sk_abc", since_epoch=1_700_000_050)
         assert old == pytest.approx(2.0, abs=1e-9)
 
     def test_spend_since_ignores_other_scopes(self, store: CostStore) -> None:
         store.insert(_sample_record(total_cost=1.0))  # api_key sk_abc
-        store.insert(_sample_record(request_id="req-2", api_key="sk_other", total_cost=99.0))
+        store.insert(
+            _sample_record(request_id="req-2", api_key="sk_other", total_cost=99.0)
+        )
         total = store.spend_since("key:sk_abc", since_epoch=0)
         assert total == pytest.approx(1.0, abs=1e-9)
 
@@ -333,13 +353,17 @@ class TestCostStoreBehavior:
 
 class TestCostTrackerBehavior:
     @pytest.mark.asyncio
-    async def test_record_persists_via_store(self, tracker: CostTracker, store: CostStore) -> None:
+    async def test_record_persists_via_store(
+        self, tracker: CostTracker, store: CostStore
+    ) -> None:
         await tracker.record(_sample_record(total_cost=1.5))
         total = await tracker.spend_since("key:sk_abc", since_epoch=0)
         assert total == pytest.approx(1.5, abs=1e-9)
 
     @pytest.mark.asyncio
-    async def test_spend_since_delegates_to_store(self, tracker: CostTracker, store: CostStore) -> None:
+    async def test_spend_since_delegates_to_store(
+        self, tracker: CostTracker, store: CostStore
+    ) -> None:
         store.insert(_sample_record(total_cost=2.5))
         total = await tracker.spend_since("key:sk_abc", since_epoch=0)
         assert total == pytest.approx(2.5, abs=1e-9)
@@ -347,19 +371,26 @@ class TestCostTrackerBehavior:
     def test_build_record_computes_cost(
         self, tracker: CostTracker, price_map: PriceMap
     ) -> None:
-        price_map.add_override("gpt-4o", ModelPrice(input_cost_per_million=100.0, output_cost_per_million=200.0))
+        price_map.add_override(
+            "gpt-4o",
+            ModelPrice(input_cost_per_million=100.0, output_cost_per_million=200.0),
+        )
         record = tracker.build_record(
             request_id="req-x",
             scope=BudgetScope(kind="key", key="sk_abc"),
             model="gpt-4o",
             provider="openai",
-            usage=TokenUsage(prompt_tokens=1000, completion_tokens=500, total_tokens=1500),
+            usage=TokenUsage(
+                prompt_tokens=1000, completion_tokens=500, total_tokens=1500
+            ),
             latency_ms=80,
             status="success",
         )
         assert record.input_cost == pytest.approx(1000 * 100.0 / 1e6, abs=1e-9)
         assert record.output_cost == pytest.approx(500 * 200.0 / 1e6, abs=1e-9)
-        assert record.total_cost == pytest.approx(record.input_cost + record.output_cost, abs=1e-9)
+        assert record.total_cost == pytest.approx(
+            record.input_cost + record.output_cost, abs=1e-9
+        )
         assert record.status == "success"
         assert record.latency_ms == 80
 

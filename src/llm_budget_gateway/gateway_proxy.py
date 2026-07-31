@@ -31,7 +31,9 @@ class ProviderResponse:
 
 
 class GatewayProxy:
-    """Owns the request lifecycle: auth -> scopes -> sync enforce -> forward -> cost record."""
+    """Owns the request lifecycle: auth -> scopes -> sync enforce -> forward
+    -> cost record.
+    """
 
     def __init__(
         self,
@@ -45,16 +47,24 @@ class GatewayProxy:
         self._budget_enforcer = budget_enforcer
         self._fallback_manager = fallback_manager
 
-    async def handle_chat_completion(self, body: dict, api_key: str, headers: dict) -> ProviderResponse:
+    async def handle_chat_completion(
+        self, body: dict, api_key: str, headers: dict
+    ) -> ProviderResponse:
         raise NotImplementedError
 
-    async def handle_completion(self, body: dict, api_key: str, headers: dict) -> ProviderResponse:
+    async def handle_completion(
+        self, body: dict, api_key: str, headers: dict
+    ) -> ProviderResponse:
         raise NotImplementedError
 
-    async def handle_embeddings(self, body: dict, api_key: str, headers: dict) -> ProviderResponse:
+    async def handle_embeddings(
+        self, body: dict, api_key: str, headers: dict
+    ) -> ProviderResponse:
         raise NotImplementedError
 
-    async def forward(self, model: str, body: dict, stream: bool = False) -> ProviderResponse:
+    async def forward(
+        self, model: str, body: dict, stream: bool = False
+    ) -> ProviderResponse:
         # Uses litellm.acompletion / litellm.acompletion(stream=True) internally.
         raise NotImplementedError
 

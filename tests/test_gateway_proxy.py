@@ -18,11 +18,14 @@ from unittest.mock import AsyncMock, Mock
 
 import pytest
 
-from llm_budget_gateway.budget_enforcement import BudgetExceededError, BudgetScope, RateLimitExceededError
+from llm_budget_gateway.budget_enforcement import (
+    BudgetExceededError,
+    BudgetScope,
+    RateLimitExceededError,
+)
 from llm_budget_gateway.config import Settings
 from llm_budget_gateway.gateway_proxy import ApiKeyError, GatewayProxy, ProviderResponse
 from llm_budget_gateway.main import create_app
-
 
 # ---------------------------------------------------------------------------
 # Fixtures
@@ -39,7 +42,9 @@ def settings() -> Settings:
 
 @pytest.fixture
 def proxy(settings: Settings) -> GatewayProxy:
-    """GatewayProxy with Mock dependencies (enforcer/fallback stubs raise in __init__)."""
+    """GatewayProxy with Mock dependencies (enforcer/fallback stubs raise
+    in __init__).
+    """
     return GatewayProxy(
         settings=settings,
         cost_tracker=Mock(),
@@ -59,7 +64,14 @@ class TestProviderResponseInterface:
 
     def test_fields(self) -> None:
         names = {f.name for f in fields(ProviderResponse)}
-        assert names == {"status_code", "body", "headers", "model", "usage", "latency_ms"}
+        assert names == {
+            "status_code",
+            "body",
+            "headers",
+            "model",
+            "usage",
+            "latency_ms",
+        }
 
     def test_field_types(self) -> None:
         annotations = ProviderResponse.__annotations__
@@ -89,7 +101,13 @@ class TestGatewayProxyInterface:
     def test_init_signature(self) -> None:
         sig = inspect.signature(GatewayProxy.__init__)
         params = list(sig.parameters)
-        assert params == ["self", "settings", "cost_tracker", "budget_enforcer", "fallback_manager"]
+        assert params == [
+            "self",
+            "settings",
+            "cost_tracker",
+            "budget_enforcer",
+            "fallback_manager",
+        ]
 
     def test_constructible_with_dependencies(self, proxy: GatewayProxy) -> None:
         assert proxy._settings is not None
@@ -193,7 +211,9 @@ class TestCreateAppInterface:
 
 class TestRequestHandlingBehavior:
     @pytest.mark.asyncio
-    async def test_handle_chat_completion_returns_provider_response(self, proxy: GatewayProxy) -> None:
+    async def test_handle_chat_completion_returns_provider_response(
+        self, proxy: GatewayProxy
+    ) -> None:
         result = await proxy.handle_chat_completion(
             {"model": "gpt-4o", "messages": [{"role": "user", "content": "hi"}]},
             "sk_test_abc",
@@ -202,22 +222,34 @@ class TestRequestHandlingBehavior:
         assert isinstance(result, ProviderResponse)
 
     @pytest.mark.asyncio
-    async def test_handle_completion_returns_provider_response(self, proxy: GatewayProxy) -> None:
-        result = await proxy.handle_completion({"model": "gpt-4o", "prompt": "hi"}, "sk_test_abc", {})
+    async def test_handle_completion_returns_provider_response(
+        self, proxy: GatewayProxy
+    ) -> None:
+        result = await proxy.handle_completion(
+            {"model": "gpt-4o", "prompt": "hi"}, "sk_test_abc", {}
+        )
         assert isinstance(result, ProviderResponse)
 
     @pytest.mark.asyncio
-    async def test_handle_embeddings_returns_provider_response(self, proxy: GatewayProxy) -> None:
-        result = await proxy.handle_embeddings({"model": "text-embedding-3-small", "input": "hi"}, "sk_test_abc", {})
+    async def test_handle_embeddings_returns_provider_response(
+        self, proxy: GatewayProxy
+    ) -> None:
+        result = await proxy.handle_embeddings(
+            {"model": "text-embedding-3-small", "input": "hi"}, "sk_test_abc", {}
+        )
         assert isinstance(result, ProviderResponse)
 
     @pytest.mark.asyncio
-    async def test_request_interception_order(self, proxy: GatewayProxy, mocker) -> None:
+    async def test_request_interception_order(
+        self, proxy: GatewayProxy, mocker
+    ) -> None:
         """auth -> scopes -> sync enforce -> forward -> cost record."""
         order: list[str] = []
 
-        proxy.resolve_scopes = AsyncMock(  # type: ignore[method-assign]
-            side_effect=lambda *a: order.append("scopes") or [BudgetScope("key", "key1")]
+        proxy.resolve_scopes = Mock(  # type: ignore[method-assign]
+            side_effect=lambda *a: (
+                order.append("scopes") or [BudgetScope("key", "key1")]
+            )
         )
 
         enforcer = proxy._budget_enforcer
@@ -228,8 +260,10 @@ class TestRequestHandlingBehavior:
         tracker.record = AsyncMock(side_effect=lambda *a: order.append("record"))
 
         proxy.forward = AsyncMock(  # type: ignore[method-assign]
-            side_effect=lambda *a: order.append("forward")
-            or ProviderResponse(200, {}, {}, "gpt-4o", None, 5)
+            side_effect=lambda *a: (
+                order.append("forward")
+                or ProviderResponse(200, {}, {}, "gpt-4o", None, 5)
+            )
         )
 
         await proxy.handle_chat_completion({"model": "gpt-4o"}, "sk_test_abc", {})
@@ -239,30 +273,42 @@ class TestRequestHandlingBehavior:
 
     @pytest.mark.asyncio
     async def test_unknown_key_maps_to_401(self, proxy: GatewayProxy) -> None:
-        result = await proxy.handle_chat_completion({"model": "gpt-4o"}, "sk_unknown", {})
+        result = await proxy.handle_chat_completion(
+            {"model": "gpt-4o"}, "sk_unknown", {}
+        )
         assert isinstance(result, ProviderResponse)
         assert result.status_code == 401
 
     @pytest.mark.asyncio
-    async def test_budget_exhausted_maps_to_412(self, proxy: GatewayProxy, mocker) -> None:
+    async def test_budget_exhausted_maps_to_412(
+        self, proxy: GatewayProxy, mocker
+    ) -> None:
         enforcer = proxy._budget_enforcer
         enforcer.check_hard = AsyncMock(
-            side_effect=BudgetExceededError(BudgetScope("key", "key1"), spend=10.0, limit=5.0)
+            side_effect=BudgetExceededError(
+                BudgetScope("key", "key1"), spend=10.0, limit=5.0
+            )
         )
-        proxy.resolve_scopes = AsyncMock(return_value=[BudgetScope("key", "key1")])  # type: ignore[method-assign]
+        proxy.resolve_scopes = Mock(return_value=[BudgetScope("key", "key1")])  # type: ignore[method-assign]
         proxy.forward = AsyncMock(  # type: ignore[method-assign]
             return_value=ProviderResponse(200, {}, {}, "gpt-4o", None, 5)
         )
-        result = await proxy.handle_chat_completion({"model": "gpt-4o"}, "sk_test_abc", {})
+        result = await proxy.handle_chat_completion(
+            {"model": "gpt-4o"}, "sk_test_abc", {}
+        )
         assert result.status_code == 412
 
     @pytest.mark.asyncio
     async def test_rate_limited_maps_to_429(self, proxy: GatewayProxy) -> None:
         enforcer = proxy._budget_enforcer
         enforcer.check_sync = Mock(
-            side_effect=RateLimitExceededError(BudgetScope("key", "key1"), limit_type="tpm", limit=1000)
+            side_effect=RateLimitExceededError(
+                BudgetScope("key", "key1"), limit_type="tpm", limit=1000
+            )
         )
-        result = await proxy.handle_chat_completion({"model": "gpt-4o"}, "sk_test_abc", {})
+        result = await proxy.handle_chat_completion(
+            {"model": "gpt-4o"}, "sk_test_abc", {}
+        )
         assert result.status_code == 429
 
     @pytest.mark.asyncio
@@ -272,17 +318,23 @@ class TestRequestHandlingBehavior:
         proxy.forward = AsyncMock(  # type: ignore[method-assign]
             side_effect=RuntimeError("all fallbacks exhausted")
         )
-        result = await proxy.handle_chat_completion({"model": "gpt-4o"}, "sk_test_abc", {})
+        result = await proxy.handle_chat_completion(
+            {"model": "gpt-4o"}, "sk_test_abc", {}
+        )
         assert result.status_code == 502
 
 
 class TestForwardBehavior:
     @pytest.mark.asyncio
-    async def test_forward_delegates_to_litellm(self, proxy: GatewayProxy, mocker) -> None:
+    async def test_forward_delegates_to_litellm(
+        self, proxy: GatewayProxy, mocker
+    ) -> None:
         litellm = mocker.patch("litellm.acompletion", new=AsyncMock())
         litellm.return_value = SimpleNamespace(
             choices=[],
-            usage=SimpleNamespace(prompt_tokens=10, completion_tokens=5, total_tokens=15),
+            usage=SimpleNamespace(
+                prompt_tokens=10, completion_tokens=5, total_tokens=15
+            ),
             model="gpt-4o",
         )
         result = await proxy.forward("gpt-4o", {"model": "gpt-4o"})
@@ -291,16 +343,22 @@ class TestForwardBehavior:
         assert result.usage.prompt_tokens == 10
 
     @pytest.mark.asyncio
-    async def test_forward_streaming_passthrough(self, proxy: GatewayProxy, mocker) -> None:
+    async def test_forward_streaming_passthrough(
+        self, proxy: GatewayProxy, mocker
+    ) -> None:
         litellm = mocker.patch("litellm.acompletion", new=AsyncMock())
         litellm.return_value = SimpleNamespace(model="gpt-4o")
-        result = await proxy.forward("gpt-4o", {"model": "gpt-4o", "stream": True}, stream=True)
+        result = await proxy.forward(
+            "gpt-4o", {"model": "gpt-4o", "stream": True}, stream=True
+        )
         assert isinstance(result, ProviderResponse)
         assert result.body is not None
 
 
 class TestResolveScopesBehavior:
-    def test_combines_key_user_team_global(self, settings: Settings, proxy: GatewayProxy) -> None:
+    def test_combines_key_user_team_global(
+        self, settings: Settings, proxy: GatewayProxy
+    ) -> None:
         scopes = proxy.resolve_scopes(
             "sk_test_abc",
             {"X-User-Id": "42", "X-Team-Id": "eng"},

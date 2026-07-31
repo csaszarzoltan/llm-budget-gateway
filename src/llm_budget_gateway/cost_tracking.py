@@ -68,13 +68,17 @@ class CostCalculator:
     def __init__(self, price_map: PriceMap) -> None:
         self._price_map = price_map
 
-    def calculate(self, model: str, prompt_tokens: int, completion_tokens: int) -> tuple[float, float, float]:
+    def calculate(
+        self, model: str, prompt_tokens: int, completion_tokens: int
+    ) -> tuple[float, float, float]:
         # returns (input_cost, output_cost, total_cost)
         raise NotImplementedError
 
 
 class CostStore:
-    """SQLite ledger, WAL mode. Table cost_records with indexes on (timestamp), (api_key, timestamp)."""
+    """SQLite ledger, WAL mode. Table cost_records with indexes on
+    (timestamp), (api_key, timestamp).
+    """
 
     def __init__(self, db_path: str) -> None:
         self._db_path = db_path
