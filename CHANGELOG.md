@@ -92,3 +92,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### [0.3.0] - 2026-07-31
 - Added six complete responsive product UI page contracts, accessible state patterns, permission-aware actions, guided setup progress, spend forecasting and operational recovery views.
+
+### [0.4.0] - 2026-07-31
+- Added approval-gated automation and reliability recommendations.
+- Added tenant identity membership authorization and deterministic evidence exports.
+- Added explainable spend anomaly forecasts and privacy retention/residency enforcement.

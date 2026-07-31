@@ -115,3 +115,9 @@ Tests: `PYTHONPATH=src python -m pytest -q tests/test_product_control_plane.py`.
 ## Product UI suite
 
 The control center now defines six responsive, WCAG-oriented product pages: guided setup, spend explorer, key access, policy studio, route health and operations activity. The server-rendered view layer lives in `product_ui.py`, keeps business rules in `control_plane.py`, fails closed for unknown pages, removes secrets from rendered context, and exposes loading, empty, success/recovery and permission-aware states. Run `PYTHONPATH=src python -m pytest -q tests/test_ui_product_suite.py`.
+
+## Governance and automation suite
+
+Version 0.4 adds a tenant-scoped governance service covering approval-gated automation recommendations, deterministic compliance evidence packages, identity membership authorization, explainable FinOps anomaly forecasts, guarded reliability recovery, and retention/residency enforcement. The implementation is in `llm_budget_gateway.governance.GovernanceService`; it uses additive SQLite tables, redacts prompt/secret fields, requires explicit roles, and never applies automation without approval. Existing data-plane and control-plane APIs remain compatible.
+
+Run `PYTHONPATH=src python -m pytest -q tests/test_governance_suite.py`.
