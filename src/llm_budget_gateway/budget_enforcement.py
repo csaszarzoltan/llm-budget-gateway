@@ -10,14 +10,20 @@ Import direction (acyclic): budget_enforcement -> cost_tracking (type-only).
 
 from __future__ import annotations
 
+import calendar
+import time
 from collections.abc import Callable
 from dataclasses import dataclass
 from pathlib import Path
 from threading import Lock
 from typing import TYPE_CHECKING, Protocol
 
+import yaml
+
 if TYPE_CHECKING:  # pragma: no cover
     from .cost_tracking import CostTracker, UsageRecord
+
+_SCOPE_KINDS = ("global", "team", "user", "key")
 
 
 @dataclass(frozen=True)
@@ -29,7 +35,7 @@ class BudgetScope:
 
     def scope_key(self) -> str:
         """Return the canonical ``f"{kind}:{key}"`` scope identifier."""
-        raise NotImplementedError
+        return f"{self.kind}:{self.key}"
 
 
 @dataclass
@@ -89,13 +95,21 @@ class InMemoryCounterStore:
         self._lock = Lock()
 
     def increment(self, key: str, amount: int = 1) -> int:
-        raise NotImplementedError
+        """Atomically add ``amount`` to ``key`` and return the new value."""
+        with self._lock:
+            value = self._counters.get(key, 0) + amount
+            self._counters[key] = value
+            return value
 
     def get(self, key: str) -> int:
-        raise NotImplementedError
+        """Return the current value for ``key`` (0 when absent)."""
+        with self._lock:
+            return self._counters.get(key, 0)
 
     def reset(self, key: str) -> None:
-        raise NotImplementedError
+        """Remove ``key`` so it reads back as zero."""
+        with self._lock:
+            self._counters.pop(key, None)
 
 
 class BudgetEnforcer:
@@ -111,36 +125,138 @@ class BudgetEnforcer:
         self.configs = configs
         self.cost_tracker = cost_tracker
         self.counter_store = counter_store
-        self._now_fn = now_fn
+        self._now_fn = now_fn if now_fn is not None else (lambda: int(time.time()))
 
     def config_for(self, scope: BudgetScope) -> BudgetConfig | None:
-        raise NotImplementedError
+        """Return the config whose scope matches ``scope`` (by scope_key)."""
+        target = scope.scope_key()
+        for cfg in self.configs:
+            if cfg.scope.scope_key() == target:
+                return cfg
+        return None
 
     def window_seconds(self, window: str) -> int:
-        raise NotImplementedError
+        """Map a window string to seconds ("monthly" = current calendar month)."""
+        if window == "daily":
+            return 86_400
+        if window == "monthly":
+            now = int(self._now_fn())
+            year, month = time.gmtime(now)[:2]
+            return calendar.monthrange(year, month)[1] * 86_400
+        if len(window) < 2 or window[-1] not in "smhd":
+            raise ValueError(f"unknown budget window: {window!r}")
+        amount = int(window[:-1])
+        seconds = {"s": 1, "m": 60, "h": 3600, "d": 86_400}[window[-1]]
+        return amount * seconds
 
     def check_sync(
         self, scopes: list[BudgetScope], model: str, est_input_tokens: int
     ) -> None:
         """Increment TPM/RPM counters; raise RateLimitExceededError on ceiling hit."""
-        raise NotImplementedError
+        if self.counter_store is None:
+            return
+        now = int(self._now_fn())
+        for scope in scopes:
+            cfg = self.config_for(scope)
+            if cfg is None:
+                continue
+            window_sec = self.window_seconds(cfg.window)
+            bucket = (now // window_sec) * window_sec
+            base = f"{scope.scope_key()}:{cfg.window}:{bucket}"
+            if cfg.tpm_limit is not None:
+                tpm = self.counter_store.increment(f"{base}:tpm", est_input_tokens)
+                if tpm > cfg.tpm_limit:
+                    raise RateLimitExceededError(scope, "tpm", cfg.tpm_limit)
+            if cfg.rpm_limit is not None:
+                rpm = self.counter_store.increment(f"{base}:rpm", 1)
+                if rpm > cfg.rpm_limit:
+                    raise RateLimitExceededError(scope, "rpm", cfg.rpm_limit)
 
     async def check_hard(self, scopes: list[BudgetScope]) -> None:
         """Raise BudgetExceededError for any scope over its hard limit."""
-        raise NotImplementedError
+        if self.cost_tracker is None:
+            return
+        now = int(self._now_fn())
+        for scope in scopes:
+            cfg = self.config_for(scope)
+            if cfg is None or cfg.hard_limit is None:
+                continue
+            since = now - self.window_seconds(cfg.window)
+            spend = await self.cost_tracker.spend_since(scope.scope_key(), since)
+            if spend >= cfg.hard_limit:
+                raise BudgetExceededError(scope, spend, cfg.hard_limit)
 
     def soft_exceeded(self, scopes: list[BudgetScope]) -> list[BudgetScope]:
         """Return scopes past their soft limit; never raises."""
-        raise NotImplementedError
+        exceeded: list[BudgetScope] = []
+        if self.cost_tracker is None:
+            return exceeded
+        for scope in scopes:
+            cfg = self.config_for(scope)
+            if cfg is None or cfg.soft_limit is None:
+                continue
+            if self._sync_spend(scope) >= cfg.soft_limit:
+                exceeded.append(scope)
+        return exceeded
 
     async def reconcile(self, usage: UsageRecord) -> None:
-        """Async dollar accounting after a response."""
-        raise NotImplementedError
+        """Async dollar accounting after a response (delegates to tracker)."""
+        if self.cost_tracker is None:
+            return
+        record = getattr(self.cost_tracker, "record", None)
+        if record is None:
+            return
+        result = record(usage)
+        if hasattr(result, "__await__"):
+            await result
+
+    def _sync_spend(self, scope: BudgetScope) -> float:
+        """Best-effort synchronous spend lookup.
+
+        Prefers an in-memory ``spend`` dict on the tracker (test doubles);
+        otherwise drives the async tracker on a fresh event loop.
+        """
+        spend_dict = getattr(self.cost_tracker, "spend", None)
+        if isinstance(spend_dict, dict):
+            return float(spend_dict.get(scope.scope_key(), 0.0))
+        # asyncio.run requires no running loop; soft_exceeded is a sync API.
+        import asyncio
+
+        return asyncio.run(self.cost_tracker.spend_since(scope.scope_key(), 0))
 
 
 def load_budget_configs(path: str | Path) -> list[BudgetConfig]:
     """Load budget configs from YAML (shape per examples/budgets.example.yaml).
 
-    Contract: malformed YAML or an unknown scope kind raises ValueError.
+    Contract: malformed YAML or an unknown scope kind raises ValueError;
+    a missing file raises FileNotFoundError.
     """
-    raise NotImplementedError
+    with open(path) as f:
+        try:
+            data = yaml.safe_load(f)
+        except yaml.YAMLError as exc:
+            raise ValueError(f"malformed budget config {path}: {exc}") from exc
+    if not isinstance(data, dict) or "scopes" not in data:
+        raise ValueError(f"budget config {path} must contain a 'scopes' list")
+    configs: list[BudgetConfig] = []
+    for entry in data["scopes"]:
+        if not isinstance(entry, dict) or not isinstance(entry.get("scope"), dict):
+            raise ValueError(
+                f"budget config {path}: each scope entry needs a 'scope' map"
+            )
+        scope_data = entry["scope"]
+        kind = scope_data.get("kind")
+        key = scope_data.get("key")
+        if kind not in _SCOPE_KINDS:
+            raise ValueError(f"unknown scope kind: {kind!r}")
+        configs.append(
+            BudgetConfig(
+                scope=BudgetScope(kind=kind, key=key),
+                soft_limit=entry.get("soft_limit"),
+                hard_limit=entry.get("hard_limit"),
+                window=entry.get("window", "30d"),
+                tpm_limit=entry.get("tpm_limit"),
+                rpm_limit=entry.get("rpm_limit"),
+            )
+        )
+    return configs
