@@ -208,3 +208,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ### Security
 - Platform endpoints fail closed without `GATEWAY_PLATFORM_API_KEY`.
 - DLP does not return detected secret values and export manifests reject unsafe paths.
+
+
+## [3.0.0] - 2026-07-31
+### Added
+- Twenty AgentOps capabilities, authenticated API, and accessible responsive dashboard.
+- Research, roadmap, validation, migration, API, GitLab, and twenty ADR documents.
+### Security
+- Replay verification, tool policy, redaction, injection scoring, approval gates, audit chains, and residency enforcement.

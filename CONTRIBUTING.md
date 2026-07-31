@@ -12,3 +12,5 @@ Collaboration changes require privilege-boundary tests and dedicated branches.
 
 
 Platform capabilities require a dedicated branch, public docstrings, unit and API contract tests, fail-closed validation, and full regression before merge.
+
+AgentOps changes require dedicated branches, public docstrings, fail-closed validation, unit/API/UI tests, and full regression.

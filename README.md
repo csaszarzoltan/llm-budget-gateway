@@ -173,3 +173,7 @@ Project roles, one-time invitations, key lifecycle, member budgets and delegated
 ## Platform Center 2.0
 
 Version 2.0 adds twenty catalog, FinOps, reliability, compliance, quality, release, and adoption capabilities. Set `GATEWAY_PLATFORM_API_KEY`, run `uvicorn llm_budget_gateway.platform_api:create_platform_app --factory --port 8009`, and open `/platform` or `/docs`. See `docs/platform-center.md`.
+
+
+## AgentOps Center 3.0
+Twenty MCP, security, reliability, observability, FinOps, sustainability, support, localization, and residency controls. Configure `GATEWAY_AGENTOPS_API_KEY` and see `docs/agentops-center.md`.
