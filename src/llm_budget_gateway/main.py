@@ -135,11 +135,23 @@ def _sqlite_path(database_url: str) -> str:
 
 
 def _provider_response(response: ProviderResponse) -> Response:
-    """Convert a ProviderResponse into a FastAPI Response (SSE passthrough)."""
+    """Convert a ProviderResponse into a FastAPI Response.
+
+    Dict bodies become JSON; stream=true bodies are already serialized SSE
+    lines (``data: <json>`` + ``data: [DONE]``) and are streamed as
+    ``text/event-stream``.
+    """
     headers = dict(response.headers or {})
     if isinstance(response.body, dict):
         return JSONResponse(
             content=response.body, status_code=response.status_code, headers=headers
+        )
+    if isinstance(response.body, list):
+        return StreamingResponse(
+            content=response.body,
+            status_code=response.status_code,
+            headers=headers,
+            media_type="text/event-stream",
         )
     if isinstance(response.body, str):
         return Response(

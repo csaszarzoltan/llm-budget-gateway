@@ -24,5 +24,10 @@ class Settings(BaseSettings):
         str, dict
     ] = {}  # model -> {"input_cost_per_million": x, "output_cost_per_million": y}
     fallback_configs: list[dict] = []  # raw FallbackConfig dicts
+    #: Max seconds to wait for the upstream provider (first byte + each
+    #: subsequent stream chunk) before failing the request. Env
+    #: ``GATEWAY_PROVIDER_TIMEOUT``. A hung upstream must never hang the
+    #: worker indefinitely (availability review checklist item 2).
+    provider_timeout: float = 60.0
 
     model_config = SettingsConfigDict(env_prefix="GATEWAY_")

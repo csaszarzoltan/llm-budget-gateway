@@ -8,7 +8,9 @@ analysis brief §4 P0-1.
 
 from __future__ import annotations
 
+import asyncio
 import inspect
+import json
 import logging
 import time
 from dataclasses import dataclass
@@ -75,6 +77,15 @@ class ApiKeyError(Exception):
     """Raised when the virtual API key is missing or unknown (HTTP 401)."""
 
 
+class ProviderTimeoutError(TimeoutError):
+    """Raised when the upstream provider does not respond (or a stream chunk
+    does not arrive) within ``Settings.provider_timeout`` seconds.
+
+    Subclasses ``TimeoutError`` so the fallback manager classifies it as
+    ``timeout`` and retries down the chain when configured.
+    """
+
+
 @dataclass
 class ProviderResponse:
     status_code: int
@@ -131,7 +142,11 @@ class GatewayProxy:
         try:
             scopes = self.resolve_scopes(api_key, headers)
         except ApiKeyError:
-            logger.warning("auth failed request=%s key=%r", request_id, api_key)
+            logger.warning(
+                "auth failed request=%s key=%r",
+                request_id,
+                self._redact_key(api_key),
+            )
             return self._error_response(401, "invalid or missing api key", model)
 
         if not self._model_known(model):
@@ -154,6 +169,17 @@ class GatewayProxy:
             response = await self._forward_with_fallback(
                 model, body, api_key, headers
             )
+        except ProviderTimeoutError:
+            logger.warning("provider timeout request=%s model=%s", request_id, model)
+            await self._record(
+                request_id=request_id,
+                scope=scopes[0],
+                model=model,
+                usage=None,
+                latency_ms=0,
+                status="timeout",
+            )
+            return self._error_response(502, "upstream provider timed out", model)
         except Exception as exc:
             logger.warning(
                 "provider error request=%s model=%s: %s",
@@ -196,10 +222,17 @@ class GatewayProxy:
     async def forward(
         self, model: str, body: dict, stream: bool = False
     ) -> ProviderResponse:
-        """Forward to the provider via litellm.acompletion (stream-aware).
+        """Forward to the provider via litellm (stream-aware, timeout-bounded).
+
+        Routes embeddings bodies (``input`` without ``messages``/``prompt``)
+        to ``litellm.aembedding``; chat/completions bodies go to
+        ``litellm.acompletion``. Stream=true bodies are drained, their usage
+        aggregated and the chunks serialized into SSE lines (``data: <json>``
+        framing + terminal ``data: [DONE]``) so the HTTP layer can stream
+        them instead of crashing on raw chunk objects.
 
         Returns a ProviderResponse carrying usage, latency and the
-        provider-shaped body (dict for non-stream, drained chunk list for
+        provider-shaped body (dict for non-stream, SSE line list for
         stream=true).
         """
         start = time.perf_counter()
@@ -207,10 +240,31 @@ class GatewayProxy:
         # client body (provider auth/endpoint come from gateway settings/env).
         kwargs = {k: v for k, v in body.items() if k in _FORWARD_ALLOWLIST}
         kwargs["model"] = model  # gateway decides the model (fallback-aware)
-        is_stream = stream or bool(body.get("stream"))
+        # Embeddings use litellm.aembedding — acompletion has no ``input``
+        # param and would error/misroute. Detect by body shape: ``input``
+        # without chat (messages) or legacy-completion (prompt) markers.
+        is_embedding = (
+            "input" in body and "messages" not in body and "prompt" not in body
+        )
+        is_stream = (not is_embedding) and (stream or bool(body.get("stream")))
         if is_stream:
             kwargs["stream"] = True
-        response = await litellm.acompletion(**kwargs)
+        try:
+            if is_embedding:
+                response = await asyncio.wait_for(
+                    litellm.aembedding(**kwargs),
+                    timeout=self._settings.provider_timeout,
+                )
+            else:
+                response = await asyncio.wait_for(
+                    litellm.acompletion(**kwargs),
+                    timeout=self._settings.provider_timeout,
+                )
+        except TimeoutError as exc:
+            raise ProviderTimeoutError(
+                f"upstream provider timed out after "
+                f"{self._settings.provider_timeout}s"
+            ) from exc
 
         usage: TokenUsage | None = None
         body_out: dict | str | list
@@ -218,13 +272,19 @@ class GatewayProxy:
 
         if is_stream and hasattr(response, "__aiter__"):
             # Streaming: drain and aggregate chunk usage so the request is
-            # recorded at real cost, not $0 (budget bypass).
+            # recorded at real cost, not $0 (budget bypass). Chunks are then
+            # serialized into SSE lines — StreamingResponse requires
+            # bytes/str, raw litellm chunk objects crash it.
             chunks, usage = await self._drain_stream(response)
-            body_out = chunks
+            body_out = self._sse_lines(chunks)
             if chunks:
-                served_model = getattr(chunks[0], "model", None) or served_model
+                served_model = self._chunk_model(chunks[0]) or served_model
         else:
-            resp_usage = getattr(response, "usage", None)
+            resp_usage = (
+                response.get("usage")
+                if isinstance(response, dict)
+                else getattr(response, "usage", None)
+            )
             if resp_usage is not None:
                 prompt_tokens = getattr(resp_usage, "prompt_tokens", 0) or 0
                 completion_tokens = (
@@ -257,14 +317,20 @@ class GatewayProxy:
     ) -> tuple[list, TokenUsage | None]:
         """Consume an async streaming iterator, aggregating chunk usage.
 
-        Returns ``(chunks, usage)``; usage is None when no chunk carried a
-        usage object (provider did not emit one).
+        Each chunk must arrive within ``Settings.provider_timeout`` seconds;
+        a stalled stream raises ProviderTimeoutError (availability guard,
+        review checklist item 2). Returns ``(chunks, usage)``; usage is None
+        when no chunk carried a usage object (provider did not emit one).
         """
         chunks: list = []
         usage_parts: list[dict] = []
-        async for chunk in response:  # type: ignore[union-attr]
+        async for chunk in self._iter_with_timeout(response):
             chunks.append(chunk)
-            chunk_usage = getattr(chunk, "usage", None)
+            chunk_usage = (
+                chunk.get("usage")
+                if isinstance(chunk, dict)
+                else getattr(chunk, "usage", None)
+            )
             if chunk_usage is not None:
                 usage_parts.append(
                     {
@@ -281,6 +347,84 @@ class GatewayProxy:
                 )
         usage = accumulate_usage(usage_parts) if usage_parts else None
         return chunks, usage
+
+    async def _iter_with_timeout(self, response: object):
+        """Yield each chunk from ``response``, raising ProviderTimeoutError
+        when a chunk does not arrive within ``Settings.provider_timeout``
+        seconds. A healthy stream may run arbitrarily long chunk-to-chunk;
+        only silence past the deadline fails."""
+        aiter = response.__aiter__()  # type: ignore[union-attr]
+        while True:
+            try:
+                chunk = await asyncio.wait_for(
+                    aiter.__anext__(),
+                    timeout=self._settings.provider_timeout,
+                )
+            except StopAsyncIteration:
+                return
+            except TimeoutError as exc:
+                raise ProviderTimeoutError(
+                    f"upstream stream stalled for "
+                    f"{self._settings.provider_timeout}s"
+                ) from exc
+            yield chunk
+
+    @staticmethod
+    def _sse_lines(chunks: list) -> list[str]:
+        """Serialize drained chunks into SSE frames: one ``data: <json>``
+        line per chunk, terminated by ``data: [DONE]`` (OpenAI stream
+        convention)."""
+        lines = [
+            "data: "
+            + json.dumps(
+                GatewayProxy._chunk_to_dict(c),
+                ensure_ascii=False,
+                default=str,
+            )
+            + "\n\n"
+            for c in chunks
+        ]
+        lines.append("data: [DONE]\n\n")
+        return lines
+
+    @staticmethod
+    def _chunk_to_dict(chunk: object) -> dict:
+        """Best-effort plain-dict projection of a stream chunk (litellm
+        ModelResponse, pydantic model, dict or namespace)."""
+        if isinstance(chunk, dict):
+            return chunk
+        for attr in ("model_dump", "dict"):
+            fn = getattr(chunk, attr, None)
+            if callable(fn):
+                try:
+                    result = fn()
+                except Exception:
+                    continue
+                if isinstance(result, dict):
+                    return result
+        if hasattr(chunk, "__dict__"):
+            return dict(vars(chunk))
+        return {"content": str(chunk)}
+
+    @staticmethod
+    def _chunk_model(chunk: object) -> str | None:
+        """The ``model`` field of a chunk (dict- or object-shaped)."""
+        if isinstance(chunk, dict):
+            return chunk.get("model")
+        return getattr(chunk, "model", None)
+
+    @staticmethod
+    def _redact_key(api_key: str) -> str:
+        """Redact a submitted virtual key for logs: first 4 chars + length.
+
+        Server logs are an exfiltration target — the full key must never be
+        written (review finding D).
+        """
+        if not api_key:
+            return "<empty>"
+        if len(api_key) <= 4:
+            return "****"
+        return f"{api_key[:4]}…{len(api_key)}ch"
 
     def resolve_scopes(self, api_key: str, headers: dict) -> list[BudgetScope]:
         """Combine key scope + header-mapped user/team scopes + global scope.
@@ -370,15 +514,25 @@ class GatewayProxy:
         """Convert a non-stream provider response to a plain dict.
 
         Streaming responses pass through as the litellm iterator object.
+        Falls back to a ``vars()`` projection for namespace-shaped objects
+        (test doubles, unusual providers) so the HTTP layer never receives a
+        non-serializable body.
         """
         if stream:
             return response  # type: ignore[return-value]
         if isinstance(response, dict):
             return response
-        if hasattr(response, "model_dump"):
-            return response.model_dump()
-        if hasattr(response, "dict"):
-            return response.dict()
+        for attr in ("model_dump", "dict"):
+            fn = getattr(response, attr, None)
+            if callable(fn):
+                try:
+                    result = fn()
+                except Exception:
+                    continue
+                if isinstance(result, dict):
+                    return result
+        if hasattr(response, "__dict__"):
+            return dict(vars(response))
         return response  # type: ignore[return-value]
 
     @staticmethod
