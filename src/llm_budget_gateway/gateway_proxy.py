@@ -249,6 +249,12 @@ class GatewayProxy:
         is_stream = (not is_embedding) and (stream or bool(body.get("stream")))
         if is_stream:
             kwargs["stream"] = True
+        if is_embedding:
+            # aembedding has no stream support; a client-sent
+            # stream/stream_options (both in _FORWARD_ALLOWLIST) would be
+            # forwarded as-is and 502 upstream. Strip them for embeddings.
+            kwargs.pop("stream", None)
+            kwargs.pop("stream_options", None)
         try:
             if is_embedding:
                 response = await asyncio.wait_for(

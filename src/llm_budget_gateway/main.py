@@ -7,6 +7,8 @@ analysis brief §4 P0-1.
 
 from __future__ import annotations
 
+import json
+
 from fastapi import FastAPI, Request
 from fastapi.responses import JSONResponse, Response, StreamingResponse
 
@@ -66,7 +68,9 @@ def create_app(settings: Settings | None = None) -> FastAPI:
 
     @app.post("/v1/chat/completions")
     async def chat_completions(request: Request) -> Response:
-        body = await request.json()
+        body = await _read_json_body(request)
+        if isinstance(body, ProviderResponse):
+            return _provider_response(body)
         response = await proxy.handle_chat_completion(
             body, _bearer_token(request), dict(request.headers)
         )
@@ -74,7 +78,9 @@ def create_app(settings: Settings | None = None) -> FastAPI:
 
     @app.post("/v1/completions")
     async def completions(request: Request) -> Response:
-        body = await request.json()
+        body = await _read_json_body(request)
+        if isinstance(body, ProviderResponse):
+            return _provider_response(body)
         response = await proxy.handle_completion(
             body, _bearer_token(request), dict(request.headers)
         )
@@ -82,7 +88,9 @@ def create_app(settings: Settings | None = None) -> FastAPI:
 
     @app.post("/v1/embeddings")
     async def embeddings(request: Request) -> Response:
-        body = await request.json()
+        body = await _read_json_body(request)
+        if isinstance(body, ProviderResponse):
+            return _provider_response(body)
         response = await proxy.handle_embeddings(
             body, _bearer_token(request), dict(request.headers)
         )
@@ -116,6 +124,29 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         return JSONResponse({"status": "ok"})
 
     return app
+
+
+async def _read_json_body(request: Request) -> dict | ProviderResponse:
+    """Parse the request body as a JSON object; 400 on malformed input.
+
+    A malformed JSON body must surface as a 400 invalid_request_error —
+    not an unhandled ``json.JSONDecodeError`` (500) — and a non-object
+    body (``[1,2]``, ``"str"``) must be rejected here instead of falling
+    through to ``body.get("model", "")`` (a confusing 404 ``unknown model:
+    ``). Reuses ``GatewayProxy._error_response`` so the error shape stays
+    identical to every other gateway error.
+    """
+    try:
+        body = await request.json()
+    except (json.JSONDecodeError, ValueError):
+        return GatewayProxy._error_response(
+            400, "request body is not valid JSON", ""
+        )
+    if not isinstance(body, dict):
+        return GatewayProxy._error_response(
+            400, "request body must be a JSON object", ""
+        )
+    return body
 
 
 def _bearer_token(request: Request) -> str:
