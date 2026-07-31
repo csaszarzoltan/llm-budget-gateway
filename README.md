@@ -130,54 +130,6 @@ Version 0.5 adds four-eyes approvals with expiry and idempotency, continuous con
 Run `PYTHONPATH=src python -m pytest -q tests/test_enterprise_features.py`.
 
 
-### Gateway Intelligence 0.7
-
-Five market-driven controls are available through `llm_budget_gateway.market_api`:
-
-- local PII redaction for email, phone, and payment-card-like values;
-- tenant-isolated exact response caching with TTL;
-- HMAC-SHA256 signed alert envelopes;
-- explainable cost anomaly detection;
-- cost-aware model routing with health, quality, and latency constraints.
-
-Run `uvicorn llm_budget_gateway.market_api:create_market_app --factory --port 8002`, open `/intelligence`, and use `/docs` for generated OpenAPI. Every intelligence API requires `X-Tenant-Id`. See `docs/feature-specifications.md`, `docs/api/intelligence-api.md`, and `docs/migration-0.7.md`.
-
-
-## Gateway Operations 0.8
-
-Version 0.8 adds five production operations capabilities: immutable tenant-scoped prompt versions with deterministic experiments, bounded retry decisions, actionable quota diagnostics, validated model catalog metadata, and SLO/error-budget monitoring. Set `GATEWAY_OPERATIONS_API_KEY`, run `uvicorn llm_budget_gateway.operations_api:create_operations_app --factory --port 8003`, open `/operations`, and use `/docs` for OpenAPI. See `docs/operations-suite.md`, `docs/api/operations-api.md`, and `docs/migration-0.8.md`.
-
-
-## Gateway Quality 0.9
-
-Version 0.9 adds deterministic evaluation runs, CI-ready release quality gates, privacy-safe trace context, batch manifest planning and integrity-protected audit reports. Set `GATEWAY_EVALUATION_API_KEY`, run `uvicorn llm_budget_gateway.evaluation_api:create_evaluation_app --factory --port 8004`, open `/quality`, and use `/docs` for OpenAPI. See `docs/quality-suite.md`, `docs/api/quality-api.md`, and `docs/migration-0.9.md`.
-
-
-## Security Center 1.0
-
-Five production security controls: local secret scanning, durable webhook replay protection, fail-closed provider compliance, change-risk approvals and posture scoring. Set `GATEWAY_SECURITY_API_KEY`, run `uvicorn llm_budget_gateway.security_api:create_security_app --factory --port 8005`, and open `/security` or `/docs`. See `docs/security-center.md`.
-
-
-## Resilience Center 1.1
-Five production recovery controls. See `docs/resilience-center.md`.
-
-
-## Optimization Center 1.2
-Five cost and performance controls. See `docs/optimization-center.md`.
-
-
-## Collaboration Center 1.3
-Project roles, one-time invitations, key lifecycle, member budgets and delegated approvals. See `docs/collaboration-center.md`.
-
-
-## Platform Center 2.0
-
-Version 2.0 adds twenty catalog, FinOps, reliability, compliance, quality, release, and adoption capabilities. Set `GATEWAY_PLATFORM_API_KEY`, run `uvicorn llm_budget_gateway.platform_api:create_platform_app --factory --port 8009`, and open `/platform` or `/docs`. See `docs/platform-center.md`.
-
-
-## AgentOps Center 3.0
-Twenty MCP, security, reliability, observability, FinOps, sustainability, support, localization, and residency controls. Configure `GATEWAY_AGENTOPS_API_KEY` and see `docs/agentops-center.md`.
-
 
 ## Assurance Center 5.0
 Twenty continuous-assurance capabilities. Configure `GATEWAY_ASSURANCE_API_KEY`; see `docs/assurance-center.md`.
