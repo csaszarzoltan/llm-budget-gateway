@@ -9,3 +9,6 @@ Resilience changes require failure-path tests and dedicated branches.
 Optimization changes require quality guardrails, edge-case tests, and dedicated branches.
 
 Collaboration changes require privilege-boundary tests and dedicated branches.
+
+
+Platform capabilities require a dedicated branch, public docstrings, unit and API contract tests, fail-closed validation, and full regression before merge.

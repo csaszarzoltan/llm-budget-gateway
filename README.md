@@ -168,3 +168,8 @@ Five cost and performance controls. See `docs/optimization-center.md`.
 
 ## Collaboration Center 1.3
 Project roles, one-time invitations, key lifecycle, member budgets and delegated approvals. See `docs/collaboration-center.md`.
+
+
+## Platform Center 2.0
+
+Version 2.0 adds twenty catalog, FinOps, reliability, compliance, quality, release, and adoption capabilities. Set `GATEWAY_PLATFORM_API_KEY`, run `uvicorn llm_budget_gateway.platform_api:create_platform_app --factory --port 8009`, and open `/platform` or `/docs`. See `docs/platform-center.md`.

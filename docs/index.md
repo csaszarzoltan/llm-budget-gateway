@@ -81,3 +81,7 @@ virtualenv and print their own output:
 - [Optimization Center](optimization-center.md)
 
 - [Collaboration Center](collaboration-center.md)
+
+- [Platform Center](platform-center.md)
+- [Platform API](api/platform-api.md)
+- [Platform Research](research/platform-research-2026-07-31.md)

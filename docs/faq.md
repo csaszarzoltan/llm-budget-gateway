@@ -29,3 +29,6 @@
 **Why 503?** Configure `GATEWAY_OPTIMIZATION_API_KEY`.
 
 **Why 503?** Configure `GATEWAY_COLLABORATION_API_KEY`.
+
+
+**Why does Platform API return 503?** Configure `GATEWAY_PLATFORM_API_KEY`. **Does Platform Center replace existing APIs?** No, version 2.0 is additive. **Are DLP values logged?** No, only finding categories are returned.

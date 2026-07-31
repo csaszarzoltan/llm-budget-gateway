@@ -196,3 +196,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Project-scoped RBAC, one-time invitations, key lifecycle guidance, member budget/key caps, delegated approvals, and accessible Collaboration Center.
 ### Security
 - APIs fail closed without `GATEWAY_COLLABORATION_API_KEY`; invitation plaintext is never persisted.
+
+
+## [2.0.0] - 2026-07-31
+
+### Added
+- Twenty Platform Center capabilities covering catalogs, tags, allocation, quotas, alerts, SLOs, incidents, retention, DLP, routing, scorecards, canaries, rollback, feedback, drift, datasets, integrity, contracts, and adoption.
+- Authenticated generic Platform API and responsive accessible light/dark dashboard.
+- Twenty ADRs, research, roadmap, validation, migration, API, and GitLab documentation.
+
+### Security
+- Platform endpoints fail closed without `GATEWAY_PLATFORM_API_KEY`.
+- DLP does not return detected secret values and export manifests reject unsafe paths.
