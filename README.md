@@ -65,6 +65,7 @@ runs without a key or network:
 | Status | Meaning |
 |---|---|
 | `200` | Provider response (JSON, or SSE stream for `stream=true`) |
+| `400` | Malformed request body (invalid JSON, or a non-object JSON value) |
 | `401` | Missing / unknown virtual API key |
 | `404` | Unknown model |
 | `412` | Hard dollar budget exceeded (Portkey convention) |

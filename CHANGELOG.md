@@ -47,6 +47,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   HTTP layer (raw chunk objects no longer crash `StreamingResponse`);
   per-chunk stream timeout; embeddings routed to `aembedding`; full
   virtual key redacted in auth-failure logs
+- **Boundary input validation (review round 3)** — malformed JSON /
+  non-object request bodies now map to `400` instead of an unhandled
+  `500` (or a misleading `404`); `stream`/`stream_options` stripped from
+  embeddings requests (aembedding has no stream support → upstream 502)
 - **Test-double leak prevention** — `401`/`502` bodies never contain the
   submitted API key or raw provider exception text (regression-pinned)
 - **Counter memory bound** — `InMemoryCounterStore` window buckets are

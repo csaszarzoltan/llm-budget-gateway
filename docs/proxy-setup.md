@@ -66,6 +66,7 @@ reads configuration from the environment at call time.
 | Status | Meaning | Example body |
 |---|---|---|
 | `200` | Provider response (JSON, or SSE stream for `stream=true`) | provider-shaped body |
+| `400` | Malformed request body (invalid JSON, or a JSON value that is not an object) | `{"error":{"message":"request body is not valid JSON","type":"invalid_request_error","code":400}}` |
 | `401` | Missing / unknown virtual API key | `{"error":{"message":"invalid or missing api key","type":"invalid_request_error","code":401}}` |
 | `404` | Unknown model | `{"error":{"message":"unknown model: no-such-model","type":"invalid_request_error","code":404}}` |
 | `412` | Hard dollar budget exceeded (Portkey convention) | `{"error":{"message":"budget exceeded for key:key1: 0.0125 >= 0.01","type":"invalid_request_error","code":412}}` |
