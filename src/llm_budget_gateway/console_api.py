@@ -1,33 +1,141 @@
-"""Unified browser console and metadata API."""
+"""Unified browser console, catalog and local service manager API."""
 
 from __future__ import annotations
 
-from fastapi import FastAPI
+from collections.abc import AsyncIterator
+from contextlib import asynccontextmanager
+
+from fastapi import FastAPI, Header, HTTPException, Request
 from fastapi.responses import HTMLResponse
 
 from .console_ui import catalog, render_console
+from .service_manager import ServiceManager
+
+_STYLE = """
+<style>
+#svc-launcher{position:fixed;right:18px;bottom:18px;z-index:90;border:0;border-radius:999px;padding:12px 17px;background:#2f5bea;color:#fff;font:600 14px system-ui;box-shadow:0 12px 30px #20377a55;cursor:pointer}
+#svc-panel{position:fixed;inset:0 0 0 auto;z-index:95;width:min(620px,100%);padding:22px;background:#fff;color:#172033;border-left:1px solid #dce2ec;box-shadow:-24px 0 60px #0003;transform:translateX(105%);transition:.22s;overflow:auto;font:14px/1.45 system-ui}
+[data-theme=dark] #svc-panel{background:#121a2c;color:#f4f7ff;border-color:#2a3650}#svc-panel.open{transform:none}.svc-head,.svc-actions,.svc-row{display:flex;align-items:center;gap:10px}.svc-head{justify-content:space-between}.svc-actions{flex-wrap:wrap;margin:12px 0 18px}.svc-row{justify-content:space-between;padding:12px 0;border-bottom:1px solid #dce2ec}.svc-row small{display:block;color:#647089}.svc-buttons{display:flex;gap:6px;flex-wrap:wrap;justify-content:flex-end}.svc-btn{border:1px solid #ccd4e2;border-radius:9px;padding:7px 10px;background:#fff;color:#172033;cursor:pointer}.svc-btn.primary{background:#2f5bea;color:#fff;border-color:#2f5bea}.svc-btn.danger{color:#b42331}.svc-dot{display:inline-block;width:8px;height:8px;border-radius:50%;margin-right:6px;background:#9aa4b5}.svc-dot.ok{background:#16845b}.svc-dot.wait{background:#ad6300}.svc-close{border:0;background:transparent;color:inherit;font-size:26px;cursor:pointer}#svc-message{padding:10px;border-radius:9px;background:#eef2f8;color:#45516a}[data-theme=dark] #svc-message{background:#1a2439;color:#a7b1c7}@media(max-width:640px){#svc-panel{width:100%}.svc-row{align-items:flex-start;flex-direction:column}.svc-buttons{justify-content:flex-start}}
+</style>
+"""
+
+_PANEL = """
+<button id="svc-launcher" type="button">Manage services</button>
+<aside id="svc-panel" aria-label="Local service manager" aria-hidden="true">
+  <div class="svc-head"><div><small>LOCAL DEVELOPMENT</small><h2>Service manager</h2></div><button id="svc-close" class="svc-close" aria-label="Close">x</button></div>
+  <p>Start or stop each FastAPI service from this console. Child logs are written under <code>.gateway-console/logs/</code>.</p>
+  <div class="svc-actions"><button class="svc-btn primary" id="svc-start-all">Start all</button><button class="svc-btn danger" id="svc-stop-all">Stop all</button><button class="svc-btn" id="svc-refresh">Refresh</button></div>
+  <p id="svc-message" role="status" aria-live="polite">Ready.</p><div id="svc-list"></div>
+</aside>
+<script>
+(()=>{const panel=document.getElementById('svc-panel'),list=document.getElementById('svc-list'),msg=document.getElementById('svc-message');const headers={'X-Console-Action':'1'};
+function esc(x){return String(x).replace(/[&<>"']/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]))}
+async function request(path,method='GET'){msg.textContent='Working...';const r=await fetch(path,{method,headers});const body=await r.json().catch(()=>({detail:'Invalid response'}));if(!r.ok)throw new Error(body.detail||`HTTP ${r.status}`);return body}
+function render(items){list.innerHTML=items.map(s=>`<div class="svc-row"><div><strong><span class="svc-dot ${s.reachable?'ok':s.running?'wait':''}"></span>${esc(s.name)}</strong><small>:${s.port} · ${s.reachable?'reachable':s.running?'starting':'stopped'}${s.pid?' · PID '+s.pid:''}</small></div><div class="svc-buttons"><button class="svc-btn primary" data-start="${esc(s.slug)}" ${s.running?'disabled':''}>Start</button><button class="svc-btn danger" data-stop="${esc(s.slug)}" ${!s.managed?'disabled':''}>Stop</button><a class="svc-btn" href="${esc(s.url)}" target="_blank" rel="noopener noreferrer">Open</a></div></div>`).join('');
+list.querySelectorAll('[data-start]').forEach(b=>b.onclick=()=>act(`/v1/console/services/${b.dataset.start}/start`));list.querySelectorAll('[data-stop]').forEach(b=>b.onclick=()=>act(`/v1/console/services/${b.dataset.stop}/stop`))}
+async function refresh(){try{const body=await request('/v1/console/services');render(body.services);msg.textContent=`${body.running} managed process(es), ${body.reachable} reachable service(s).`}catch(e){msg.textContent=e.message}}
+async function act(path){try{await request(path,'POST');await new Promise(r=>setTimeout(r,350));await refresh()}catch(e){msg.textContent=e.message}}
+document.getElementById('svc-launcher').onclick=()=>{panel.classList.add('open');panel.setAttribute('aria-hidden','false');refresh()};document.getElementById('svc-close').onclick=()=>{panel.classList.remove('open');panel.setAttribute('aria-hidden','true')};document.getElementById('svc-refresh').onclick=refresh;document.getElementById('svc-start-all').onclick=()=>act('/v1/console/services/start-all');document.getElementById('svc-stop-all').onclick=()=>act('/v1/console/services/stop-all');
+})();
+</script>
+"""
 
 
-def create_console_app() -> FastAPI:
-    """Create the dependency-free unified console application."""
-    app = FastAPI(title="LLM Budget Gateway Console", version="7.1.0")
+def _render_managed_console() -> str:
+    page = render_console()
+    return page.replace("</head>", _STYLE + "</head>").replace(
+        "</body>", _PANEL + "</body>"
+    )
+
+
+def _require_local_action(request: Request, action: str | None) -> None:
+    client = request.client.host if request.client else ""
+    if client not in {"127.0.0.1", "::1", "testclient", "console"}:
+        raise HTTPException(
+            403, "service management is restricted to the local machine"
+        )
+    if action != "1":
+        raise HTTPException(403, "X-Console-Action: 1 is required")
+
+
+def create_console_app(manager: ServiceManager | None = None) -> FastAPI:
+    """Create the console with local one-click lifecycle controls."""
+    service_manager = manager or ServiceManager()
+
+    @asynccontextmanager
+    async def lifespan(_: FastAPI) -> AsyncIterator[None]:
+        yield
+        service_manager.stop_all()
+
+    app = FastAPI(
+        title="LLM Budget Gateway Console", version="7.2.0", lifespan=lifespan
+    )
 
     @app.get("/health")
     async def health() -> dict[str, str]:
         return {"status": "ok"}
 
+    @app.get("/", response_class=HTMLResponse)
     @app.get("/console", response_class=HTMLResponse)
     async def console() -> str:
-        return render_console()
+        return _render_managed_console()
 
     @app.get("/v1/console/catalog")
     async def console_catalog() -> dict[str, object]:
         centers = catalog()
         return {
-            "version": "7.1.0",
+            "version": "7.2.0",
             "centers": centers,
             "center_count": len(centers),
             "capability_count": sum(len(center["capabilities"]) for center in centers),
         }
+
+    @app.get("/v1/console/services")
+    async def services(
+        request: Request, x_console_action: str | None = Header(None)
+    ) -> dict[str, object]:
+        _require_local_action(request, x_console_action)
+        states = service_manager.statuses()
+        return {
+            "services": states,
+            "running": sum(bool(x["running"]) for x in states),
+            "reachable": sum(bool(x["reachable"]) for x in states),
+        }
+
+    @app.post("/v1/console/services/{slug}/start")
+    async def start_service(
+        slug: str, request: Request, x_console_action: str | None = Header(None)
+    ) -> dict[str, object]:
+        _require_local_action(request, x_console_action)
+        try:
+            return service_manager.start(slug)
+        except ValueError as exc:
+            raise HTTPException(404, str(exc)) from exc
+        except RuntimeError as exc:
+            raise HTTPException(409, str(exc)) from exc
+
+    @app.post("/v1/console/services/{slug}/stop")
+    async def stop_service(
+        slug: str, request: Request, x_console_action: str | None = Header(None)
+    ) -> dict[str, object]:
+        _require_local_action(request, x_console_action)
+        try:
+            return service_manager.stop(slug)
+        except ValueError as exc:
+            raise HTTPException(404, str(exc)) from exc
+
+    @app.post("/v1/console/services/start-all")
+    async def start_all(
+        request: Request, x_console_action: str | None = Header(None)
+    ) -> dict[str, object]:
+        _require_local_action(request, x_console_action)
+        return {"services": service_manager.start_all()}
+
+    @app.post("/v1/console/services/stop-all")
+    async def stop_all(
+        request: Request, x_console_action: str | None = Header(None)
+    ) -> dict[str, object]:
+        _require_local_action(request, x_console_action)
+        return {"services": service_manager.stop_all()}
 
     return app

@@ -7,6 +7,8 @@ analysis brief §4 P0-1.
 
 from __future__ import annotations
 
+from .gateway_home import install_gateway_home
+
 import json
 
 from fastapi import FastAPI, Request
@@ -153,9 +155,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     async def health() -> JSONResponse:
         return JSONResponse({"status": "ok"})
 
-    return app
-
-
+    return install_gateway_home(app)
 async def _read_json_body(request: Request) -> dict | ProviderResponse:
     """Parse the request body as a JSON object; 400 on malformed input.
 
