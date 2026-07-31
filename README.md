@@ -105,3 +105,13 @@ Requires Python 3.11+. Runtime deps are pinned in `pyproject.toml`
 ## License
 
 MIT
+
+## Control Center and governed operations
+
+Version 0.2 adds a tenant-isolated control plane for the six product-research requirements: an accessible responsive dashboard, hashed virtual-key lifecycle with RBAC, atomic reserve-and-reconcile budgets, spend CSV and alerts, fail-closed policy routing, and health-aware routes with circuit breaking and bounded caching. Run `uvicorn llm_budget_gateway.control_api:create_control_app --factory --port 8001`, open `/control`, and call `/v1/admin/*` with `X-Tenant-Id` and `X-Role`. Mutations require operator, security, or admin roles. Key creation accepts `Idempotency-Key`; secrets are shown once. SQLite is the single-node Community backend; adapters for distributed stores remain the deployment boundary.
+
+Tests: `PYTHONPATH=src python -m pytest -q tests/test_product_control_plane.py`.
+
+## Product UI suite
+
+The control center now defines six responsive, WCAG-oriented product pages: guided setup, spend explorer, key access, policy studio, route health and operations activity. The server-rendered view layer lives in `product_ui.py`, keeps business rules in `control_plane.py`, fails closed for unknown pages, removes secrets from rendered context, and exposes loading, empty, success/recovery and permission-aware states. Run `PYTHONPATH=src python -m pytest -q tests/test_ui_product_suite.py`.

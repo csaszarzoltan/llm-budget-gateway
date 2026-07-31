@@ -1,0 +1,3 @@
+# Product UI suite
+
+The UI suite covers `/control/setup`, `/control/spend`, `/control/keys`, `/control/policies`, `/control/routes` and `/control/activity`. Pages share semantic navigation, a skip link, visible focus, 44px targets, responsive reflow, reduced-motion support and explicit loading, empty, error and recovery states. Viewer roles cannot create credentials, secrets are never rendered from context, and unknown pages fail closed. Domain mutations remain in `ControlPlane`; `product_ui` only creates escaped view models and HTML. This preserves the existing API and enables incremental rollout or rollback by routing configuration.

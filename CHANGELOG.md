@@ -80,3 +80,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   against a fake provider), `examples/cost_tracking.py`,
   `examples/budget_enforcement.py`, `examples/fallback_chains.py`
 - New `.env.example` — full environment reference
+
+### [0.2.0] - 2026-07-31
+
+#### Added
+- Accessible responsive Control Center and versioned tenant-aware admin API.
+- Hashed virtual-key issue, rotate, revoke, expiry, model scopes, RBAC and audit.
+- Atomic budget reservations with idempotent reconciliation and spend exports/alerts.
+- Fail-closed governance policy decisions without prompt retention.
+- Health-aware deterministic routing, circuit breakers, recovery and TTL cache.
+
+### [0.3.0] - 2026-07-31
+- Added six complete responsive product UI page contracts, accessible state patterns, permission-aware actions, guided setup progress, spend forecasting and operational recovery views.

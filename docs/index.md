@@ -57,3 +57,6 @@ virtualenv and print their own output:
 | `examples/budget_enforcement.py` | Windows, YAML loading, TPM/RPM ceilings, hard/soft budgets, composite scopes |
 | `examples/fallback_chains.py` | Error classification, cooldowns, dispatch fallback, context pre-checks |
 | `examples/budgets.example.yaml` | Canonical budget configuration shape (copy to `budgets.yaml`) |
+
+- [Control Center](control-center.md) - dashboard, admin API, RBAC, reservations, policy, alerts and routing.
+- [Product UI suite](product-ui.md) - six accessible operational workspaces and recovery patterns.
