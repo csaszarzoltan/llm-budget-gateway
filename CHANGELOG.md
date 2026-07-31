@@ -216,3 +216,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Research, roadmap, validation, migration, API, GitLab, and twenty ADR documents.
 ### Security
 - Replay verification, tool policy, redaction, injection scoring, approval gates, audit chains, and residency enforcement.
+
+
+## [5.0.0] - 2026-07-31
+### Added
+- Twenty assurance capabilities, authenticated API, responsive accessible dashboard, research, roadmap, validation, migration, API, GitLab, and ADR documentation.

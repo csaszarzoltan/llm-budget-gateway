@@ -88,3 +88,6 @@ virtualenv and print their own output:
 
 - [AgentOps Center](agentops-center.md)
 - [AgentOps API](api/agentops-api.md)
+
+- [Assurance Center](assurance-center.md)
+- [Assurance API](api/assurance-api.md)

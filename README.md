@@ -177,3 +177,7 @@ Version 2.0 adds twenty catalog, FinOps, reliability, compliance, quality, relea
 
 ## AgentOps Center 3.0
 Twenty MCP, security, reliability, observability, FinOps, sustainability, support, localization, and residency controls. Configure `GATEWAY_AGENTOPS_API_KEY` and see `docs/agentops-center.md`.
+
+
+## Assurance Center 5.0
+Twenty continuous-assurance capabilities. Configure `GATEWAY_ASSURANCE_API_KEY`; see `docs/assurance-center.md`.

@@ -34,3 +34,5 @@
 **Why does Platform API return 503?** Configure `GATEWAY_PLATFORM_API_KEY`. **Does Platform Center replace existing APIs?** No, version 2.0 is additive. **Are DLP values logged?** No, only finding categories are returned.
 
 **Why AgentOps 503?** Configure `GATEWAY_AGENTOPS_API_KEY`. **Does 3.0 replace existing APIs?** No, it is additive.
+
+**Why Assurance API 503?** Configure `GATEWAY_ASSURANCE_API_KEY`.
