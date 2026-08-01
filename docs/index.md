@@ -105,3 +105,5 @@ virtualenv and print their own output:
 
 - [Product Adoption Center](adoption-center.md) - product validation and rollout decisions.
 - [Product Adoption API](api/adoption-api.md) - authenticated capability reference.
+
+- [Task-oriented Console 9.1](task-oriented-console.md) - daily workflows, favorites, recents, context, and validation.

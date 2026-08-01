@@ -5,6 +5,34 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [9.3.0] - 2026-08-01
+
+### Added
+- Safe example input presets and contextual help for every guided workflow step.
+- Visible example-data warning and non-automatic submission boundary.
+- Unit and UI acceptance tests for preset completeness and sensitive-value safety.
+
+## [9.2.0] - 2026-08-01
+
+### Added
+- Accessible guided workflow stepper with previous/next navigation and live progress.
+- Additive workflow-detail API with an explicit 404 contract.
+- Unit, UI acceptance, and API integration tests for multi-step journeys.
+
+## [9.1.0] - 2026-08-01
+
+### Added
+- Task-oriented daily workflows and symptom/error-code search.
+- Recent tasks, favorites, and non-secret console context persistence.
+- Accessible inline JSON-object validation in the universal runner.
+- Additive `GET /v1/console/workflows` endpoint and TDD acceptance coverage.
+
+### Changed
+- Updated console information architecture to prioritize frequent user jobs while preserving expert workspace access.
+
+### Security
+- Preferences exclude bearer keys, request bodies, responses, prompts, and secrets.
+
 ## [0.1.0] — 2026-07-31
 
 ### Features

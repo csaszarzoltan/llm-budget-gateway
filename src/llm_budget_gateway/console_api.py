@@ -9,6 +9,7 @@ from fastapi import FastAPI, Header, HTTPException, Request
 from fastapi.responses import HTMLResponse
 
 from .console_ui import catalog, render_console
+from .console_workflows import get_workflow, search_workflows
 from .service_manager import ServiceManager
 
 _STYLE = """
@@ -89,6 +90,20 @@ def create_console_app(manager: ServiceManager | None = None) -> FastAPI:
             "center_count": len(centers),
             "capability_count": sum(len(center["capabilities"]) for center in centers),
         }
+
+    @app.get("/v1/console/workflows")
+    async def workflows(q: str = "") -> dict[str, object]:
+        """Return task-oriented workflows, optionally filtered by symptom."""
+        items = search_workflows(q)
+        return {"version": "1", "count": len(items), "workflows": items}
+
+    @app.get("/v1/console/workflows/{workflow_id}")
+    async def workflow(workflow_id: str) -> dict[str, object]:
+        """Return one guided workflow by stable identifier."""
+        item = get_workflow(workflow_id)
+        if item is None:
+            raise HTTPException(404, "unknown workflow")
+        return {"version": "1", "workflow": item}
 
     @app.get("/v1/console/services")
     async def services(

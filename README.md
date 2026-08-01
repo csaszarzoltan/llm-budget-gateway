@@ -558,3 +558,18 @@ Ten privacy-safe onboarding controls cover setup progress, environment templates
 ## Product Adoption Center 9.0
 
 Ten privacy-safe product-validation controls cover funnels, retention, feature adoption, experiments, feedback themes, pricing signals, staged rollout, success thresholds, and integrity-protected reports. See [docs/adoption-center.md](docs/adoption-center.md).
+
+
+## Task-oriented console 9.1
+
+The Unified Console now starts with six daily workflows for activation, spend investigation, 412/429/502 recovery, key rotation, release preparation, and security review. It remembers non-secret tenant/workspace context, recent tasks, and favorites locally, and validates JSON request bodies before sending. Existing workspaces and APIs remain available. See [Task-oriented Unified Console](docs/task-oriented-console.md).
+
+
+## Guided workflow stepper 9.2
+
+Daily workflow cards now open a guided multi-step runner. The console shows progress, the current workspace/capability, and previous/next controls while preserving the existing expert runner. Individual workflow definitions are also available from `GET /v1/console/workflows/{workflow_id}`.
+
+
+## Guided input presets 9.3
+
+Each guided workflow step now loads a safe, non-secret example JSON object and a short explanation. Examples are visibly labeled and are never submitted automatically. Users must review and replace example values before sending.
