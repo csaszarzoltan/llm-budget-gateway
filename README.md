@@ -1,8 +1,8 @@
 # LLM Budget Gateway
 
 [![Python 3.11+](https://img.shields.io/badge/python-3.11%2B-blue.svg)](https://www.python.org/downloads/)
-![Version 7.0.0](https://img.shields.io/badge/version-7.1.0-blue.svg)
-![Tests 356 passing](https://img.shields.io/badge/tests-356%20passing-brightgreen.svg)
+![Version 9.4.0](https://img.shields.io/badge/version-9.4.0-blue.svg)
+![Tests 410 passing](https://img.shields.io/badge/tests-410%20passing-brightgreen.svg)
 ![New Scale modules 97% coverage](https://img.shields.io/badge/scale%20coverage-97%25-brightgreen.svg)
 [![License MIT](https://img.shields.io/badge/license-MIT-blue.svg)](https://opensource.org/licenses/MIT)
 
@@ -10,7 +10,7 @@
 
 Applications continue to send OpenAI-shaped requests. The gateway authenticates virtual keys, resolves tenant and budget scopes, enforces limits, selects or falls back between models, forwards through the LiteLLM SDK, and records usage and cost without persisting prompt or response content.
 
-**Current package version:** `7.1.0`
+**Current package version:** `9.4.0`
 
 > [!IMPORTANT]
 > The built-in SQLite repositories are intended for development and single-node deployments. Multi-instance production deployments must use transactional shared repository adapters. Scale Center provides planning and validation decisions, but it does not provision Postgres, Redis, or other infrastructure.
@@ -513,7 +513,7 @@ Migration guides are available from `docs/migration-0.7.md` through [`docs/migra
 
 ## Versioning and release history
 
-The package version is `7.1.0`. Historical center versions in documentation describe the release in which a capability family was introduced. They are all included in the current package.
+The package version is `9.4.0`. Historical center versions in documentation describe the release in which a capability family was introduced. They are all included in the current package.
 
 Major milestones include:
 
@@ -573,3 +573,8 @@ Daily workflow cards now open a guided multi-step runner. The console shows prog
 ## Guided input presets 9.3
 
 Each guided workflow step now loads a safe, non-secret example JSON object and a short explanation. Examples are visibly labeled and are never submitted automatically. Users must review and replace example values before sending.
+
+
+## Resumable daily workflows 9.4
+
+The Unified Console now preserves non-secret workflow completion state locally, resumes at the last active step, supports direct accessible step navigation, and shows completed progress on task cards. Successful guided requests complete their current step. The API runner also prevents duplicate in-flight submission, times out stalled browser calls after 30 seconds, and provides next-action guidance for common HTTP failures. See [Task-oriented Unified Console](docs/task-oriented-console.md) and the [9.4 implementation report](docs/implementation-report-9.4.md).

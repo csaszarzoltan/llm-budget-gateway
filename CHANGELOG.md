@@ -2,6 +2,21 @@
 
 All notable changes to this project will be documented in this file.
 
+## [9.4.0] - 2026-08-01
+
+### Added
+- Resumable guided-workflow progress with completed-step state, direct navigation, and reset.
+- Privacy-safe local usage counters containing event names and counts only.
+- Status-specific runner recovery guidance and a bounded browser timeout.
+- TDD acceptance coverage and a complete product/requirements/implementation report.
+
+### Changed
+- The runner prevents duplicate in-flight submissions and announces busy state.
+- README and task-oriented console documentation now describe the 9.4 experience.
+
+### Security
+- Workflow progress and counters exclude tenant IDs, credentials, request bodies, prompts, results, and response content.
+
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 

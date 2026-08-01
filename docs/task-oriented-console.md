@@ -32,3 +32,9 @@ Selecting **Start** opens the runner with the first capability in the workflow. 
 ## Guided input presets
 
 Every step loads a non-secret example JSON object and explains the purpose of the request. The console labels it as example data and never submits it automatically. Replace representative models, metrics, regions, and thresholds with values appropriate to the current tenant before selecting **Send request**.
+
+### Resumable progress and safer request feedback (9.4)
+
+Guided workflows now persist non-secret progress in browser local storage. Cards show not-started, in-progress, or completed state; Resume returns to the last active step; completed steps are marked and directly selectable; and progress can be reset. A successful guided request marks its current step complete but never advances or submits another step automatically.
+
+The runner disables Send while a request is active, exposes `aria-busy`, applies a 30-second client timeout, and adds a suggested next action for common HTTP failures. Local usage counters record allow-listed event names and integer counts only. Progress and counters never contain tenant IDs, keys, bodies, prompts, results, or response content.
