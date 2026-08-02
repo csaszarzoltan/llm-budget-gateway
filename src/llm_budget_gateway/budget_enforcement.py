@@ -127,6 +127,18 @@ class InMemoryCounterStore:
             self._counters.pop(key, None)
 
 
+def budget_window_seconds(
+    window: str, now_fn: Callable[[], int] | None = None
+) -> int:
+    """Map a window string to seconds (\"monthly\" = current calendar month).
+
+    RED-phase stub for mcp_governance (docs/architecture/mcp-governance.md
+    §9.2): extracted from BudgetEnforcer.window_seconds with identical
+    behavior. Unknown window -> ValueError.
+    """
+    raise NotImplementedError
+
+
 class BudgetEnforcer:
     """Sync pre-dispatch TPM/RPM ceilings + async post-response dollar budgets."""
 
