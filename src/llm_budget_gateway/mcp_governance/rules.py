@@ -2,15 +2,22 @@
 
 Normative per docs/architecture/mcp-governance.md §6.5. Constructors are
 functional in the RED phase (default patterns, mcp_approvals table creation);
-every behavioral method raises NotImplementedError until the implementer
-lands it.
+the behavioral methods are implemented here.
 """
 
+import hashlib
+import ipaddress
+import json
+import re
+import secrets
+import socket
 import sqlite3
 import time
+import urllib.parse
 from collections.abc import Callable, Mapping, Sequence
 from typing import TYPE_CHECKING, Any
 
+from .exceptions import ApprovalNotFoundError, ApprovalStateError
 from .schemas import ApprovalRequest, RuleVerdict
 
 if TYPE_CHECKING:
@@ -18,10 +25,12 @@ if TYPE_CHECKING:
 
     from .policy import ToolPolicy
 
+#: Default PII patterns. Order matters for overlapping regexes: ``ssn`` must
+#: run before ``phone`` so ``123-45-6789`` redacts as an SSN, not a phone.
 _DEFAULT_PII_PATTERNS: dict[str, str] = {
     "email": r"[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Za-z]{2,}",
-    "phone": r"\+?\d[\d\s().-]{7,}\d",
     "ssn": r"\b\d{3}-\d{2}-\d{4}\b",
+    "phone": r"\+?\d[\d\s().-]{7,}\d",
     "credit_card": r"\b(?:\d[ -]?){13,19}\b",
     "api_key": r"\bsk-[A-Za-z0-9]{20,}\b",
     "bearer_token": r"\bBearer\s+[A-Za-z0-9._~+/-]+=*\b",
@@ -51,6 +60,30 @@ _CREATE_APPROVAL_INDEXES = [
     "CREATE INDEX IF NOT EXISTS idx_mcp_approvals_status ON mcp_approvals (status, caller)",
 ]
 
+_APPROVAL_COLUMNS = (
+    "approval_id, server_id, tool_name, caller, scope_kind, scope_key, "
+    "args_json, args_hash, status, requested_at, decided_at, decided_by, expires_at"
+)
+
+
+def _row_to_approval(row: sqlite3.Row) -> ApprovalRequest:
+    """Map a mcp_approvals row to an ApprovalRequest model."""
+    return ApprovalRequest(
+        approval_id=row["approval_id"],
+        server_id=row["server_id"],
+        tool_name=row["tool_name"],
+        caller=row["caller"],
+        scope_kind=row["scope_kind"],
+        scope_key=row["scope_key"],
+        args_redacted=json.loads(row["args_json"] or "{}"),
+        args_hash=row["args_hash"],
+        status=row["status"],
+        requested_at=row["requested_at"],
+        decided_at=row["decided_at"],
+        decided_by=row["decided_by"],
+        expires_at=row["expires_at"],
+    )
+
 
 class SSRFGuard:
     """Blocks http(s) URLs whose host resolves to private/reserved space."""
@@ -65,11 +98,124 @@ class SSRFGuard:
 
     def check(self, args: Mapping[str, Any]) -> RuleVerdict:
         """Inspect every url field recursively; block on bad addresses (RED stub)."""
-        raise NotImplementedError
+        urls = self.extract_urls(args)
+        if not urls:
+            return RuleVerdict(
+                allowed=True, rule="ssrf_guard", reason="no url fields", detail=None
+            )
+        for url in urls:
+            verdict = self._check_url(url)
+            if not verdict.allowed:
+                return verdict
+        return RuleVerdict(allowed=True, rule="ssrf_guard", reason="urls allowed")
 
     def extract_urls(self, args: Mapping[str, Any]) -> list[str]:
         """Return the candidate URL strings in deterministic walk order (RED stub)."""
-        raise NotImplementedError
+        urls: list[str] = []
+
+        def walk(value: Any) -> None:
+            if isinstance(value, Mapping):
+                for key, val in value.items():
+                    if key in self._url_fields and isinstance(val, str):
+                        urls.append(val)
+                    walk(val)
+            elif isinstance(value, (list, tuple)):
+                for item in value:
+                    walk(item)
+
+        walk(args)
+        return urls
+
+    def _check_url(self, raw: str) -> RuleVerdict:
+        """Evaluate a single candidate URL against the SSRF policy."""
+        try:
+            parsed = urllib.parse.urlsplit(raw)
+            scheme = parsed.scheme.lower()
+            host = (parsed.hostname or "").lower()
+        except ValueError:
+            return RuleVerdict(
+                allowed=False,
+                rule="ssrf_guard",
+                reason=f"ssrf: invalid url {raw}",
+                detail=raw,
+            )
+        if scheme not in ("http", "https"):
+            return RuleVerdict(
+                allowed=False,
+                rule="ssrf_guard",
+                reason=f"ssrf: unsupported scheme {scheme}",
+                detail=raw,
+            )
+        if host in self._allowed_hosts:
+            return RuleVerdict(
+                allowed=True,
+                rule="ssrf_guard",
+                reason=f"allowed by allowlist {host}",
+                detail=raw,
+            )
+        if not host:
+            return RuleVerdict(
+                allowed=False,
+                rule="ssrf_guard",
+                reason=f"ssrf: invalid url {raw}",
+                detail=raw,
+            )
+        # IP literal?
+        try:
+            addr = ipaddress.ip_address(host)
+        except ValueError:
+            addr = None
+        if addr is not None:
+            blocked = self._blocked_reason(addr)
+            if blocked:
+                return RuleVerdict(
+                    allowed=False, rule="ssrf_guard", reason=blocked, detail=raw
+                )
+            return RuleVerdict(
+                allowed=True, rule="ssrf_guard", reason="urls allowed", detail=raw
+            )
+        # Hostname: resolve ALL addresses; any blocked address blocks.
+        try:
+            infos = socket.getaddrinfo(host, None)
+        except OSError:
+            return RuleVerdict(
+                allowed=False,
+                rule="ssrf_guard",
+                reason=f"ssrf: unknown host {host}",
+                detail=raw,
+            )
+        for info in infos:
+            sockaddr = info[4]
+            try:
+                resolved = ipaddress.ip_address(sockaddr[0])
+            except ValueError:
+                continue
+            reason = self._blocked_reason(resolved)
+            if reason:
+                return RuleVerdict(
+                    allowed=False,
+                    rule="ssrf_guard",
+                    reason=f"ssrf: hostname {host} resolves to blocked address {resolved}",
+                    detail=raw,
+                )
+        return RuleVerdict(
+            allowed=True, rule="ssrf_guard", reason="urls allowed", detail=raw
+        )
+
+    @staticmethod
+    def _blocked_reason(addr: "ipaddress.IPv4Address | ipaddress.IPv6Address") -> str | None:
+        """Return the deterministic block reason for a private/reserved address."""
+        if addr.is_loopback:
+            return f"ssrf: loopback address {addr}"
+        if addr.is_link_local:
+            return f"ssrf: link-local address {addr}"
+        if addr.is_private:
+            return f"ssrf: private address {addr}"
+        if addr.is_reserved:
+            return f"ssrf: reserved address {addr}"
+        if addr.is_multicast:
+            return f"ssrf: multicast address {addr}"
+        return None
 
 
 class PIIRedactor:
@@ -78,18 +224,47 @@ class PIIRedactor:
     def __init__(self, patterns: Mapping[str, str] | None = None) -> None:
         """patterns: name -> regex; custom patterns replace the defaults entirely."""
         self._patterns = dict(patterns) if patterns is not None else dict(_DEFAULT_PII_PATTERNS)
+        self._compiled = [
+            (name, re.compile(pattern)) for name, pattern in self._patterns.items()
+        ]
 
     def redact(self, value: Any) -> Any:
         """Deep copy of value with every string recursively scanned (RED stub)."""
-        raise NotImplementedError
+        if isinstance(value, dict):
+            return {key: self.redact(val) for key, val in value.items()}
+        if isinstance(value, list):
+            return [self.redact(item) for item in value]
+        if isinstance(value, tuple):
+            return tuple(self.redact(item) for item in value)
+        if isinstance(value, str):
+            return self.redact_text(value)
+        return value
 
     def redact_text(self, text: str) -> str:
         """Redact a single string (RED stub)."""
-        raise NotImplementedError
+        out = text
+        for name, compiled in self._compiled:
+            out = compiled.sub(f"[REDACTED:{name}]", out)
+        return out
 
     def scan(self, value: Any) -> list[str]:
         """Sorted unique pattern names that WOULD match value (RED stub)."""
-        raise NotImplementedError
+        found: set[str] = set()
+
+        def walk(item: Any) -> None:
+            if isinstance(item, dict):
+                for val in item.values():
+                    walk(val)
+            elif isinstance(item, (list, tuple)):
+                for val in item:
+                    walk(val)
+            elif isinstance(item, str):
+                for name, compiled in self._compiled:
+                    if compiled.search(item):
+                        found.add(name)
+
+        walk(value)
+        return sorted(found)
 
 
 class ApprovalStore:
@@ -108,11 +283,36 @@ class ApprovalStore:
 
     def insert(self, approval: ApprovalRequest) -> ApprovalRequest:
         """Persist an approval request (RED stub)."""
-        raise NotImplementedError
+        self._conn.execute(
+            f"INSERT OR REPLACE INTO mcp_approvals ({_APPROVAL_COLUMNS}) "
+            "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+            (
+                approval.approval_id,
+                approval.server_id,
+                approval.tool_name,
+                approval.caller,
+                approval.scope_kind,
+                approval.scope_key,
+                json.dumps(approval.args_redacted),
+                approval.args_hash,
+                approval.status,
+                approval.requested_at,
+                approval.decided_at,
+                approval.decided_by,
+                approval.expires_at,
+            ),
+        )
+        self._conn.commit()
+        return approval
 
     def get(self, approval_id: str) -> ApprovalRequest:
         """Unknown id raises ApprovalNotFoundError (RED stub)."""
-        raise NotImplementedError
+        row = self._conn.execute(
+            "SELECT * FROM mcp_approvals WHERE approval_id = ?", (approval_id,)
+        ).fetchone()
+        if row is None:
+            raise ApprovalNotFoundError(f"approval {approval_id!r} not found")
+        return _row_to_approval(row)
 
     def update_status(
         self,
@@ -123,13 +323,34 @@ class ApprovalStore:
         decided_at: int | None = None,
     ) -> ApprovalRequest:
         """Set status (+ decided_by/decided_at when given) (RED stub)."""
-        raise NotImplementedError
+        self.get(approval_id)  # raises ApprovalNotFoundError when unknown
+        self._conn.execute(
+            "UPDATE mcp_approvals SET status = ?, decided_by = ?, decided_at = ? "
+            "WHERE approval_id = ?",
+            (status, decided_by, decided_at, approval_id),
+        )
+        self._conn.commit()
+        return self.get(approval_id)
 
     def list(
         self, *, status: str | None = None, caller: str | None = None
     ) -> list[ApprovalRequest]:
         """Order requested_at DESC, approval_id DESC (RED stub)."""
-        raise NotImplementedError
+        clauses: list[str] = []
+        params: list[object] = []
+        if status is not None:
+            clauses.append("status = ?")
+            params.append(status)
+        if caller is not None:
+            clauses.append("caller = ?")
+            params.append(caller)
+        where = " WHERE " + " AND ".join(clauses) if clauses else ""
+        rows = self._conn.execute(
+            f"SELECT * FROM mcp_approvals{where} "
+            "ORDER BY requested_at DESC, approval_id DESC",
+            params,
+        ).fetchall()
+        return [_row_to_approval(r) for r in rows]
 
 
 class ApprovalGate:
@@ -142,7 +363,7 @@ class ApprovalGate:
 
     def requires_approval(self, policy: "ToolPolicy") -> bool:
         """True iff policy.effect == \"approval\" (RED stub)."""
-        raise NotImplementedError
+        return policy.effect == "approval"
 
     def create_request(
         self,
@@ -155,19 +376,66 @@ class ApprovalGate:
         args: Mapping[str, Any],
     ) -> ApprovalRequest:
         """Build and insert a pending ApprovalRequest (RED stub)."""
-        raise NotImplementedError
+        now = int(self._store._clock())
+        scope = scopes[0] if scopes else _default_scope()
+        request = ApprovalRequest(
+            approval_id=secrets.token_hex(8),
+            server_id=server_id,
+            tool_name=tool_name,
+            caller=caller,
+            scope_kind=scope.kind,
+            scope_key=scope.key,
+            args_redacted=PIIRedactor().redact(dict(args)),
+            args_hash=args_hash_of(dict(args)),
+            status="pending",
+            requested_at=now,
+            decided_at=None,
+            decided_by=None,
+            expires_at=now + self._ttl_seconds if self._ttl_seconds is not None else None,
+        )
+        return self._store.insert(request)
 
     def approve(self, approval_id: str, actor: str) -> ApprovalRequest:
         """pending -> approved; any other status raises (RED stub)."""
-        raise NotImplementedError
+        approval = self._store.get(approval_id)
+        if approval.status != "pending":
+            raise ApprovalStateError(
+                f"approval {approval_id!r} is {approval.status}, not pending"
+            )
+        return self._store.update_status(
+            approval_id,
+            status="approved",
+            decided_by=actor,
+            decided_at=int(self._store._clock()),
+        )
 
     def reject(self, approval_id: str, actor: str) -> ApprovalRequest:
         """pending -> rejected; any other status raises (RED stub)."""
-        raise NotImplementedError
+        approval = self._store.get(approval_id)
+        if approval.status != "pending":
+            raise ApprovalStateError(
+                f"approval {approval_id!r} is {approval.status}, not pending"
+            )
+        return self._store.update_status(
+            approval_id,
+            status="rejected",
+            decided_by=actor,
+            decided_at=int(self._store._clock()),
+        )
 
     def consume(self, approval_id: str, actor: str) -> ApprovalRequest:
         """approved -> consumed (single use); any other status raises (RED stub)."""
-        raise NotImplementedError
+        approval = self._store.get(approval_id)
+        if approval.status != "approved":
+            raise ApprovalStateError(
+                f"approval {approval_id!r} is {approval.status}, not approved"
+            )
+        return self._store.update_status(
+            approval_id,
+            status="consumed",
+            decided_by=actor,
+            decided_at=int(self._store._clock()),
+        )
 
     def find_approved(
         self,
@@ -178,8 +446,42 @@ class ApprovalGate:
         args_hash: str,
     ) -> ApprovalRequest | None:
         """Most recent unexpired approved approval matching the call (RED stub)."""
-        raise NotImplementedError
+        now = int(self._store._clock())
+        row = self._store._conn.execute(
+            """
+            SELECT * FROM mcp_approvals
+            WHERE status = 'approved' AND caller = ? AND server_id = ?
+              AND tool_name = ? AND args_hash = ?
+              AND (expires_at IS NULL OR expires_at >= ?)
+            ORDER BY requested_at DESC, approval_id DESC
+            LIMIT 1
+            """,
+            (caller, server_id, tool_name, args_hash, now),
+        ).fetchone()
+        return _row_to_approval(row) if row is not None else None
 
     def expire_stale(self, now: int | None = None) -> int:
         """pending requests with expires_at < now -> expired; return count (RED stub)."""
-        raise NotImplementedError
+        now = now if now is not None else int(self._store._clock())
+        cursor = self._store._conn.execute(
+            "UPDATE mcp_approvals SET status = 'expired' "
+            "WHERE status = 'pending' AND expires_at IS NOT NULL AND expires_at < ?",
+            (now,),
+        )
+        self._store._conn.commit()
+        return cursor.rowcount
+
+
+def _default_scope() -> "BudgetScope":
+    """Fallback scope when a gate call carries no scopes."""
+    from llm_budget_gateway.budget_enforcement import BudgetScope
+
+    return BudgetScope("global", "default")
+
+
+def args_hash_of(args: Mapping[str, Any]) -> str:
+    """sha256 hexdigest of canonical JSON (sort_keys, compact separators)."""
+    canonical = json.dumps(
+        dict(args), sort_keys=True, separators=(",", ":"), default=str
+    )
+    return hashlib.sha256(canonical.encode("utf-8")).hexdigest()

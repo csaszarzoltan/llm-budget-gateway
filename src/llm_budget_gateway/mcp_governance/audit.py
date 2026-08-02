@@ -2,9 +2,11 @@
 
 Normative per docs/architecture/mcp-governance.md §6.4. The constructor is
 functional in the RED phase (mcp_audit_events table + indexes); append/query
-raise NotImplementedError until the implementer lands them.
+are implemented here.
 """
 
+import json
+import secrets
 import sqlite3
 import time
 from collections.abc import Callable
@@ -38,6 +40,37 @@ _CREATE_INDEXES = [
     "CREATE INDEX IF NOT EXISTS idx_mcp_audit_ts ON mcp_audit_events (timestamp)",
 ]
 
+_VALID_DECISIONS = {"allowed", "denied", "approval_required", "approved", "error"}
+_VALID_STATUSES = {"started", "completed", "blocked", "failed"}
+
+_COLUMNS = (
+    "event_id, server_id, tool_name, caller, scope_kind, scope_key, args_json, "
+    "decision, status, reason, cost, latency_ms, timestamp, redacted, "
+    "approval_id, request_id"
+)
+
+
+def _row_to_event(row: sqlite3.Row) -> AuditEvent:
+    """Map a mcp_audit_events row to an AuditEvent model."""
+    return AuditEvent(
+        event_id=row["event_id"],
+        server_id=row["server_id"],
+        tool_name=row["tool_name"],
+        caller=row["caller"],
+        scope_kind=row["scope_kind"],
+        scope_key=row["scope_key"],
+        args=json.loads(row["args_json"] or "{}"),
+        decision=row["decision"],
+        status=row["status"],
+        reason=row["reason"],
+        cost=row["cost"],
+        latency_ms=row["latency_ms"],
+        timestamp=row["timestamp"],
+        redacted=bool(row["redacted"]),
+        approval_id=row["approval_id"],
+        request_id=row["request_id"],
+    )
+
 
 class AuditStore:
     """Append-only (replace-on-same-id) audit events with filtered queries."""
@@ -55,7 +88,31 @@ class AuditStore:
 
     def append(self, event: AuditEvent) -> AuditEvent:
         """Insert or replace the event (auto id when event_id == \"\") (RED stub)."""
-        raise NotImplementedError
+        event_id = event.event_id if event.event_id else secrets.token_hex(8)
+        self._conn.execute(
+            f"INSERT OR REPLACE INTO mcp_audit_events ({_COLUMNS}) "
+            "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+            (
+                event_id,
+                event.server_id,
+                event.tool_name,
+                event.caller,
+                event.scope_kind,
+                event.scope_key,
+                json.dumps(event.args),
+                event.decision,
+                event.status,
+                event.reason,
+                event.cost,
+                event.latency_ms,
+                event.timestamp,
+                1 if event.redacted else 0,
+                event.approval_id,
+                event.request_id,
+            ),
+        )
+        self._conn.commit()
+        return event.model_copy(update={"event_id": event_id})
 
     def query(
         self,
@@ -71,4 +128,43 @@ class AuditStore:
         offset: int = 0,
     ) -> AuditPage:
         """Filtered query; timestamp DESC; invalid decision/status -> ValueError (RED stub)."""
-        raise NotImplementedError
+        if decision is not None and decision not in _VALID_DECISIONS:
+            raise ValueError(f"invalid decision: {decision!r}")
+        if status is not None and status not in _VALID_STATUSES:
+            raise ValueError(f"invalid status: {status!r}")
+        limit = max(1, min(500, limit))
+        offset = max(0, offset)
+        clauses: list[str] = []
+        params: list[object] = []
+        for column, value in (
+            ("caller", caller),
+            ("server_id", server_id),
+            ("tool_name", tool_name),
+            ("decision", decision),
+            ("status", status),
+        ):
+            if value is not None:
+                clauses.append(f"{column} = ?")
+                params.append(value)
+        if since is not None:
+            clauses.append("timestamp >= ?")
+            params.append(since)
+        if until is not None:
+            clauses.append("timestamp <= ?")
+            params.append(until)
+        where = " WHERE " + " AND ".join(clauses) if clauses else ""
+        total = self._conn.execute(
+            f"SELECT COUNT(*) FROM mcp_audit_events{where}", params
+        ).fetchone()[0]
+        rows = self._conn.execute(
+            f"SELECT * FROM mcp_audit_events{where} "
+            "ORDER BY timestamp DESC, event_id DESC LIMIT ? OFFSET ?",
+            (*params, limit, offset),
+        ).fetchall()
+        return AuditPage(
+            object="list",
+            data=[_row_to_event(r) for r in rows],
+            limit=limit,
+            offset=offset,
+            total=total,
+        )

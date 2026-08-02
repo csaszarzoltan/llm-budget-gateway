@@ -132,11 +132,22 @@ def budget_window_seconds(
 ) -> int:
     """Map a window string to seconds (\"monthly\" = current calendar month).
 
-    RED-phase stub for mcp_governance (docs/architecture/mcp-governance.md
-    §9.2): extracted from BudgetEnforcer.window_seconds with identical
-    behavior. Unknown window -> ValueError.
+    Extracted from BudgetEnforcer.window_seconds with identical behavior
+    (docs/architecture/mcp-governance.md §9.2): ``daily`` -> 86400,
+    ``monthly`` -> the current calendar month, otherwise ``<n><s|m|h|d>``.
+    Unknown window -> ValueError.
     """
-    raise NotImplementedError
+    if window == "daily":
+        return 86_400
+    if window == "monthly":
+        now = int(now_fn() if now_fn is not None else time.time())
+        year, month = time.gmtime(now)[:2]
+        return calendar.monthrange(year, month)[1] * 86_400
+    if len(window) < 2 or window[-1] not in "smhd":
+        raise ValueError(f"unknown budget window: {window!r}")
+    amount = int(window[:-1])
+    seconds = {"s": 1, "m": 60, "h": 3600, "d": 86_400}[window[-1]]
+    return amount * seconds
 
 
 class BudgetEnforcer:
@@ -164,17 +175,7 @@ class BudgetEnforcer:
 
     def window_seconds(self, window: str) -> int:
         """Map a window string to seconds ("monthly" = current calendar month)."""
-        if window == "daily":
-            return 86_400
-        if window == "monthly":
-            now = int(self._now_fn())
-            year, month = time.gmtime(now)[:2]
-            return calendar.monthrange(year, month)[1] * 86_400
-        if len(window) < 2 or window[-1] not in "smhd":
-            raise ValueError(f"unknown budget window: {window!r}")
-        amount = int(window[:-1])
-        seconds = {"s": 1, "m": 60, "h": 3600, "d": 86_400}[window[-1]]
-        return amount * seconds
+        return budget_window_seconds(window, self._now_fn)
 
     def check_sync(
         self, scopes: list[BudgetScope], model: str, est_input_tokens: int
