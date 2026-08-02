@@ -25,7 +25,7 @@ from .rules import ApprovalGate, args_hash_of
 from .schemas import AuditEvent
 
 if TYPE_CHECKING:
-    from collections.abc import Callable, Mapping
+    from collections.abc import Callable
 
     from .audit import AuditStore
     from .budgets import ToolBudgetService

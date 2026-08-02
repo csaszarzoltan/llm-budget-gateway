@@ -12,7 +12,7 @@ import secrets
 import sqlite3
 import time
 from collections.abc import Callable
-from typing import TYPE_CHECKING, Any
+from typing import TYPE_CHECKING
 
 from llm_budget_gateway.budget_enforcement import (
     BudgetExceededError,

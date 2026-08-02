@@ -111,10 +111,9 @@ class MCPGovernanceReport:
             gaps.append("tools without budget ceilings")
         if int(report.get("total_servers", 0) or 0) == 0:
             gaps.append("no servers registered")
-        if gaps:
-            recommendation = "Address: " + "; ".join(gaps)
-        else:
-            recommendation = "No action required"
+        recommendation = (
+            "Address: " + "; ".join(gaps) if gaps else "No action required"
+        )
         return {
             "risk_tier": report.get("risk_tier", "low"),
             "gaps": gaps,

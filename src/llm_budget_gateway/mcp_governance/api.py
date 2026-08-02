@@ -39,7 +39,6 @@ from .schemas import (
     MCPServer,
     ToolBudget,
     ToolBudgetRequest,
-    ToolInfo,
     ToolPolicy,
     ToolPolicyRequest,
 )
@@ -136,6 +135,9 @@ def create_mcp_governance_app(
         )
 
     app = FastAPI(title="MCP Governance API", version="1.0.0")
+    # The engine is the enforcement path for the (not yet exposed) call proxy;
+    # expose it on app.state so integration layers can drive before/after_call.
+    app.state.engine = engine
 
     def _check_auth(
         authorization: str | None, x_tenant_id: str | None
