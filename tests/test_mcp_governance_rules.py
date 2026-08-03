@@ -6,6 +6,7 @@ implementer lands the guards, the redactor and the approval state machine.
 """
 
 import inspect
+import time
 
 import pytest
 
@@ -215,6 +216,37 @@ class TestSSRFGuardBehavior:
         )
         assert len(urls) == 2
 
+    # -- M2: url-field matching must be case-insensitive and cover the
+    # -- common aliases so a private URL cannot bypass the guard. --------
+
+    @pytest.mark.parametrize(
+        "field",
+        [
+            "Url",
+            "URL",
+            "URI",
+            "uri",
+            "target",
+            "link",
+            "href",
+            "ENDPOINT",
+            "CallBack_Url",
+        ],
+    )
+    def test_url_field_case_and_alias_variants_blocked(self, field):
+        guard = SSRFGuard()
+        v = guard.check({field: "http://127.0.0.1/x"})
+        assert v.allowed is False
+        assert "127.0.0.1" in v.reason
+
+    def test_custom_url_fields_still_honored_with_aliases(self):
+        guard = SSRFGuard(url_fields=["my_url"])
+        v = guard.check({"my_url": "http://127.0.0.1/x"})
+        assert v.allowed is False
+        # aliases apply even with a custom url_fields set
+        v = guard.check({"href": "http://127.0.0.1/x"})
+        assert v.allowed is False
+
 
 class TestPIIRedactorBehavior:
     """RED-phase: the redactor is not implemented yet."""
@@ -260,6 +292,55 @@ class TestPIIRedactorBehavior:
         red = PIIRedactor()
         names = red.scan("a@b.com call +36 30 123 4567 and a@b.com again")
         assert names == ["email", "phone"]
+
+    # -- M1: api_key-class patterns must run BEFORE phone, and cover the
+    # -- common key formats so no plaintext tail survives. ---------------
+
+    def test_mixed_alnum_api_key_fully_redacted(self):
+        red = PIIRedactor()
+        out = red.redact_text("key sk-12345678ABCDEFGHIJKLMNOPQRSTUVWXYZ9999 end")
+        assert out == "key [REDACTED:api_key] end"
+
+    def test_all_digit_openai_key_fully_redacted(self):
+        red = PIIRedactor()
+        key = "sk-123456789012345678901234567890123456789012345678"
+        out = red.redact_text(f"key {key} end")
+        assert "[REDACTED:api_key]" in out
+        assert key not in out
+
+    def test_anthropic_key_fully_redacted(self):
+        red = PIIRedactor()
+        key = "sk-ant-api03-1234567890abcdefghijklmnopqrstuvwxyz-ABCDEFGHIJKLMNOPQRSTUVWXYZ"
+        out = red.redact_text(f"key {key} end")
+        assert out == "key [REDACTED:anthropic_key] end"
+
+    def test_gemini_key_fully_redacted(self):
+        red = PIIRedactor()
+        key = "AIzaSyA1234567890abcdefghijklmnopqrstuvwxyz"
+        out = red.redact_text(f"token {key} end")
+        assert out == "token [REDACTED:gemini_key] end"
+
+    def test_xai_key_fully_redacted(self):
+        red = PIIRedactor()
+        key = "xai-abcdef0123456789abcdef0123456789abcdef0123456789abcdef"
+        out = red.redact_text(f"key {key} end")
+        assert out == "key [REDACTED:xai_key] end"
+
+    def test_jwt_fully_redacted(self):
+        red = PIIRedactor()
+        token = (
+            "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9."
+            "eyJzdWIiOiIxMjM0NTY3ODkwIiwibmFtZSI6IkpvaG4gRG9lIn0."
+            "SflKxwRJSMeKKF2QT4fwpMeJf36POk6yJV_adQssw5c"
+        )
+        out = red.redact_text(f"auth {token} end")
+        assert out == "auth [REDACTED:jwt] end"
+
+    def test_scan_detects_key_classes(self):
+        red = PIIRedactor()
+        names = red.scan("sk-12345678ABCDEFGHIJKLMNOPQRSTUVWXYZ9999 xai-abcdef0123456789abcdef0123456789")
+        assert "api_key" in names
+        assert "xai_key" in names
 
 
 class TestApprovalGateBehavior:
@@ -390,3 +471,25 @@ class TestApprovalGateBehavior:
             server_id="srv1", tool_name="t1", args={"x": 1},
         )
         assert gate.expire_stale(now=1000) >= 0
+
+
+class TestApprovalStoreClock:
+    """M3: the store exposes a public now(); the gate must not reach into _clock."""
+
+    def test_now_reflects_injected_clock(self, conn):
+        store = ApprovalStore(conn, clock=lambda: 12345)
+        assert store.now() == 12345
+
+    def test_now_defaults_to_epoch(self, conn):
+        store = ApprovalStore(conn)
+        assert abs(store.now() - int(time.time())) < 5
+
+    def test_gate_uses_store_now_for_timestamps(self, conn):
+        store = ApprovalStore(conn, clock=lambda: 42)
+        gate = ApprovalGate(store)
+        req = gate.create_request(
+            policy=approval_policy(), caller="alice", scopes=ALICE_SCOPES,
+            server_id="srv1", tool_name="t1", args={"a": 1},
+        )
+        assert req.requested_at == 42
+        assert req.expires_at == 42 + 3600

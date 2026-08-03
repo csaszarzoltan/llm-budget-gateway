@@ -220,7 +220,12 @@ class CostStore:
                     params += (tool_name,)
                 row = self._conn.execute(sql, params).fetchone()
                 return float(row[0])
-            column = {"key": "api_key", "user": "user_id", "team": "team"}.get(kind)
+            column = {
+                "key": "api_key",
+                "user": "user_id",
+                "team": "team",
+                "project": "project",
+            }.get(kind)
             if column is None:
                 raise ValueError(f"unknown scope kind: {kind!r}")
             sql = (

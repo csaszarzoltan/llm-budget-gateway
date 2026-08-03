@@ -147,3 +147,82 @@ class TestExceptionHierarchy:
         for cls in [mg.AccessDeniedError, mg.DuplicateServerError, mg.PolicyViolationError]:
             with pytest.raises(cls):
                 raise cls("boom")
+
+
+class _CountingProxy:
+    """Delegates to an inner store but counts every attribute call (M5)."""
+
+    def __init__(self, inner):
+        self._inner = inner
+        self.calls = {}
+
+    def __getattr__(self, name):
+        def _call(*args, **kwargs):
+            self.calls[name] = self.calls.get(name, 0) + 1
+            return getattr(self._inner, name)(*args, **kwargs)
+
+        return _call
+
+
+class TestGovernanceReportBuild:
+    """M5: report.build must query global data once, not once per server."""
+
+    def _build_report(self):
+        from llm_budget_gateway.mcp_governance.audit import AuditStore
+        from llm_budget_gateway.mcp_governance.rules import ApprovalStore
+
+        db = mg.open_mcp_db(":memory:")
+        registry = mg.MCPRegistry(db)
+        policies = _CountingProxy(mg.ToolPolicyStore(db))
+        budgets = _CountingProxy(mg.ToolBudgetStore(db))
+        audit = AuditStore(db)
+        approvals = ApprovalStore(db)
+        for idx, name in enumerate(("srv-a", "srv-b")):
+            registry.register(
+                mg.MCPRegistryRequest(
+                    name=name,
+                    transport="stdio",
+                    version="1.0.0",
+                    tools=[mg.ToolInfo(name=f"tool-{idx}")],
+                )
+            )
+            policies.create_policy(
+                mg.ToolPolicyRequest(
+                    scope_kind="global",
+                    scope_key=f"default-{idx}",
+                    server_id=None,
+                    tool_name=None,
+                    effect="allow",
+                )
+            )
+            budgets.create_budget(
+                mg.ToolBudgetRequest(
+                    scope_kind="global",
+                    scope_key=f"default-{idx}",
+                    server_id=None,
+                    tool_name=None,
+                    hard_limit=10.0,
+                )
+            )
+        return db, registry, policies, budgets, audit, approvals
+
+    def test_global_queries_run_once_not_per_server(self):
+        db, registry, policies, budgets, audit, approvals = self._build_report()
+        try:
+            report = mg.MCPGovernanceReport()
+            out = report.build(
+                registry=registry,
+                policies=policies,
+                budgets=budgets,
+                audit=audit,
+                approvals=approvals,
+                since_epoch=0,
+            )
+            assert policies.calls["list_policies"] == 1
+            assert budgets.calls["list_budgets"] == 1
+            assert out["total_servers"] == 2
+            assert out["total_tools"] == 2
+            assert out["tools_with_policy"] == 2
+            assert out["tools_with_budget"] == 2
+        finally:
+            db.close()

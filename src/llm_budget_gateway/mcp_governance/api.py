@@ -9,7 +9,7 @@ import sqlite3
 import time
 from typing import Any
 
-from fastapi import FastAPI, Header, HTTPException
+from fastapi import FastAPI, Header, HTTPException, Query
 from fastapi.responses import HTMLResponse, JSONResponse
 from pydantic import BaseModel
 
@@ -189,13 +189,16 @@ def create_mcp_governance_app(
 
     @app.get("/v1/mcp/servers")
     async def list_servers(
+        limit: int = Query(100, ge=1, le=500),
+        offset: int = Query(0, ge=0),
         authorization: str | None = Header(None),
         x_tenant_id: str | None = Header(None),
     ) -> dict[str, object]:
         _check_auth(authorization, x_tenant_id)
+        servers = [s.model_dump() for s in registry.list_servers()]
         return {
             "object": "list",
-            "data": [s.model_dump() for s in registry.list_servers()],
+            "data": servers[offset : offset + limit],
         }
 
     @app.get("/v1/mcp/servers/{server_id}", response_model=MCPServer)
@@ -220,15 +223,17 @@ def create_mcp_governance_app(
     @app.get("/v1/mcp/servers/{server_id}/tools")
     async def list_tools(
         server_id: str,
+        limit: int = Query(100, ge=1, le=500),
+        offset: int = Query(0, ge=0),
         authorization: str | None = Header(None),
         x_tenant_id: str | None = Header(None),
     ) -> dict[str, object]:
         _check_auth(authorization, x_tenant_id)
         try:
-            tools = registry.list_tools(server_id)
+            tools = [t.model_dump() for t in registry.list_tools(server_id)]
         except MCPServerNotFoundError:
             tools = []
-        return {"object": "list", "data": [t.model_dump() for t in tools]}
+        return {"object": "list", "data": tools[offset : offset + limit]}
 
     @app.post("/v1/mcp/policies", status_code=201, response_model=ToolPolicy)
     async def create_policy(
@@ -245,21 +250,24 @@ def create_mcp_governance_app(
         scope_key: str | None = None,
         server_id: str | None = None,
         tool_name: str | None = None,
+        limit: int = Query(100, ge=1, le=500),
+        offset: int = Query(0, ge=0),
         authorization: str | None = Header(None),
         x_tenant_id: str | None = Header(None),
     ) -> dict[str, object]:
         _check_auth(authorization, x_tenant_id)
+        policy_list = [
+            p.model_dump()
+            for p in policies.list_policies(
+                scope_kind=scope_kind,
+                scope_key=scope_key,
+                server_id=server_id,
+                tool_name=tool_name,
+            )
+        ]
         return {
             "object": "list",
-            "data": [
-                p.model_dump()
-                for p in policies.list_policies(
-                    scope_kind=scope_kind,
-                    scope_key=scope_key,
-                    server_id=server_id,
-                    tool_name=tool_name,
-                )
-            ],
+            "data": policy_list[offset : offset + limit],
         }
 
     @app.delete("/v1/mcp/policies/{policy_id}", status_code=204)
@@ -289,21 +297,24 @@ def create_mcp_governance_app(
         scope_key: str | None = None,
         server_id: str | None = None,
         tool_name: str | None = None,
+        limit: int = Query(100, ge=1, le=500),
+        offset: int = Query(0, ge=0),
         authorization: str | None = Header(None),
         x_tenant_id: str | None = Header(None),
     ) -> dict[str, object]:
         _check_auth(authorization, x_tenant_id)
+        budget_list = [
+            b.model_dump()
+            for b in budgets.list_budgets(
+                scope_kind=scope_kind,
+                scope_key=scope_key,
+                server_id=server_id,
+                tool_name=tool_name,
+            )
+        ]
         return {
             "object": "list",
-            "data": [
-                b.model_dump()
-                for b in budgets.list_budgets(
-                    scope_kind=scope_kind,
-                    scope_key=scope_key,
-                    server_id=server_id,
-                    tool_name=tool_name,
-                )
-            ],
+            "data": budget_list[offset : offset + limit],
         }
 
     @app.delete("/v1/mcp/budgets/{budget_id}", status_code=204)
@@ -349,16 +360,16 @@ def create_mcp_governance_app(
     async def list_approvals(
         status: str | None = None,
         caller: str | None = None,
+        limit: int = Query(100, ge=1, le=500),
+        offset: int = Query(0, ge=0),
         authorization: str | None = Header(None),
         x_tenant_id: str | None = Header(None),
     ) -> dict[str, object]:
         _check_auth(authorization, x_tenant_id)
+        approvals_list = [a.model_dump() for a in approvals.list(status=status, caller=caller)]
         return {
             "object": "list",
-            "data": [
-                a.model_dump()
-                for a in approvals.list(status=status, caller=caller)
-            ],
+            "data": approvals_list[offset : offset + limit],
         }
 
     @app.post(

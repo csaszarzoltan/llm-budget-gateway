@@ -25,16 +25,22 @@ if TYPE_CHECKING:
 
     from .policy import ToolPolicy
 
-#: Default PII patterns. Order matters for overlapping regexes: ``ssn`` must
-#: run before ``phone`` so ``123-45-6789`` redacts as an SSN, not a phone.
+#: Default PII patterns. Order matters for overlapping regexes: the long
+#: api_key-class tokens must run before ``phone`` so a key's digit runs are
+#: never consumed as a phone number (leaving a plaintext tail), and ``ssn``
+#: must run before ``phone`` so ``123-45-6789`` redacts as an SSN, not a phone.
 _DEFAULT_PII_PATTERNS: dict[str, str] = {
     "email": r"[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Za-z]{2,}",
     "ssn": r"\b\d{3}-\d{2}-\d{4}\b",
-    "phone": r"\+?\d[\d\s().-]{7,}\d",
     "credit_card": r"\b(?:\d[ -]?){13,19}\b",
     "api_key": r"\bsk-[A-Za-z0-9]{20,}\b",
+    "anthropic_key": r"\bsk-ant-[A-Za-z0-9_-]{20,}\b",
+    "gemini_key": r"\bAIza[0-9A-Za-z_-]{30,}\b",
+    "xai_key": r"\bxai-[A-Za-z0-9_-]{20,}\b",
+    "jwt": r"\beyJ[A-Za-z0-9_-]{8,}\.[A-Za-z0-9_-]{8,}\.[A-Za-z0-9_-]{8,}\b",
     "bearer_token": r"\bBearer\s+[A-Za-z0-9._~+/-]+=*\b",
     "aws_access_key": r"\bAKIA[0-9A-Z]{16}\b",
+    "phone": r"\+?\d[\d\s().-]{7,}\d",
 }
 
 _CREATE_APPROVALS = """
@@ -85,6 +91,11 @@ def _row_to_approval(row: sqlite3.Row) -> ApprovalRequest:
     )
 
 
+#: Extra field names treated as URL-bearing in addition to the explicit
+#: ``url_fields``. Matching is case-insensitive (M2).
+_URL_FIELD_ALIASES = ("uri", "target", "link", "href")
+
+
 class SSRFGuard:
     """Blocks http(s) URLs whose host resolves to private/reserved space."""
 
@@ -94,7 +105,10 @@ class SSRFGuard:
         url_fields: Sequence[str] = ("url", "endpoint", "webhook", "callback_url"),
     ) -> None:
         self._allowed_hosts = {h.lower() for h in allowed_hosts}
-        self._url_fields = tuple(url_fields)
+        # Lowercased for case-insensitive matching; aliases always apply.
+        self._url_fields = frozenset(
+            name.lower() for name in (*url_fields, *_URL_FIELD_ALIASES)
+        )
 
     def check(self, args: Mapping[str, Any]) -> RuleVerdict:
         """Inspect every url field recursively; block on bad addresses (RED stub)."""
@@ -116,7 +130,7 @@ class SSRFGuard:
         def walk(value: Any) -> None:
             if isinstance(value, Mapping):
                 for key, val in value.items():
-                    if key in self._url_fields and isinstance(val, str):
+                    if key.lower() in self._url_fields and isinstance(val, str):
                         urls.append(val)
                     walk(val)
             elif isinstance(value, (list, tuple)):
@@ -281,6 +295,10 @@ class ApprovalStore:
             conn.execute(stmt)
         conn.commit()
 
+    def now(self) -> int:
+        """Current epoch seconds from the injected clock (public API, M3)."""
+        return int(self._clock())
+
     def insert(self, approval: ApprovalRequest) -> ApprovalRequest:
         """Persist an approval request (RED stub)."""
         self._conn.execute(
@@ -376,7 +394,7 @@ class ApprovalGate:
         args: Mapping[str, Any],
     ) -> ApprovalRequest:
         """Build and insert a pending ApprovalRequest (RED stub)."""
-        now = int(self._store._clock())
+        now = self._store.now()
         scope = scopes[0] if scopes else _default_scope()
         request = ApprovalRequest(
             approval_id=secrets.token_hex(8),
@@ -406,7 +424,7 @@ class ApprovalGate:
             approval_id,
             status="approved",
             decided_by=actor,
-            decided_at=int(self._store._clock()),
+            decided_at=self._store.now(),
         )
 
     def reject(self, approval_id: str, actor: str) -> ApprovalRequest:
@@ -420,7 +438,7 @@ class ApprovalGate:
             approval_id,
             status="rejected",
             decided_by=actor,
-            decided_at=int(self._store._clock()),
+            decided_at=self._store.now(),
         )
 
     def consume(self, approval_id: str, actor: str) -> ApprovalRequest:
@@ -434,7 +452,7 @@ class ApprovalGate:
             approval_id,
             status="consumed",
             decided_by=actor,
-            decided_at=int(self._store._clock()),
+            decided_at=self._store.now(),
         )
 
     def find_approved(
@@ -446,7 +464,7 @@ class ApprovalGate:
         args_hash: str,
     ) -> ApprovalRequest | None:
         """Most recent unexpired approved approval matching the call (RED stub)."""
-        now = int(self._store._clock())
+        now = self._store.now()
         row = self._store._conn.execute(
             """
             SELECT * FROM mcp_approvals
@@ -462,7 +480,7 @@ class ApprovalGate:
 
     def expire_stale(self, now: int | None = None) -> int:
         """pending requests with expires_at < now -> expired; return count (RED stub)."""
-        now = now if now is not None else int(self._store._clock())
+        now = now if now is not None else self._store.now()
         cursor = self._store._conn.execute(
             "UPDATE mcp_approvals SET status = 'expired' "
             "WHERE status = 'pending' AND expires_at IS NOT NULL AND expires_at < ?",

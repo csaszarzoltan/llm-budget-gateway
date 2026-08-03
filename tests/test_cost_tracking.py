@@ -352,6 +352,16 @@ class TestCostStoreBehavior:
             "key:sk_abc", 0, tool_name="nope"
         ) == pytest.approx(0.0, abs=1e-9)
 
+    def test_spend_since_project_scope(self, store: CostStore) -> None:
+        """M7: project is a valid scope kind and filters on the project column."""
+        store.insert(_sample_record(total_cost=1.0, project="projA"))
+        store.insert(
+            _sample_record(request_id="req-2", total_cost=99.0, project="projB")
+        )
+        store.insert(_sample_record(request_id="req-3", total_cost=1000.0))  # no project
+        assert store.spend_since("project:projA", 0) == pytest.approx(1.0, abs=1e-9)
+        assert store.spend_since("project:projB", 0) == pytest.approx(99.0, abs=1e-9)
+
     def test_tool_name_and_project_persist_across_reopen(
         self, store: CostStore, tmp_path
     ) -> None:

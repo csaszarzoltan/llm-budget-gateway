@@ -4,7 +4,7 @@ Normative per docs/architecture/mcp-governance.md §6.8. The report methods and
 the no-op notifier body are implemented here.
 """
 
-from collections.abc import Mapping
+from collections.abc import Mapping, Sequence
 from typing import TYPE_CHECKING, Protocol
 
 from .schemas import ApprovalRequest
@@ -51,14 +51,17 @@ class MCPGovernanceReport:
         total_tools = 0
         covered_by_policy: set[tuple[str, str]] = set()
         covered_by_budget: set[tuple[str, str]] = set()
+        # Global data queried once, not per server (M5: avoids N+1).
+        all_policies = policies.list_policies()
+        all_budgets = budgets.list_budgets()
         for server in active_servers:
             tools = registry.list_tools(server.server_id)
             total_tools += len(tools)
             for tool in tools:
                 key = (server.server_id, tool.name)
-                if _covered(policies.list_policies(), server.server_id, tool.name):
+                if _covered(all_policies, server.server_id, tool.name):
                     covered_by_policy.add(key)
-                if _covered(budgets.list_budgets(), server.server_id, tool.name):
+                if _covered(all_budgets, server.server_id, tool.name):
                     covered_by_budget.add(key)
         pending = len(approvals.list(status="pending"))
         audit_page = audit.query(since=since_epoch)
@@ -122,7 +125,7 @@ class MCPGovernanceReport:
 
 
 def _covered(
-    selectors: list[object], server_id: str, tool_name: str
+    selectors: Sequence[object], server_id: str, tool_name: str
 ) -> bool:
     """True iff any policy/budget selector covers the (server, tool) pair."""
     for item in selectors:

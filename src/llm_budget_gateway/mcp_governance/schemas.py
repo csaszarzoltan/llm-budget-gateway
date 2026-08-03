@@ -52,6 +52,55 @@ def _check_tool_wildcard(server_id: str | None, tool_name: str | None) -> None:
         raise ValueError("tool_name requires server_id")
 
 
+# -- Shared validators (M6): one implementation, reused by every model so the
+# -- regex / cross-field rules cannot drift between request and response types.
+
+def _check_name(v: str, pattern: str, label: str) -> str:
+    """Validate ``v`` against a name pattern (server or tool name)."""
+    if not re.fullmatch(pattern, v):
+        raise ValueError(f"invalid {label}: {v!r}")
+    return v
+
+
+def _check_version(v: str) -> str:
+    """Validate a semantic-version string (``MAJOR.MINOR.PATCH``)."""
+    if not re.fullmatch(VERSION_PATTERN, v):
+        raise ValueError(f"invalid version: {v!r}")
+    return v
+
+
+def _check_scope_key(v: str) -> str:
+    """scope_key must be non-empty (policy / budget scope)."""
+    if not v:
+        raise ValueError("scope_key must be non-empty")
+    return v
+
+
+def _check_limits(v: float | None) -> float | None:
+    """Budget limits must be finite and >= 0."""
+    if v is not None and (v < 0 or v != v or v in (float("inf"), float("-inf"))):
+        raise ValueError("limits must be finite and >= 0")
+    return v
+
+
+def _check_window(v: str) -> str:
+    """Validate a budget window string (raises ValueError for unknown ones)."""
+    _window_seconds(v)
+    return v
+
+
+def _check_budget_model(
+    server_id: str | None,
+    tool_name: str | None,
+    soft_limit: float | None,
+    hard_limit: float | None,
+) -> None:
+    """Cross-field budget rules: wildcard constraint + at least one limit."""
+    _check_tool_wildcard(server_id, tool_name)
+    if soft_limit is None and hard_limit is None:
+        raise ValueError("at least one of soft_limit / hard_limit must be set")
+
+
 class MCPServer(BaseModel):
     server_id: str
     name: str
@@ -67,16 +116,12 @@ class MCPServer(BaseModel):
     @field_validator("name")
     @classmethod
     def _name_matches(cls, v: str) -> str:
-        if not re.fullmatch(NAME_PATTERN, v):
-            raise ValueError(f"invalid server name: {v!r}")
-        return v
+        return _check_name(v, NAME_PATTERN, "server name")
 
     @field_validator("version")
     @classmethod
     def _version_matches(cls, v: str) -> str:
-        if not re.fullmatch(VERSION_PATTERN, v):
-            raise ValueError(f"invalid version: {v!r}")
-        return v
+        return _check_version(v)
 
     @model_validator(mode="after")
     def _endpoint_required(self) -> "MCPServer":
@@ -93,9 +138,7 @@ class ToolInfo(BaseModel):
     @field_validator("name")
     @classmethod
     def _name_matches(cls, v: str) -> str:
-        if not re.fullmatch(TOOL_NAME_PATTERN, v):
-            raise ValueError(f"invalid tool name: {v!r}")
-        return v
+        return _check_name(v, TOOL_NAME_PATTERN, "tool name")
 
 
 class MCPRegistryRequest(BaseModel):
@@ -111,16 +154,12 @@ class MCPRegistryRequest(BaseModel):
     @field_validator("name")
     @classmethod
     def _name_matches(cls, v: str) -> str:
-        if not re.fullmatch(NAME_PATTERN, v):
-            raise ValueError(f"invalid server name: {v!r}")
-        return v
+        return _check_name(v, NAME_PATTERN, "server name")
 
     @field_validator("version")
     @classmethod
     def _version_matches(cls, v: str) -> str:
-        if not re.fullmatch(VERSION_PATTERN, v):
-            raise ValueError(f"invalid version: {v!r}")
-        return v
+        return _check_version(v)
 
     @model_validator(mode="after")
     def _validate(self) -> "MCPRegistryRequest":
@@ -145,9 +184,7 @@ class ToolPolicy(BaseModel):
     @field_validator("scope_key")
     @classmethod
     def _scope_key_nonempty(cls, v: str) -> str:
-        if not v:
-            raise ValueError("scope_key must be non-empty")
-        return v
+        return _check_scope_key(v)
 
     @model_validator(mode="after")
     def _wildcard_rule(self) -> "ToolPolicy":
@@ -167,9 +204,7 @@ class ToolPolicyRequest(BaseModel):
     @field_validator("scope_key")
     @classmethod
     def _scope_key_nonempty(cls, v: str) -> str:
-        if not v:
-            raise ValueError("scope_key must be non-empty")
-        return v
+        return _check_scope_key(v)
 
     @model_validator(mode="after")
     def _wildcard_rule(self) -> "ToolPolicyRequest":
@@ -191,28 +226,23 @@ class ToolBudget(BaseModel):
     @field_validator("scope_key")
     @classmethod
     def _scope_key_nonempty(cls, v: str) -> str:
-        if not v:
-            raise ValueError("scope_key must be non-empty")
-        return v
+        return _check_scope_key(v)
 
     @field_validator("soft_limit", "hard_limit")
     @classmethod
     def _limits_valid(cls, v: float | None) -> float | None:
-        if v is not None and (v < 0 or v != v or v in (float("inf"), float("-inf"))):
-            raise ValueError("limits must be finite and >= 0")
-        return v
+        return _check_limits(v)
 
     @field_validator("window")
     @classmethod
     def _window_valid(cls, v: str) -> str:
-        _window_seconds(v)
-        return v
+        return _check_window(v)
 
     @model_validator(mode="after")
     def _validate(self) -> "ToolBudget":
-        _check_tool_wildcard(self.server_id, self.tool_name)
-        if self.soft_limit is None and self.hard_limit is None:
-            raise ValueError("at least one of soft_limit / hard_limit must be set")
+        _check_budget_model(
+            self.server_id, self.tool_name, self.soft_limit, self.hard_limit
+        )
         return self
 
 
@@ -229,28 +259,23 @@ class ToolBudgetRequest(BaseModel):
     @field_validator("scope_key")
     @classmethod
     def _scope_key_nonempty(cls, v: str) -> str:
-        if not v:
-            raise ValueError("scope_key must be non-empty")
-        return v
+        return _check_scope_key(v)
 
     @field_validator("soft_limit", "hard_limit")
     @classmethod
     def _limits_valid(cls, v: float | None) -> float | None:
-        if v is not None and (v < 0 or v != v or v in (float("inf"), float("-inf"))):
-            raise ValueError("limits must be finite and >= 0")
-        return v
+        return _check_limits(v)
 
     @field_validator("window")
     @classmethod
     def _window_valid(cls, v: str) -> str:
-        _window_seconds(v)
-        return v
+        return _check_window(v)
 
     @model_validator(mode="after")
     def _validate(self) -> "ToolBudgetRequest":
-        _check_tool_wildcard(self.server_id, self.tool_name)
-        if self.soft_limit is None and self.hard_limit is None:
-            raise ValueError("at least one of soft_limit / hard_limit must be set")
+        _check_budget_model(
+            self.server_id, self.tool_name, self.soft_limit, self.hard_limit
+        )
         return self
 
 
