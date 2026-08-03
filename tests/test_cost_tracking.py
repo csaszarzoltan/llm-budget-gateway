@@ -129,6 +129,8 @@ class TestUsageRecordInterface:
             "latency_ms",
             "status",
             "timestamp",
+            "tool_name",
+            "project",
         }
 
     def test_constructible(self) -> None:
@@ -198,7 +200,8 @@ class TestCostStoreInterface:
     def test_spend_since_signature(self) -> None:
         sig = inspect.signature(CostStore.spend_since)
         params = list(sig.parameters)
-        assert params == ["self", "scope_key", "since_epoch"]
+        assert params == ["self", "scope_key", "since_epoch", "tool_name"]
+        assert sig.parameters["tool_name"].default is None
         assert str(sig.return_annotation) == "float"
 
     def test_close_signature(self) -> None:
@@ -223,7 +226,8 @@ class TestCostTrackerInterface:
 
     def test_spend_since_signature(self) -> None:
         sig = inspect.signature(CostTracker.spend_since)
-        assert list(sig.parameters) == ["self", "scope_key", "since_epoch"]
+        assert list(sig.parameters) == ["self", "scope_key", "since_epoch", "tool_name"]
+        assert sig.parameters["tool_name"].default is None
         assert str(sig.return_annotation) == "float"
 
     def test_build_record_signature(self) -> None:
@@ -331,6 +335,46 @@ class TestCostStoreBehavior:
         total = store.spend_since("key:sk_abc", since_epoch=0)
         assert total == pytest.approx(1.0, abs=1e-9)
 
+    def test_spend_since_filters_by_tool_name(self, store: CostStore) -> None:
+        store.insert(_sample_record(total_cost=1.0, tool_name="srv1:t1"))
+        store.insert(
+            _sample_record(request_id="req-2", total_cost=2.0, tool_name="srv1:t2")
+        )
+        store.insert(_sample_record(request_id="req-3", total_cost=4.0))  # no tool
+        assert store.spend_since("key:sk_abc", 0) == pytest.approx(7.0, abs=1e-9)
+        assert store.spend_since(
+            "key:sk_abc", 0, tool_name="srv1:t1"
+        ) == pytest.approx(1.0, abs=1e-9)
+        assert store.spend_since(
+            "key:sk_abc", 0, tool_name="srv1:t2"
+        ) == pytest.approx(2.0, abs=1e-9)
+        assert store.spend_since(
+            "key:sk_abc", 0, tool_name="nope"
+        ) == pytest.approx(0.0, abs=1e-9)
+
+    def test_tool_name_and_project_persist_across_reopen(
+        self, store: CostStore, tmp_path
+    ) -> None:
+        store.insert(_sample_record(total_cost=1.0, tool_name="srv1:t1", project="p1"))
+        store.close()
+        reopened = CostStore(str(tmp_path / "ledger.db"))
+        try:
+            assert reopened.spend_since(
+                "key:sk_abc", 0, tool_name="srv1:t1"
+            ) == pytest.approx(1.0, abs=1e-9)
+            conn = sqlite3.connect(str(tmp_path / "ledger.db"))
+            try:
+                row = conn.execute(
+                    "SELECT tool_name, project FROM cost_records "
+                    "WHERE request_id = ?",
+                    ("req-1",),
+                ).fetchone()
+                assert row == ("srv1:t1", "p1")
+            finally:
+                conn.close()
+        finally:
+            reopened.close()
+
     def test_wal_mode_active(self, store: CostStore, tmp_path) -> None:
         store.close()
         conn = sqlite3.connect(str(tmp_path / "ledger.db"))
@@ -367,6 +411,17 @@ class TestCostTrackerBehavior:
         store.insert(_sample_record(total_cost=2.5))
         total = await tracker.spend_since("key:sk_abc", since_epoch=0)
         assert total == pytest.approx(2.5, abs=1e-9)
+
+    @pytest.mark.asyncio
+    async def test_spend_since_delegates_tool_name_to_store(
+        self, tracker: CostTracker, store: CostStore
+    ) -> None:
+        store.insert(_sample_record(total_cost=1.0, tool_name="srv1:t1"))
+        store.insert(
+            _sample_record(request_id="req-2", total_cost=2.0, tool_name="srv1:t2")
+        )
+        total = await tracker.spend_since("key:sk_abc", 0, tool_name="srv1:t2")
+        assert total == pytest.approx(2.0, abs=1e-9)
 
     def test_build_record_computes_cost(
         self, tracker: CostTracker, price_map: PriceMap

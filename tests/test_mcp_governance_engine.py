@@ -175,7 +175,9 @@ class TestMCPPolicyEngineBehavior:
     @pytest.mark.asyncio
     async def test_before_call_allow_path_returns_context(self, engine):
         from llm_budget_gateway.mcp_governance import (
-            MCPRegistryRequest, ToolInfo, ToolPolicyRequest,
+            MCPRegistryRequest,
+            ToolInfo,
+            ToolPolicyRequest,
         )
 
         srv = engine._registry.register(
@@ -225,6 +227,28 @@ class TestMCPPolicyEngineBehavior:
             )
 
     @pytest.mark.asyncio
+    async def test_before_call_no_policy_denies(self, engine):
+        """Deny-by-default (8780f9c): a registered tool with NO matching
+        policy is rejected with AccessDeniedError, not silently allowed."""
+        from llm_budget_gateway.mcp_governance import (
+            MCPRegistryRequest,
+            ToolInfo,
+        )
+
+        srv = engine._registry.register(
+            MCPRegistryRequest(
+                name="srv1", transport="stdio",
+                tools=[ToolInfo(name="t1")],
+            )
+        )
+        # no policy is created for srv1:t1 — the engine default must deny
+        with pytest.raises(AccessDeniedError):
+            await engine.before_call(
+                caller="alice", scopes=ALICE_SCOPES,
+                server_id=srv.server_id, tool_name="t1", args={},
+            )
+
+    @pytest.mark.asyncio
     async def test_before_call_approval_required(self, engine):
         from llm_budget_gateway.mcp_governance import (
             ApprovalRequiredError,
@@ -255,7 +279,9 @@ class TestMCPPolicyEngineBehavior:
     @pytest.mark.asyncio
     async def test_before_call_ssrf_block(self, engine):
         from llm_budget_gateway.mcp_governance import (
-            MCPRegistryRequest, ToolInfo, ToolPolicyRequest,
+            MCPRegistryRequest,
+            ToolInfo,
+            ToolPolicyRequest,
         )
 
         srv = engine._registry.register(

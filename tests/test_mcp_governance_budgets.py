@@ -7,6 +7,7 @@ budget_window_seconds() function. The ledger is faked per spec §11.3.
 """
 
 import inspect
+import sqlite3
 
 import pytest
 
@@ -14,6 +15,12 @@ from llm_budget_gateway.budget_enforcement import (
     BudgetExceededError,
     BudgetScope,
     budget_window_seconds,
+)
+from llm_budget_gateway.cost_tracking import (
+    CostCalculator,
+    CostStore,
+    CostTracker,
+    PriceMap,
 )
 from llm_budget_gateway.mcp_governance import (
     AuditEvent,
@@ -231,6 +238,107 @@ class TestToolBudgetServiceBehavior:
     def test_canonical_tool(self, conn):
         svc = ToolBudgetService(FakeTracker(), ToolBudgetStore(conn))
         assert svc.canonical_tool("srv1", "t1") == "srv1:t1"
+
+
+class TestToolBudgetServicePerToolAttribution:
+    """B2/B3: tool_name + project survive real persistence and gate per-tool."""
+
+    @pytest.mark.asyncio
+    async def test_record_usage_persists_tool_name_and_project(
+        self, conn, tmp_path
+    ):
+        store = CostStore(str(tmp_path / "ledger.db"))
+        tracker = CostTracker(store=store, calculator=CostCalculator(PriceMap()))
+        svc = ToolBudgetService(tracker, ToolBudgetStore(conn))
+        await svc.record_usage(
+            event=AuditEvent(
+                event_id="e1",
+                server_id="srv1",
+                tool_name="t1",
+                caller="alice",
+                scope_kind="user",
+                scope_key="alice",
+                decision="allowed",
+                status="completed",
+                cost=0.0042,
+                latency_ms=10,
+                timestamp=100,
+            )
+        )
+        await svc.record_usage(
+            event=AuditEvent(
+                event_id="e2",
+                server_id="srv1",
+                tool_name="t1",
+                caller="bob",
+                scope_kind="project",
+                scope_key="p1",
+                decision="allowed",
+                status="completed",
+                cost=0.5,
+                latency_ms=10,
+                timestamp=100,
+            )
+        )
+        # tool_name persisted: the per-tool lookup returns exactly this cost
+        assert store.spend_since(
+            "user:alice", 0, tool_name="srv1:t1"
+        ) == pytest.approx(0.0042, abs=1e-9)
+        # project persisted as a real column, not a dropped dynamic attr
+        store.close()
+        conn2 = sqlite3.connect(str(tmp_path / "ledger.db"))
+        try:
+            row = conn2.execute(
+                "SELECT tool_name, project FROM cost_records "
+                "WHERE request_id = 'e2'"
+            ).fetchone()
+            assert row == ("srv1:t1", "p1")
+        finally:
+            conn2.close()
+
+    @pytest.mark.asyncio
+    async def test_per_tool_budget_enforcement_with_real_tracker(
+        self, conn, tmp_path
+    ):
+        store = CostStore(str(tmp_path / "ledger.db"))
+        tracker = CostTracker(store=store, calculator=CostCalculator(PriceMap()))
+        budgets = ToolBudgetStore(conn)
+        budgets.create_budget(
+            budget_request(server_id="srv1", tool_name="t1", hard_limit=5.0)
+        )
+        budgets.create_budget(
+            budget_request(server_id="srv1", tool_name="t2", hard_limit=5.0)
+        )
+        # event timestamps are fixed at 100; pin now_fn so the 30d window
+        # starts exactly at 100 and the records are inside it.
+        svc = ToolBudgetService(
+            tracker, budgets, now_fn=lambda: 100 + 30 * 86400
+        )
+
+        async def record(event_id: str, tool: str, cost: float) -> None:
+            await svc.record_usage(
+                event=AuditEvent(
+                    event_id=event_id,
+                    server_id="srv1",
+                    tool_name=tool,
+                    caller="alice",
+                    scope_kind="user",
+                    scope_key="alice",
+                    decision="allowed",
+                    status="completed",
+                    cost=cost,
+                    latency_ms=10,
+                    timestamp=100,
+                )
+            )
+
+        await record("e1", "t1", 4.0)
+        await record("e2", "t2", 100.0)
+        # per-tool isolation: t1's spend (4.0) stays under its own ceiling...
+        await svc.check(ALICE_SCOPES, "srv1", "t1")
+        # ...while t2's spend (100.0) blows its own ceiling
+        with pytest.raises(BudgetExceededError):
+            await svc.check(ALICE_SCOPES, "srv1", "t2")
 
 
 class TestBudgetWindowSecondsBehavior:

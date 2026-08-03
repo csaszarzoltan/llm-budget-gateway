@@ -58,7 +58,9 @@ class FakeCostTracker:
     def __init__(self, spend: dict[str, float] | None = None) -> None:
         self.spend = spend or {}
 
-    async def spend_since(self, scope_key: str, since_epoch: int) -> float:
+    async def spend_since(
+        self, scope_key: str, since_epoch: int, tool_name: str | None = None
+    ) -> float:
         return self.spend.get(scope_key, 0.0)
 
 
@@ -478,7 +480,9 @@ class TestSoftExceededBehavior:
                 self.spend_since_calls = 0
                 self._spend = spend
 
-            async def spend_since(self, scope_key: str, since_epoch: int) -> float:
+            async def spend_since(
+                self, scope_key: str, since_epoch: int, tool_name: str | None = None
+            ) -> float:
                 self.spend_since_calls += 1
                 return self._spend.get(scope_key, 0.0)
 

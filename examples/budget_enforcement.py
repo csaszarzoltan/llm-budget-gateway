@@ -41,7 +41,9 @@ class _FakeTracker:
     def __init__(self, spend: dict[str, float]) -> None:
         self.spend = spend
 
-    async def spend_since(self, scope_key: str, since_epoch: int) -> float:
+    async def spend_since(
+        self, scope_key: str, since_epoch: int, tool_name: str | None = None
+    ) -> float:
         return self.spend.get(scope_key, 0.0)
 
 

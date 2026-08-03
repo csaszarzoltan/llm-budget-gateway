@@ -250,7 +250,7 @@ class ToolBudgetService:
         """Ask the ledger for spend; pass tool_name only when supported."""
         if self._tracker_supports_tool:
             return await self._tracker.spend_since(
-                scope.scope_key(), since, tool_name=tool  # type: ignore[call-arg]
+                scope.scope_key(), since, tool_name=tool
             )
         return await self._tracker.spend_since(scope.scope_key(), since)
 
@@ -309,11 +309,10 @@ class ToolBudgetService:
             status="success" if event.status == "completed" else "error",
             timestamp=event.timestamp,
         )
-        # The existing UsageRecord dataclass predates tool-level attribution;
-        # attach the tool name dynamically so the ledger row carries it while
-        # the frozen cost_tracking interface stays untouched.
-        record.tool_name = tool  # type: ignore[attr-defined]
-        record.project = project  # type: ignore[attr-defined]
+        # tool_name + project are real UsageRecord fields (B3); the ledger
+        # row carries them so per-tool budgets can be enforced (B2).
+        record.tool_name = tool
+        record.project = project
         await self._tracker.record(record)
 
     def canonical_tool(self, server_id: str, tool_name: str) -> str:

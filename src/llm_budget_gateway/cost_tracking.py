@@ -31,7 +31,9 @@ CREATE TABLE IF NOT EXISTS cost_records (
     total_cost REAL NOT NULL,
     latency_ms INTEGER NOT NULL,
     status TEXT NOT NULL,
-    timestamp INTEGER NOT NULL
+    timestamp INTEGER NOT NULL,
+    tool_name TEXT,
+    project TEXT
 )
 """
 
@@ -66,6 +68,8 @@ class UsageRecord:
     latency_ms: int
     status: str  # "success" | "error" | "fallback"
     timestamp: int  # epoch seconds
+    tool_name: str | None = None  # e.g. "server_id:tool_name" for MCP tool calls
+    project: str | None = None  # project scope key when attribution is project-scoped
 
 
 def accumulate_usage(chunks: list[dict]) -> TokenUsage:
@@ -171,8 +175,8 @@ class CostStore:
                     request_id, api_key, user_id, team, model, provider,
                     prompt_tokens, completion_tokens, total_tokens,
                     input_cost, output_cost, total_cost,
-                    latency_ms, status, timestamp
-                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    latency_ms, status, timestamp, tool_name, project
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 """,
                 (
                     record.request_id,
@@ -190,31 +194,44 @@ class CostStore:
                     record.latency_ms,
                     record.status,
                     record.timestamp,
+                    record.tool_name,
+                    record.project,
                 ),
             )
             self._conn.commit()
 
-    def spend_since(self, scope_key: str, since_epoch: int) -> float:
+    def spend_since(
+        self, scope_key: str, since_epoch: int, tool_name: str | None = None
+    ) -> float:
         """Sum total_cost for records matching ``scope_key`` with
-        timestamp >= since_epoch.
+        timestamp >= since_epoch. When ``tool_name`` is given, only records
+        attributed to that exact tool (e.g. ``"server_id:tool_name"``) count.
         """
         kind, _, key = scope_key.partition(":")
         with self._lock:
             if kind == "global":
-                row = self._conn.execute(
+                sql = (
                     "SELECT COALESCE(SUM(total_cost), 0) FROM cost_records "
-                    "WHERE timestamp >= ?",
-                    (since_epoch,),
-                ).fetchone()
+                    "WHERE timestamp >= ?"
+                )
+                params: tuple[object, ...] = (since_epoch,)
+                if tool_name is not None:
+                    sql += " AND tool_name = ?"
+                    params += (tool_name,)
+                row = self._conn.execute(sql, params).fetchone()
                 return float(row[0])
             column = {"key": "api_key", "user": "user_id", "team": "team"}.get(kind)
             if column is None:
                 raise ValueError(f"unknown scope kind: {kind!r}")
-            row = self._conn.execute(
+            sql = (
                 f"SELECT COALESCE(SUM(total_cost), 0) FROM cost_records "
-                f"WHERE {column} = ? AND timestamp >= ?",
-                (key, since_epoch),
-            ).fetchone()
+                f"WHERE {column} = ? AND timestamp >= ?"
+            )
+            params = (key, since_epoch)
+            if tool_name is not None:
+                sql += " AND tool_name = ?"
+                params += (tool_name,)
+            row = self._conn.execute(sql, params).fetchone()
             return float(row[0])
 
     def close(self) -> None:
@@ -234,10 +251,15 @@ class CostTracker:
         """Persist a usage record (off the event loop)."""
         await asyncio.to_thread(self._store.insert, usage)
 
-    async def spend_since(self, scope_key: str, since_epoch: int) -> float:
+    async def spend_since(
+        self, scope_key: str, since_epoch: int, tool_name: str | None = None
+    ) -> float:
         """Return total spend for ``scope_key`` in the window (off the event
-        loop)."""
-        return await asyncio.to_thread(self._store.spend_since, scope_key, since_epoch)
+        loop); optionally filtered to one tool (``tool_name``).
+        """
+        return await asyncio.to_thread(
+            self._store.spend_since, scope_key, since_epoch, tool_name
+        )
 
     def build_record(
         self,
