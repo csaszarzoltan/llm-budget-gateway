@@ -36,6 +36,10 @@ def _window_seconds(window: str) -> int:
     if len(window) < 2 or window[-1] not in "smhd":
         raise ValueError(f"unknown budget window: {window!r}")
     amount = int(window[:-1])
+    if amount < 1:
+        # S12: 0/negative windows would disable the ceiling (spend window of 0
+        # seconds never trips the hard limit) — reject them outright.
+        raise ValueError(f"budget window amount must be >= 1: {window!r}")
     seconds = {"s": 1, "m": 60, "h": 3600, "d": 86_400}[window[-1]]
     return amount * seconds
 

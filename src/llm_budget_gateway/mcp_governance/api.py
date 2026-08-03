@@ -4,7 +4,9 @@ Normative per docs/architecture/mcp-governance.md §7. The factory wires the
 stores, the engine, the routes and the auth middleware.
 """
 
+import logging
 import os
+import secrets
 import sqlite3
 import time
 from typing import Any
@@ -25,7 +27,6 @@ from .exceptions import (
     ApprovalRequiredError,
     BudgetNotFoundError,
     MCPGovernanceError,
-    MCPServerNotFoundError,
     PolicyNotFoundError,
 )
 from .integration import MCPGovernanceReport, NullApprovalNotifier
@@ -42,6 +43,19 @@ from .schemas import (
     ToolPolicy,
     ToolPolicyRequest,
 )
+
+logger = logging.getLogger(__name__)
+
+#: S5: generic detail bodies for MCPGovernanceError statuses — internal state
+#: (searched ids, reasons) goes to the server log, never to the response.
+_GENERIC_ERROR_DETAILS = {
+    400: "bad request",
+    403: "forbidden",
+    404: "not found",
+    409: "conflict",
+    422: "invalid arguments",
+    502: "upstream error",
+}
 
 _PAGE = (
     """<!doctype html><html lang='en'><head><meta charset='utf-8'><meta name='viewport' content='width=device-width,initial-scale=1'><title>MCP Governance</title><style>:root{color-scheme:light;--bg:#f4f7fb;--card:#fff;--ink:#142039;--brand:#3157d5;--focus:#ffbf47}[data-theme=dark]{color-scheme:dark;--bg:#0b1120;--card:#182238;--ink:#f6f8ff;--brand:#89a5ff}*{box-sizing:border-box}body{margin:0;background:var(--bg);color:var(--ink);font:16px/1.5 system-ui}.skip{position:absolute;left:-999px}.skip:focus{left:1rem;top:1rem;background:var(--card);padding:1rem}main{max-width:1280px;margin:auto;padding:clamp(1rem,4vw,3rem)}header{display:flex;justify-content:space-between;gap:1rem}.grid{display:grid;grid-template-columns:repeat(4,1fr);gap:1rem}article{background:var(--card);padding:1rem;border-radius:16px;box-shadow:0 8px 26px #0002}button{min-height:44px;border:0;border-radius:10px;padding:.7rem 1rem;background:var(--brand);color:#fff}button:focus-visible,a:focus-visible{outline:3px solid var(--focus);outline-offset:3px}.skeleton{height:.8rem;background:#8885;border-radius:8px;animation:pulse 1.2s infinite}@keyframes pulse{50%{opacity:.4}}.empty,.error{border-left:4px solid var(--brand);padding:.7rem}.toast{position:fixed;right:1rem;bottom:1rem;background:var(--card);padding:1rem;border-radius:12px}@media(max-width:900px){.grid{grid-template-columns:repeat(2,1fr)}}@media(max-width:560px){.grid{grid-template-columns:1fr}header{flex-direction:column}}@media(prefers-reduced-motion:reduce){*{animation:none!important}}</style></head><body><a class='skip' href='#main'>Skip to main content</a><main id='main'><header><div><strong>MCP Governance 1.0</strong><h1>Every tool call governed</h1></div><div><button aria-label='Toggle theme' onclick="let r=document.documentElement;r.dataset.theme=r.dataset.theme==='dark'?'light':'dark';toast('Theme changed')">Theme</button> <button aria-label='Refresh dashboard' onclick="toast('Dashboard refreshed')">Refresh</button></div></header><section class='grid'>"""
@@ -98,6 +112,10 @@ def create_mcp_governance_app(
     ssrf = SSRFGuard()
     tracker = _build_tracker()
     budget_service = ToolBudgetService(tracker, budgets)
+    # Security decision (S8): tool args are validated against the registered
+    # input_schema (S2) but no injection-pattern sanitization is applied.
+    # Accepted risk: this layer is a gate, and args are forwarded to MCP
+    # servers — never echoed back to the LLM (OWASP LLM01 does not apply).
     engine = MCPPolicyEngine(
         registry=registry,
         policies=policies,
@@ -111,28 +129,30 @@ def create_mcp_governance_app(
     report = MCPGovernanceReport()
     gate = ApprovalGate(store=approvals)
 
-    # Demo approval so the approvals API is exercisable on a fresh app
-    # (tests/test_mcp_governance_api.py approves "aprv1" -> 200).
-    try:
-        approvals.get("aprv1")
-    except ApprovalNotFoundError:
-        approvals.insert(
-            ApprovalRequest(
-                approval_id="aprv1",
-                server_id="srv1",
-                tool_name="t1",
-                caller="alice",
-                scope_kind="user",
-                scope_key="alice",
-                args_redacted={},
-                args_hash="demo",
-                status="pending",
-                requested_at=int(time.time()),
-                decided_at=None,
-                decided_by=None,
-                expires_at=None,
+    # S9: demo approval "aprv1" is ONLY seeded when MCP_GOVERNANCE_SEED_DEMO=1
+    # (tests set it). A production fresh start must not carry a phantom
+    # pending approval for servers that do not exist.
+    if os.getenv("MCP_GOVERNANCE_SEED_DEMO", "") == "1":
+        try:
+            approvals.get("aprv1")
+        except ApprovalNotFoundError:
+            approvals.insert(
+                ApprovalRequest(
+                    approval_id="aprv1",
+                    server_id="srv1",
+                    tool_name="t1",
+                    caller="alice",
+                    scope_kind="user",
+                    scope_key="alice",
+                    args_redacted={},
+                    args_hash="demo",
+                    status="pending",
+                    requested_at=int(time.time()),
+                    decided_at=None,
+                    decided_by=None,
+                    expires_at=None,
+                )
             )
-        )
 
     app = FastAPI(title="MCP Governance API", version="1.0.0")
     # The engine is the enforcement path for the (not yet exposed) call proxy;
@@ -142,24 +162,37 @@ def create_mcp_governance_app(
     def _check_auth(
         authorization: str | None, x_tenant_id: str | None
     ) -> None:
-        """Fail-closed auth: configured key + non-empty tenant required."""
+        """Fail-closed auth: configured key + non-empty tenant required.
+
+        S13: the API key is compared with secrets.compare_digest (constant
+        time) so a timing side-channel cannot leak key bytes.
+
+        Security decision (S16): X-Tenant-Id is REQUIRED (missing -> 401) but
+        the governance stores are NOT tenant-partitioned — single-tenant scope,
+        documented out-of-scope in docs/architecture/mcp-governance.md. Do not
+        mount this app on a multi-tenant gateway without adding tenant columns
+        and filters (cross-tenant IDOR otherwise).
+        """
         if not key:
             raise HTTPException(503, "mcp API key is not configured")
-        if authorization != f"Bearer {key}" or not x_tenant_id:
+        if not secrets.compare_digest(authorization or "", f"Bearer {key}") or not x_tenant_id:
             raise HTTPException(401, "authentication and tenant are required")
 
     @app.exception_handler(MCPGovernanceError)
     async def _mcp_error_handler(
         request: Any, exc: MCPGovernanceError
     ) -> JSONResponse:
+        # S5: never echo internal state (searched ids, reasons) in the body —
+        # the real detail goes to the server log only. approval_id is the one
+        # deliberate exception: the caller needs it to act on the approval.
+        logger.warning("mcp_governance error status=%s: %s", exc.status_code, exc)
         if isinstance(exc, ApprovalRequiredError):
             return JSONResponse(
                 status_code=409,
-                content={"detail": str(exc), "approval_id": exc.approval_id},
+                content={"detail": "approval required", "approval_id": exc.approval_id},
             )
-        return JSONResponse(
-            status_code=exc.status_code, content={"detail": str(exc)}
-        )
+        detail = _GENERIC_ERROR_DETAILS.get(exc.status_code, "request failed")
+        return JSONResponse(status_code=exc.status_code, content={"detail": detail})
 
     @app.exception_handler(BudgetExceededError)
     async def _budget_error_handler(
@@ -229,10 +262,8 @@ def create_mcp_governance_app(
         x_tenant_id: str | None = Header(None),
     ) -> dict[str, object]:
         _check_auth(authorization, x_tenant_id)
-        try:
-            tools = [t.model_dump() for t in registry.list_tools(server_id)]
-        except MCPServerNotFoundError:
-            tools = []
+        # S6: unknown server must 404 like get_server — never a silent 200+[].
+        tools = [t.model_dump() for t in registry.list_tools(server_id)]
         return {"object": "list", "data": tools[offset : offset + limit]}
 
     @app.post("/v1/mcp/policies", status_code=201, response_model=ToolPolicy)

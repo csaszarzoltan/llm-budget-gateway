@@ -27,6 +27,7 @@ PUBLIC_NAMES = [
     "DuplicateBudgetError",
     "DuplicatePolicyError",
     "DuplicateServerError",
+    "InvalidArgumentsError",
     "MCPDiscoveryAdapter",
     "MCPDiscoveryError",
     "MCPGovernanceError",

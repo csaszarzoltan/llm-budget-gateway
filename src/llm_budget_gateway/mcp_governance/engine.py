@@ -7,8 +7,11 @@ implemented here.
 
 import secrets
 import time
+from collections.abc import Mapping
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any
+
+import jsonschema
 
 from llm_budget_gateway.budget_enforcement import (
     BudgetExceededError,
@@ -18,6 +21,7 @@ from llm_budget_gateway.budget_enforcement import (
 from .exceptions import (
     AccessDeniedError,
     ApprovalRequiredError,
+    InvalidArgumentsError,
     PolicyViolationError,
 )
 from .policy import PolicyEvaluator
@@ -120,6 +124,25 @@ class MCPPolicyEngine:
         )
         self._audit.append(event)
 
+    @staticmethod
+    def _validate_args(tool: Any, args: dict[str, Any]) -> None:
+        """JSON-Schema validate tool args against the registered input_schema.
+
+        S2: the registry stores ``input_schema_json`` but nothing enforced it
+        at call time, so an LLM could pass arbitrary/unexpected arguments to
+        any tool (OWASP LLM06). An empty schema ({}) validates everything, so
+        tools registered without a schema keep their current behavior.
+        """
+        schema = getattr(tool, "input_schema", None)
+        if not schema:
+            return
+        try:
+            jsonschema.validate(instance=args, schema=schema)
+        except (jsonschema.ValidationError, jsonschema.SchemaError):
+            raise InvalidArgumentsError(
+                "tool arguments failed input_schema validation"
+            ) from None
+
     async def before_call(
         self,
         *,
@@ -134,6 +157,11 @@ class MCPPolicyEngine:
         effective_request_id = request_id
         if effective_request_id is None and self._request_id_factory is not None:
             effective_request_id = self._request_id_factory()
+
+        # 0. Args must be a mapping — dict(args) below would TypeError on a
+        #    list/string and surface as an unhandled 500 (S14).
+        if not isinstance(args, Mapping):
+            raise InvalidArgumentsError("tool arguments must be a JSON object")
 
         # 1. Server must exist.
         server = self._registry.get_server(server_id)  # -> MCPServerNotFoundError
@@ -168,6 +196,10 @@ class MCPPolicyEngine:
             )
             raise AccessDeniedError(reason)
 
+        # 4b. Tool args must match the registered input_schema (S2, OWASP
+        #     LLM06) — reject malformed calls with 422 before any policy work.
+        self._validate_args(tool, dict(args))
+
         # 5. Access policy resolution (deny-by-default engine gate).
         decision = self._evaluator.decide(
             scopes=scopes, server_id=server_id, tool_name=tool_name
@@ -188,14 +220,15 @@ class MCPPolicyEngine:
         if decision.effect == "approval":
             gate = self._gate
             args_hash = args_hash_of(dict(args))
-            approved = gate.find_approved(
+            # S15: find + consume run in ONE transaction so concurrent callers
+            # cannot double-consume the same approval.
+            approved = gate.consume_approved(
                 caller=caller,
                 server_id=server_id,
                 tool_name=tool_name,
                 args_hash=args_hash,
             )
             if approved is not None:
-                gate.consume(approved.approval_id, caller)
                 decision_effect = "approved"
                 approval_id = approved.approval_id
             else:
@@ -225,8 +258,8 @@ class MCPPolicyEngine:
         else:
             decision_effect = "allowed"
 
-        # 6. SSRF guard on tool args.
-        verdict = self._ssrf.check(dict(args))
+        # 6. SSRF guard on tool args (async path — DNS off the event loop, S11).
+        verdict = await self._ssrf.acheck(dict(args))
         if not verdict.allowed:
             self._audit_blocked(
                 caller=caller,

@@ -5,6 +5,7 @@ functional in the RED phase (default patterns, mcp_approvals table creation);
 the behavioral methods are implemented here.
 """
 
+import asyncio
 import hashlib
 import ipaddress
 import json
@@ -111,7 +112,12 @@ class SSRFGuard:
         )
 
     def check(self, args: Mapping[str, Any]) -> RuleVerdict:
-        """Inspect every url field recursively; block on bad addresses (RED stub)."""
+        """Inspect every url field recursively; block on bad addresses.
+
+        Sync entry point: hostname resolution calls socket.getaddrinfo inline.
+        Async callers (the engine) MUST use acheck() so the event loop is
+        never blocked by DNS (S11).
+        """
         urls = self.extract_urls(args)
         if not urls:
             return RuleVerdict(
@@ -119,6 +125,24 @@ class SSRFGuard:
             )
         for url in urls:
             verdict = self._check_url(url)
+            if not verdict.allowed:
+                return verdict
+        return RuleVerdict(allowed=True, rule="ssrf_guard", reason="urls allowed")
+
+    async def acheck(self, args: Mapping[str, Any]) -> RuleVerdict:
+        """Async twin of check(): DNS resolution off the event loop (S11).
+
+        socket.getaddrinfo is a blocking syscall; called from the async engine
+        it would stall every other coroutine. Resolve hostnames via
+        asyncio.to_thread, the same pattern cost_tracking.py uses.
+        """
+        urls = self.extract_urls(args)
+        if not urls:
+            return RuleVerdict(
+                allowed=True, rule="ssrf_guard", reason="no url fields", detail=None
+            )
+        for url in urls:
+            verdict = await self._acheck_url(url)
             if not verdict.allowed:
                 return verdict
         return RuleVerdict(allowed=True, rule="ssrf_guard", reason="urls allowed")
@@ -141,54 +165,11 @@ class SSRFGuard:
         return urls
 
     def _check_url(self, raw: str) -> RuleVerdict:
-        """Evaluate a single candidate URL against the SSRF policy."""
-        try:
-            parsed = urllib.parse.urlsplit(raw)
-            scheme = parsed.scheme.lower()
-            host = (parsed.hostname or "").lower()
-        except ValueError:
-            return RuleVerdict(
-                allowed=False,
-                rule="ssrf_guard",
-                reason=f"ssrf: invalid url {raw}",
-                detail=raw,
-            )
-        if scheme not in ("http", "https"):
-            return RuleVerdict(
-                allowed=False,
-                rule="ssrf_guard",
-                reason=f"ssrf: unsupported scheme {scheme}",
-                detail=raw,
-            )
-        if host in self._allowed_hosts:
-            return RuleVerdict(
-                allowed=True,
-                rule="ssrf_guard",
-                reason=f"allowed by allowlist {host}",
-                detail=raw,
-            )
-        if not host:
-            return RuleVerdict(
-                allowed=False,
-                rule="ssrf_guard",
-                reason=f"ssrf: invalid url {raw}",
-                detail=raw,
-            )
-        # IP literal?
-        try:
-            addr = ipaddress.ip_address(host)
-        except ValueError:
-            addr = None
-        if addr is not None:
-            blocked = self._blocked_reason(addr)
-            if blocked:
-                return RuleVerdict(
-                    allowed=False, rule="ssrf_guard", reason=blocked, detail=raw
-                )
-            return RuleVerdict(
-                allowed=True, rule="ssrf_guard", reason="urls allowed", detail=raw
-            )
-        # Hostname: resolve ALL addresses; any blocked address blocks.
+        """Evaluate one candidate URL; hostnames resolved inline (sync)."""
+        preflight = self._preflight(raw)
+        if preflight[0] is not None:
+            return preflight[0]
+        host = preflight[1]
         try:
             infos = socket.getaddrinfo(host, None)
         except OSError:
@@ -198,6 +179,99 @@ class SSRFGuard:
                 reason=f"ssrf: unknown host {host}",
                 detail=raw,
             )
+        return self._verdict_for_infos(host, infos, raw)
+
+    async def _acheck_url(self, raw: str) -> RuleVerdict:
+        """Evaluate one candidate URL; DNS via asyncio.to_thread (S11)."""
+        preflight = self._preflight(raw)
+        if preflight[0] is not None:
+            return preflight[0]
+        host = preflight[1]
+        try:
+            infos = await asyncio.to_thread(socket.getaddrinfo, host, None)
+        except OSError:
+            return RuleVerdict(
+                allowed=False,
+                rule="ssrf_guard",
+                reason=f"ssrf: unknown host {host}",
+                detail=raw,
+            )
+        return self._verdict_for_infos(host, infos, raw)
+
+    def _preflight(self, raw: str) -> "tuple[RuleVerdict | None, str]":
+        """Scheme/host validation shared by the sync and async paths.
+
+        Returns (None, host) when the URL needs DNS resolution; otherwise a
+        terminal RuleVerdict plus an empty host string.
+        """
+        try:
+            parsed = urllib.parse.urlsplit(raw)
+            scheme = parsed.scheme.lower()
+            host = (parsed.hostname or "").lower()
+        except ValueError:
+            return (
+                RuleVerdict(
+                    allowed=False,
+                    rule="ssrf_guard",
+                    reason=f"ssrf: invalid url {raw}",
+                    detail=raw,
+                ),
+                "",
+            )
+        if scheme not in ("http", "https"):
+            return (
+                RuleVerdict(
+                    allowed=False,
+                    rule="ssrf_guard",
+                    reason=f"ssrf: unsupported scheme {scheme}",
+                    detail=raw,
+                ),
+                "",
+            )
+        if host in self._allowed_hosts:
+            return (
+                RuleVerdict(
+                    allowed=True,
+                    rule="ssrf_guard",
+                    reason=f"allowed by allowlist {host}",
+                    detail=raw,
+                ),
+                "",
+            )
+        if not host:
+            return (
+                RuleVerdict(
+                    allowed=False,
+                    rule="ssrf_guard",
+                    reason=f"ssrf: invalid url {raw}",
+                    detail=raw,
+                ),
+                "",
+            )
+        # IP literal?
+        try:
+            addr = ipaddress.ip_address(host)
+        except ValueError:
+            addr = None
+        if addr is not None:
+            blocked = self._blocked_reason(addr)
+            if blocked:
+                return (
+                    RuleVerdict(
+                        allowed=False, rule="ssrf_guard", reason=blocked, detail=raw
+                    ),
+                    "",
+                )
+            return (
+                RuleVerdict(
+                    allowed=True, rule="ssrf_guard", reason="urls allowed", detail=raw
+                ),
+                "",
+            )
+        return (None, host)
+
+    def _verdict_for_infos(self, host: str, infos: Any, raw: str) -> RuleVerdict:
+        """Any resolved address in private/reserved space blocks the URL."""
         for info in infos:
             sockaddr = info[4]
             try:
@@ -477,6 +551,55 @@ class ApprovalGate:
             (caller, server_id, tool_name, args_hash, now),
         ).fetchone()
         return _row_to_approval(row) if row is not None else None
+
+    def consume_approved(
+        self,
+        *,
+        caller: str,
+        server_id: str,
+        tool_name: str,
+        args_hash: str,
+    ) -> ApprovalRequest | None:
+        """Atomically claim the newest matching approved approval (S15).
+
+        find_approved + consume as separate statements let two concurrent
+        callers both observe the same row and double-consume it. Running the
+        find and the status flip inside one BEGIN IMMEDIATE transaction makes
+        the claim single-winner: the second caller blocks on the write lock,
+        then sees status='consumed', gets None and creates a fresh request.
+        """
+        now = self._store.now()
+        conn = self._store._conn
+        try:
+            conn.execute("BEGIN IMMEDIATE")
+            row = conn.execute(
+                """
+                SELECT * FROM mcp_approvals
+                WHERE status = 'approved' AND caller = ? AND server_id = ?
+                  AND tool_name = ? AND args_hash = ?
+                  AND (expires_at IS NULL OR expires_at >= ?)
+                ORDER BY requested_at DESC, approval_id DESC
+                LIMIT 1
+                """,
+                (caller, server_id, tool_name, args_hash, now),
+            ).fetchone()
+            if row is None:
+                conn.commit()
+                return None
+            conn.execute(
+                "UPDATE mcp_approvals SET status = 'consumed', "
+                "decided_by = ?, decided_at = ? WHERE approval_id = ?",
+                (caller, now, row["approval_id"]),
+            )
+            updated = conn.execute(
+                "SELECT * FROM mcp_approvals WHERE approval_id = ?",
+                (row["approval_id"],),
+            ).fetchone()
+            conn.commit()
+        except Exception:
+            conn.rollback()
+            raise
+        return _row_to_approval(updated)
 
     def expire_stale(self, now: int | None = None) -> int:
         """pending requests with expires_at < now -> expired; return count (RED stub)."""

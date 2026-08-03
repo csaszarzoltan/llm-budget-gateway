@@ -139,12 +139,13 @@ class TestApiBehavior:
         r = run_sync_request(tr, "POST", "/v1/mcp/servers", headers=AUTH_HEADERS, json={"name": "x"})
         assert r.status_code == 422
 
-    def test_get_tools(self):
+    def test_get_tools_unknown_server_404(self):
+        # S6: list_tools for an unknown server must 404 like get_server —
+        # a silent 200+[] would mask misconfiguration.
         app = create_mcp_governance_app("k")
         tr = httpx.ASGITransport(app=app)
         r = run_sync_request(tr, "GET", "/v1/mcp/servers/srv123/tools", headers=AUTH_HEADERS)
-        assert r.status_code == 200
-        assert r.json()["object"] == "list"
+        assert r.status_code == 404
 
     def test_create_policy_201(self):
         app = create_mcp_governance_app("k")
@@ -188,14 +189,42 @@ class TestApiBehavior:
         assert r.json()["object"] == "list"
 
     def test_approve_approval(self):
-        app = create_mcp_governance_app("k")
-        tr = httpx.ASGITransport(app=app)
-        r = run_sync_request(
-            tr, "POST", "/v1/mcp/approvals/aprv1/approve",
-            headers=AUTH_HEADERS, json={"actor": "bob"},
-        )
-        assert r.status_code == 200
-        assert r.json()["status"] == "approved"
+        # S9: the demo approval is no longer seeded by the factory — the test
+        # seeds its own fixture through the store (env flag alternative:
+        # MCP_GOVERNANCE_SEED_DEMO=1).
+        from llm_budget_gateway.mcp_governance import open_mcp_db
+        from llm_budget_gateway.mcp_governance.rules import ApprovalStore
+        from llm_budget_gateway.mcp_governance.schemas import ApprovalRequest
+
+        conn = open_mcp_db(":memory:")
+        try:
+            ApprovalStore(conn).insert(
+                ApprovalRequest(
+                    approval_id="aprv1",
+                    server_id="srv1",
+                    tool_name="t1",
+                    caller="alice",
+                    scope_kind="user",
+                    scope_key="alice",
+                    args_redacted={},
+                    args_hash="demo",
+                    status="pending",
+                    requested_at=100,
+                    decided_at=None,
+                    decided_by=None,
+                    expires_at=None,
+                )
+            )
+            app = create_mcp_governance_app("k", conn=conn)
+            tr = httpx.ASGITransport(app=app)
+            r = run_sync_request(
+                tr, "POST", "/v1/mcp/approvals/aprv1/approve",
+                headers=AUTH_HEADERS, json={"actor": "bob"},
+            )
+            assert r.status_code == 200
+            assert r.json()["status"] == "approved"
+        finally:
+            conn.close()
 
     def test_approve_unknown_404(self):
         app = create_mcp_governance_app("k")

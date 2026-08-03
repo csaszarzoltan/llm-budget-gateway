@@ -48,6 +48,12 @@ class AccessDeniedError(MCPGovernanceError):
     status_code = 403
 
 
+class InvalidArgumentsError(MCPGovernanceError):
+    """Tool arguments failed validation (non-mapping args, input_schema, ...)."""
+
+    status_code = 422
+
+
 class PolicyViolationError(MCPGovernanceError):
     status_code = 403
 

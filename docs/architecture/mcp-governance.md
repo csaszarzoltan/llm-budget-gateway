@@ -48,6 +48,22 @@ convention as the fleet/assurance apps), and a Redis counter store.
 tool call is rejected; a retired server is rejected; an unknown SSRF verdict
 is a block; an approval-gated tool call is blocked until a human approves.
 
+**Security decisions (security review S1-S16):**
+
+- **S16 — single-tenant scope.** `X-Tenant-Id` is enforced (missing -> 401)
+  but none of the six governance tables carry a tenant column, so data is
+  intentionally single-tenant in v1 (same convention as fleet/assurance).
+  Mounting this app on a multi-tenant gateway REQUIRES adding tenant columns
+  + filters first — until then it is a cross-tenant IDOR surface.
+- **S8 — accepted risk: no arg injection sanitization.** Tool args are
+  JSON-Schema validated against the registered `input_schema` (S2) but no
+  injection-pattern sanitization is applied. Rationale: the governance layer
+  is a gate, and args are forwarded to MCP servers — never echoed back to the
+  LLM — so OWASP LLM01 (indirect prompt injection) does not apply here.
+- **S9 — demo data gated.** The demo approval `aprv1` is seeded only when
+  `MCP_GOVERNANCE_SEED_DEMO=1` (test fixture); production fresh starts have
+  zero phantom approvals.
+
 ---
 
 ## 2. Module layout
