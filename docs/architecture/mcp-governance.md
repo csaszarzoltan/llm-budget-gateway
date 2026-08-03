@@ -955,11 +955,17 @@ class MCPGovernanceReport:
         (each present only when the corresponding report condition holds)."""
 ```
 
-**Assurance Center integration:** `assurance_api.py`'s `services` dict gains a
-`"mcp-governance"` capability — `lambda b: MCPGovernanceReport().assess(**b)` —
-so `POST /v1/assurance/mcp-governance` returns the posture assessment, and the
-Assurance Center dashboard surfaces it as a new capability card ("MCP
-governance"). No change to the assurance suite's other 20 capabilities.
+**Assurance Center integration (pending — NOT yet wired):** the design calls
+for `assurance_api.py`'s `services` dict to gain a `"mcp-governance"`
+capability — `lambda b: MCPGovernanceReport().assess(**b)` — so a request to
+the assurance path `.../v1/assurance/mcp-governance` returns the posture
+assessment, and the Assurance Center dashboard surfaces it as a new
+capability card ("MCP governance"). **As of this release the capability is
+NOT registered** (the `services` dict has no `mcp-governance` entry), so
+that assurance request currently returns `404 unknown assurance
+capability`. Wiring it is tracked as follow-up work; the standalone
+`GET /v1/mcp/report` endpoint on the governance app already returns the same
+posture snapshot. No change to the assurance suite's other 20 capabilities.
 
 **Cost ledger integration:** `ToolBudgetService.record_usage` writes tool-call
 costs into the shared `cost_records` ledger with `tool_name` attribution, so

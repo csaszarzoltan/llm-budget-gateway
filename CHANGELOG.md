@@ -9,6 +9,18 @@ All notable changes to this project will be documented in this file.
 - Privacy-safe local usage counters containing event names and counts only.
 - Status-specific runner recovery guidance and a bounded browser timeout.
 - TDD acceptance coverage and a complete product/requirements/implementation report.
+- **MCP server governance** (`mcp_governance` package) — versioned MCP server
+  registry with tool inventory, per-tool `allow`/`deny`/`approval` policies
+  (deny by default), per-tool soft/hard cost ceilings enforced against the
+  shared cost ledger, a PII-redacted audit trail for every call attempt, SSRF
+  and PII rules, four-eyes approval gates, and a policy engine
+  (`before_call`/`after_call`) for gating tool calls.
+- MCP governance REST API and dashboard — `create_mcp_governance_app()`
+  serves `/v1/mcp/servers`, `/v1/mcp/policies`, `/v1/mcp/budgets`,
+  `/v1/mcp/audit`, `/v1/mcp/approvals`, `/v1/mcp/report`, and the `/mcp`
+  dashboard, authenticated with `GATEWAY_MCP_API_KEY` + `X-Tenant-Id`.
+- Live tool discovery via the official MCP SDK (`MCPDiscoveryAdapter`,
+  `mcp>=1.2,<2` runtime dependency, lazy-imported).
 
 ### Changed
 - The runner prevents duplicate in-flight submissions and announces busy state.
@@ -16,6 +28,17 @@ All notable changes to this project will be documented in this file.
 
 ### Security
 - Workflow progress and counters exclude tenant IDs, credentials, request bodies, prompts, results, and response content.
+- MCP governance fails closed at every boundary: no API key → 503, wrong key /
+  missing tenant → 401, unknown server/tool → 404, default policy deny,
+  retired server and disabled tool blocked, SSRF-unsafe URLs blocked, tool
+  arguments JSON-Schema validated (OWASP LLM06), approval-gated calls blocked
+  until a human approves (four-eyes).
+- MCP audit and approval records persist PII-redacted arguments; error bodies
+  never echo internal state; the API key is compared with
+  `secrets.compare_digest` (constant time).
+- Demo approval data is seeded only when `MCP_GOVERNANCE_SEED_DEMO=1`; v1 is
+  single-tenant (S16) — do not mount on a multi-tenant gateway without tenant
+  columns and filters.
 
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).

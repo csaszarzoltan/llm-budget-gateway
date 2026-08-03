@@ -2,7 +2,7 @@
 
 [![Python 3.11+](https://img.shields.io/badge/python-3.11%2B-blue.svg)](https://www.python.org/downloads/)
 ![Version 9.4.0](https://img.shields.io/badge/version-9.4.0-blue.svg)
-![Tests 410 passing](https://img.shields.io/badge/tests-410%20passing-brightgreen.svg)
+![Tests 800 passing](https://img.shields.io/badge/tests-800%20passing-brightgreen.svg)
 ![New Scale modules 97% coverage](https://img.shields.io/badge/scale%20coverage-97%25-brightgreen.svg)
 [![License MIT](https://img.shields.io/badge/license-MIT-blue.svg)](https://opensource.org/licenses/MIT)
 
@@ -77,6 +77,8 @@ Primary users include:
 - Data retention, legal hold, privacy export, and deletion workflows
 - Four-eyes approvals and evidence integrity hashes
 - No prompt or response content in the cost ledger
+- MCP server governance: registry, per-tool allow/deny/approval policies,
+  per-tool cost ceilings, SSRF + PII rules, and a redacted audit trail
 
 ### Quality, governance, and assurance
 
@@ -228,6 +230,7 @@ htmlcov/
   - Pydantic and pydantic-settings
   - LiteLLM 1.40 or newer and lower than 2.0
   - PyYAML
+  - MCP SDK 1.2 or newer and lower than 2.0 (live tool discovery)
 - Development extras:
   - Pytest
   - pytest-asyncio
@@ -335,6 +338,7 @@ The core gateway and product centers are independent FastAPI app factories. Run 
 | 8012 | Assurance | `llm_budget_gateway.assurance_api:create_assurance_app` | `GATEWAY_ASSURANCE_API_KEY` | [Assurance API](docs/api/assurance-api.md) |
 | 8014 | Delivery | `llm_budget_gateway.delivery_api:create_delivery_app` | `GATEWAY_DELIVERY_API_KEY` | [Delivery API](docs/api/delivery-api.md) |
 | 8015 | Scale | `llm_budget_gateway.scale_api:create_scale_app` | `GATEWAY_SCALE_API_KEY` | [Scale API](docs/api/scale-api.md) |
+| 8016 | MCP Governance | `llm_budget_gateway.mcp_governance.api:create_mcp_governance_app` | `GATEWAY_MCP_API_KEY` | [MCP Governance](docs/mcp-governance.md) |
 
 Protected product APIs normally require both `Authorization: Bearer <key>` and `X-Tenant-Id`. An absent server-side API key returns `503`, invalid authentication returns `401`, unknown capabilities return `404`, and invalid payloads return `422`.
 
@@ -409,7 +413,7 @@ Use [Scale Center](docs/scale-center.md), [Migration to 7.0](docs/migration-7.0.
 Current validated result:
 
 ```text
-356 passed
+800 passed
 ```
 
 ### Coverage
@@ -444,6 +448,7 @@ See [CONTRIBUTING.md](CONTRIBUTING.md) for branch, typing, testing, security, an
 | [`examples/cost_tracking.py`](examples/cost_tracking.py) | Pricing, cost calculation, SQLite persistence, spend queries, and streaming aggregation |
 | [`examples/budget_enforcement.py`](examples/budget_enforcement.py) | Budget windows, YAML loading, hierarchical scopes, RPM/TPM limits, and dollar budgets |
 | [`examples/fallback_chains.py`](examples/fallback_chains.py) | Error classification, cooldowns, fallback dispatch, and context checks |
+| [`examples/mcp_governance.py`](examples/mcp_governance.py) | MCP server registry, per-tool policies/budgets, audit trail, SSRF + PII rules, engine, and REST API |
 | [`examples/budgets.example.yaml`](examples/budgets.example.yaml) | Canonical budget configuration template |
 
 ## Documentation index
@@ -483,6 +488,7 @@ See [CONTRIBUTING.md](CONTRIBUTING.md) for branch, typing, testing, security, an
 - [Scale Center](docs/scale-center.md)
 - [Governance Suite](docs/governance-suite.md)
 - [Enterprise Control Suite](docs/enterprise-control-suite.md)
+- [MCP Governance](docs/mcp-governance.md)
 
 ### API guides
 
@@ -499,6 +505,7 @@ See [CONTRIBUTING.md](CONTRIBUTING.md) for branch, typing, testing, security, an
 - [Assurance API](docs/api/assurance-api.md)
 - [Delivery API](docs/api/delivery-api.md)
 - [Scale API](docs/api/scale-api.md)
+- [MCP Governance API](docs/api/mcp-governance-api.md)
 
 ### Research, validation, and delivery records
 
@@ -578,3 +585,17 @@ Each guided workflow step now loads a safe, non-secret example JSON object and a
 ## Resumable daily workflows 9.4
 
 The Unified Console now preserves non-secret workflow completion state locally, resumes at the last active step, supports direct accessible step navigation, and shows completed progress on task cards. Successful guided requests complete their current step. The API runner also prevents duplicate in-flight submission, times out stalled browser calls after 30 seconds, and provides next-action guidance for common HTTP failures. See [Task-oriented Unified Console](docs/task-oriented-console.md) and the [9.4 implementation report](docs/implementation-report-9.4.md).
+
+## MCP server governance 9.4
+
+Tool-level governance for MCP servers: a versioned server registry with tool inventory, per-tool `allow`/`deny`/`approval` policies (deny by default), per-tool soft/hard cost ceilings enforced against the shared cost ledger, a PII-redacted audit trail for every call attempt, SSRF and PII rules, and a policy engine that gates calls before execution and records outcomes after. Served as a standalone FastAPI app (`GATEWAY_MCP_API_KEY`) with a responsive `/mcp` dashboard; the engine API (`before_call` / `after_call`) is the integration point for an MCP proxy adapter.
+
+```bash
+export GATEWAY_MCP_API_KEY='replace-with-a-strong-random-secret'
+.venv/bin/uvicorn \
+  llm_budget_gateway.mcp_governance.api:create_mcp_governance_app \
+  --factory \
+  --port 8016
+```
+
+See [MCP Governance](docs/mcp-governance.md), the [MCP Governance API](docs/api/mcp-governance-api.md), and the runnable [governance example](examples/mcp_governance.py).

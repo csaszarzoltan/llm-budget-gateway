@@ -87,3 +87,5 @@ SQLite cost ledger the gateway wrote.
 - [Cost Tracking](cost-tracking.md) — how spend is priced and stored
 - [Budget Configuration](budget-configuration.md) — scopes, limits, windows
 - [Fallback Chains](fallback-chains.md) — automatic model failover
+- [MCP Server Governance](mcp-governance.md) — tool-level access control, per-tool budgets, audit trails
+- [Runnable examples](../examples/mcp_governance.py) — MCP governance offline walkthrough

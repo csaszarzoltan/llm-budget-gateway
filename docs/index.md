@@ -100,6 +100,9 @@ virtualenv and print their own output:
 
 - [Unified Gateway Console](unified-console.md) - searchable UI, health checks, command palette and universal API runner.
 
+- [MCP Governance](mcp-governance.md) - MCP server registry, per-tool policies and budgets, audit trail, SSRF/PII rules, engine.
+- [MCP Governance API](api/mcp-governance-api.md) - authentication, endpoints, request/response examples, errors.
+
 - [Activation Center](activation-center.md) - guided setup and fail-closed activation controls.
 - [Activation API](api/activation-api.md) - capability and authentication reference.
 
