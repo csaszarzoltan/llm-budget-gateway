@@ -9,6 +9,7 @@ from fastapi import FastAPI, Header, HTTPException
 from fastapi.responses import HTMLResponse
 
 from . import assurance_suite as s
+from .mcp_governance import MCPGovernanceReport
 
 NAMES = [
     "Risk tier",
@@ -65,6 +66,8 @@ def create_assurance_app(api_key: str | None = None) -> FastAPI:
         "maturity": lambda b: s.MaturityScore().calculate(b["domains"]),
         "assurance-report": lambda b: s.AssuranceReport().build(b["findings"]),
         "benefit-realization": lambda b: s.BenefitRealization().calculate(**b),
+        # assess() takes the posture report dict as a single Mapping arg (not **b).
+        "mcp-governance": lambda b: MCPGovernanceReport().assess(b),
     }
     app = FastAPI(title="Gateway Assurance API", version="5.0.0")
 

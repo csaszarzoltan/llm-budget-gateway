@@ -47,6 +47,22 @@ async def test_all_api_flows():
 
 
 @pytest.mark.asyncio
+async def test_mcp_governance_capability():
+    app = create_assurance_app("k")
+    tr = httpx.ASGITransport(app=app)
+    h = {"Authorization": "Bearer k", "X-Tenant-Id": "t"}
+    async with httpx.AsyncClient(transport=tr, base_url="http://x") as c:
+        r = await c.post("/v1/assurance/mcp-governance", headers=h, json={})
+        assert r.status_code == 200, r.text
+        body = r.json()
+        # assess() shape: risk_tier / gaps / recommendation
+        assert set(body) == {"risk_tier", "gaps", "recommendation"}
+        assert body["risk_tier"] == "low"
+        assert body["gaps"] == ["no servers registered"]
+        assert body["recommendation"] == "Address: no servers registered"
+
+
+@pytest.mark.asyncio
 async def test_ui_and_fail_closed():
     app = create_assurance_app("")
     tr = httpx.ASGITransport(app=app)
