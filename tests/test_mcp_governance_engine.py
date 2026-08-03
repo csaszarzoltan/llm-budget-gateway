@@ -174,12 +174,21 @@ class TestMCPPolicyEngineBehavior:
 
     @pytest.mark.asyncio
     async def test_before_call_allow_path_returns_context(self, engine):
-        from llm_budget_gateway.mcp_governance import MCPRegistryRequest, ToolInfo
+        from llm_budget_gateway.mcp_governance import (
+            MCPRegistryRequest, ToolInfo, ToolPolicyRequest,
+        )
 
         srv = engine._registry.register(
             MCPRegistryRequest(
                 name="srv1", transport="stdio",
                 tools=[ToolInfo(name="t1")],
+            )
+        )
+        engine._policies.create_policy(
+            ToolPolicyRequest(
+                scope_kind="global", scope_key="default",
+                server_id=srv.server_id, tool_name="t1",
+                effect="allow",
             )
         )
         ctx = await engine.before_call(
@@ -245,12 +254,21 @@ class TestMCPPolicyEngineBehavior:
 
     @pytest.mark.asyncio
     async def test_before_call_ssrf_block(self, engine):
-        from llm_budget_gateway.mcp_governance import MCPRegistryRequest, ToolInfo
+        from llm_budget_gateway.mcp_governance import (
+            MCPRegistryRequest, ToolInfo, ToolPolicyRequest,
+        )
 
         srv = engine._registry.register(
             MCPRegistryRequest(
                 name="srv1", transport="stdio",
                 tools=[ToolInfo(name="t1")],
+            )
+        )
+        engine._policies.create_policy(
+            ToolPolicyRequest(
+                scope_kind="global", scope_key="default",
+                server_id=srv.server_id, tool_name="t1",
+                effect="allow",
             )
         )
         with pytest.raises(PolicyViolationError):
@@ -266,6 +284,7 @@ class TestMCPPolicyEngineBehavior:
             MCPRegistryRequest,
             ToolBudgetRequest,
             ToolInfo,
+            ToolPolicyRequest,
         )
 
         engine._budgets._budgets.create_budget(
@@ -279,6 +298,13 @@ class TestMCPPolicyEngineBehavior:
             MCPRegistryRequest(
                 name="srv1", transport="stdio",
                 tools=[ToolInfo(name="t1")],
+            )
+        )
+        engine._policies.create_policy(
+            ToolPolicyRequest(
+                scope_kind="global", scope_key="default",
+                server_id=srv.server_id, tool_name="t1",
+                effect="allow",
             )
         )
         with pytest.raises(BudgetExceededError):

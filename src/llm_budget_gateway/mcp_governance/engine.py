@@ -52,29 +52,6 @@ class CallContext:
     reason: str | None
 
 
-class _EnginePolicyStore:
-    """Policy-store view that defaults to ``allow`` when nothing matches.
-
-    The engine is the gateway's permissive-by-default gate: a tool call is
-    permitted unless a policy denies it or requires approval, and the SSRF /
-    budget / registry gates below still enforce their own fail-closed rules.
-    The standalone ``ToolPolicyStore`` keeps its fail-closed ``deny`` default
-    for direct policy evaluation (spec §6.2).
-    """
-
-    def __init__(self, store: "ToolPolicyStore") -> None:
-        self._store = store
-
-    @property
-    def default_effect(self) -> str:
-        return "allow"
-
-    def list_policies(self) -> list[object]:
-        return self._store.list_policies()
-
-    def get_policy(self, policy_id: str) -> object:
-        return self._store.get_policy(policy_id)
-
 
 class MCPPolicyEngine:
     """Gate a tool call BEFORE execution, record the outcome AFTER."""
@@ -102,7 +79,7 @@ class MCPPolicyEngine:
         self._notifier = notifier
         self._request_id_factory = request_id_factory
         self._gate = ApprovalGate(store=approvals)
-        self._evaluator = PolicyEvaluator(_EnginePolicyStore(policies))
+        self._evaluator = PolicyEvaluator(policies)
 
     def _blocked_scope(self, scopes: list["BudgetScope"]) -> "BudgetScope":
         """The scope used for audit rows: the caller's most specific scope."""
@@ -191,7 +168,7 @@ class MCPPolicyEngine:
             )
             raise AccessDeniedError(reason)
 
-        # 5. Access policy resolution (allow-by-default engine gate).
+        # 5. Access policy resolution (deny-by-default engine gate).
         decision = self._evaluator.decide(
             scopes=scopes, server_id=server_id, tool_name=tool_name
         )
