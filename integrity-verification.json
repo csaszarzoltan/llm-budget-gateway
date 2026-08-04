@@ -6,12 +6,12 @@
   "intentional_changes": [
     "CHANGELOG.md",
     "FEATURES-DONE.md",
-    "README.md",
     "pyproject.toml",
-    "src/llm_budget_gateway.egg-info/PKG-INFO",
-    "src/llm_budget_gateway.egg-info/SOURCES.txt",
+    "README.md",
     "src/llm_budget_gateway/__init__.py",
     "src/llm_budget_gateway/console_api.py",
+    "src/llm_budget_gateway.egg-info/PKG-INFO",
+    "src/llm_budget_gateway.egg-info/SOURCES.txt",
     "ui/package-lock.json",
     "ui/package.json",
     "ui/src/main.test.tsx",
@@ -20,5 +20,10 @@
     "ui/tsconfig.tsbuildinfo",
     "uv.lock"
   ],
-  "integrity_result": "PASS"
+  "integrity_result": "PASS",
+  "autonomous_iterations": 100,
+  "python_tests": "910 passed, 0 failed",
+  "frontend_tests": "4 passed, 0 failed",
+  "new_module_coverage": "98%",
+  "ruff": "0 errors repository-wide"
 }

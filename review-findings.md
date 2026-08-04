@@ -251,3 +251,20 @@ The previously blocking findings were remediated in release 13.2.3.
 ### Updated verdict
 
 ✅ **APPROVED** for the tested local/single-node scope. Production multi-instance and intentionally single-tenant MCP limitations remain documented architecture constraints, not hidden completion claims.
+
+---
+
+## Remediation Validation, 2026-08-04, Release 13.4.0
+
+The blocking findings in this independent review were addressed in the subsequent fix pass:
+
+- The compiled React cockpit is included and `/cockpit` is covered by the full regression suite.
+- Provider compatibility now executes measured HTTP checks against the selected stored provider connection. The former caller-supplied evaluator is explicitly documented only as offline evidence import.
+- Incident explanations can now be generated from a real product request record with route, model, outcome, latency, reason, and cost evidence.
+- The Safety workspace selects real providers and recent request IDs and no longer posts hardcoded demo outcomes or a hardcoded incident ID.
+- Safety evidence routes are local-only, authentication failures block regardless of probe ordering, and broader secret patterns are redacted.
+- A jsdom-rendered React smoke test verifies actual navigation and accessible Safety controls.
+- A fail-closed release builder requires `ui/dist` and excludes runtime databases, WAL/SHM files, encryption keys, logs, caches, dependency trees, and generated metadata.
+- An MIT license was added.
+
+This remediation note does not claim that later P1/P2 market-roadmap items such as a distributed Postgres implementation or commercial packaging were part of the P0 fix scope.

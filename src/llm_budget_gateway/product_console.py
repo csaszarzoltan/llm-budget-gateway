@@ -276,6 +276,25 @@ CREATE TABLE IF NOT EXISTS pc_activity(id TEXT PRIMARY KEY,app_id TEXT,route TEX
         self.db.commit()
         return item
 
+    def activity_item(self, request_id: str) -> dict[str, Any]:
+        """Return one privacy-safe routing decision by request identifier."""
+        row = self.db.execute(
+            "SELECT * FROM pc_activity WHERE id=?", (request_id,)
+        ).fetchone()
+        if row is None:
+            raise KeyError(request_id)
+        return {
+            "id": row[0],
+            "app_id": row[1],
+            "route": row[2],
+            "model": row[3],
+            "cost_usd": float(row[4]),
+            "latency_ms": int(row[5]),
+            "success": bool(row[6]),
+            "reason": row[7],
+            "created_at": row[8],
+        }
+
     def activity(self) -> list[dict[str, Any]]:
         """Return recent routing decisions."""
         rows = self.db.execute(

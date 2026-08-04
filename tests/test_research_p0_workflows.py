@@ -219,3 +219,52 @@ def test_incident_validation_nested_redaction_and_fix_variants() -> None:
         IncidentEvidence("other", 1, "policy", "blocked", "custom rule", "warning", {})
     )
     assert "linked route" in store.explain("other")["fix"].lower()
+
+
+def test_compatibility_run_store_persists_history(tmp_path: Path) -> None:
+    from llm_budget_gateway.p0_workflows import CompatibilityRunStore
+
+    db = tmp_path / "compatibility.db"
+    store = CompatibilityRunStore(sqlite3.connect(db))
+    result = ProviderCompatibilityLab().evaluate(
+        provider_id="provider-a",
+        probes=[CompatibilityProbe("authentication", True, 12)],
+    )
+    run = store.save(result, checked_at=100)
+    assert run["run_id"].startswith("compat_")
+    assert run["checked_at"] == 100
+    history = CompatibilityRunStore(sqlite3.connect(db)).list("provider-a", limit=10)
+    assert history == [run]
+
+
+def test_compatibility_run_store_validates_limit_and_provider() -> None:
+    from llm_budget_gateway.p0_workflows import CompatibilityRunStore
+
+    store = CompatibilityRunStore(sqlite3.connect(":memory:"))
+    with pytest.raises(ValueError, match="provider_id"):
+        store.list("", limit=10)
+    with pytest.raises(ValueError, match="limit"):
+        store.list("p", limit=0)
+
+
+@pytest.mark.asyncio
+async def test_compatibility_history_api() -> None:
+    app = create_console_app()
+    async with httpx.AsyncClient(
+        transport=httpx.ASGITransport(app=app), base_url="http://console"
+    ) as client:
+        created = await client.post(
+            "/v1/console/compatibility/evaluate",
+            json={
+                "provider_id": "history-provider",
+                "probes": [
+                    {"capability": "authentication", "passed": True, "latency_ms": 3}
+                ],
+            },
+        )
+        assert created.status_code == 200
+        history = await client.get(
+            "/v1/console/compatibility/history-provider/history?limit=5"
+        )
+        assert history.status_code == 200
+        assert history.json()["runs"][0]["score"] == 100

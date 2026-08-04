@@ -66,7 +66,10 @@ class ProviderCompatibilityLab:
             "ready"
             if not failed
             else "blocked"
-            if capabilities[0] == "authentication" and not probes[0].passed
+            if any(
+                probe.capability == "authentication" and not probe.passed
+                for probe in probes
+            )
             else "degraded"
         )
         repairs = tuple(self._repair(probe) for probe in failed)
@@ -118,7 +121,18 @@ class IncidentTimelineStore:
     """Persist, redact, and explain chronological incident evidence."""
 
     _SEVERITIES = {"info", "warning", "critical"}
-    _SECRET_KEYS = {"authorization", "api_key", "token", "secret", "password"}
+    _SECRET_KEYS = {
+        "authorization",
+        "api_key",
+        "apikey",
+        "x-api-key",
+        "token",
+        "access_token",
+        "refresh_token",
+        "secret",
+        "client_secret",
+        "password",
+    }
 
     def __init__(self, connection: sqlite3.Connection) -> None:
         """Initialize the SQLite incident evidence store."""
@@ -235,4 +249,312 @@ class IncidentTimelineStore:
     @staticmethod
     def _redact_text(value: str) -> str:
         value = re.sub(r"\bsk-[A-Za-z0-9_-]{16,}\b", "[REDACTED]", value)
+        value = re.sub(r"\bAKIA[A-Z0-9]{16}\b", "[REDACTED]", value)
+        value = re.sub(
+            r"\beyJ[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+\b",
+            "[REDACTED]",
+            value,
+        )
         return re.sub(r"\bBearer\s+\S+", "[REDACTED]", value, flags=re.IGNORECASE)
+
+
+class CompatibilityRunStore:
+    """Persist bounded provider compatibility history for trend inspection."""
+
+    def __init__(self, connection: sqlite3.Connection) -> None:
+        """Initialize the SQLite compatibility-run store."""
+        self._connection = connection
+        self._connection.execute(
+            """CREATE TABLE IF NOT EXISTS compatibility_runs (
+            run_id TEXT PRIMARY KEY, provider_id TEXT NOT NULL, checked_at INTEGER NOT NULL,
+            status TEXT NOT NULL, score INTEGER NOT NULL, passed INTEGER NOT NULL,
+            total INTEGER NOT NULL, result_json TEXT NOT NULL)"""
+        )
+        self._connection.execute(
+            "CREATE INDEX IF NOT EXISTS idx_compatibility_history ON compatibility_runs(provider_id,checked_at DESC,run_id DESC)"
+        )
+        self._connection.commit()
+
+    def save(self, result: CompatibilityResult, *, checked_at: int) -> dict[str, Any]:
+        """Save one compatibility result and return its public history record."""
+        import secrets
+
+        if checked_at < 0:
+            raise ValueError("checked_at must be non-negative")
+        run_id = "compat_" + secrets.token_hex(8)
+        record = {
+            "run_id": run_id,
+            "provider_id": result.provider_id,
+            "checked_at": checked_at,
+            "status": result.status,
+            "score": result.score,
+            "passed": result.passed,
+            "total": result.total,
+            "repairs": [asdict(item) for item in result.repairs],
+        }
+        self._connection.execute(
+            "INSERT INTO compatibility_runs VALUES(?,?,?,?,?,?,?,?)",
+            (
+                run_id,
+                result.provider_id,
+                checked_at,
+                result.status,
+                result.score,
+                result.passed,
+                result.total,
+                json.dumps(record, sort_keys=True),
+            ),
+        )
+        self._connection.commit()
+        return record
+
+    def list(self, provider_id: str, *, limit: int = 20) -> list[dict[str, Any]]:
+        """List newest compatibility runs for one provider."""
+        if not provider_id.strip():
+            raise ValueError("provider_id must be non-empty")
+        if not 1 <= limit <= 100:
+            raise ValueError("limit must be between 1 and 100")
+        rows = self._connection.execute(
+            "SELECT result_json FROM compatibility_runs WHERE provider_id=? ORDER BY checked_at DESC,run_id DESC LIMIT ?",
+            (provider_id, limit),
+        ).fetchall()
+        return [json.loads(row[0]) for row in rows]
+
+
+class ProviderCompatibilityRunner:
+    """Execute provider capability probes against a stored provider connection."""
+
+    def __init__(self, store: object, transport: object | None = None) -> None:
+        """Create a runner over a provider store and optional HTTP transport."""
+        self._store = store
+        self._transport = transport
+
+    async def run(self, provider_id: str) -> CompatibilityResult:
+        """Run live, non-destructive provider checks and return measured evidence."""
+        import time
+
+        import httpx
+
+        from .provider_connections import _discovery_request, _parse_models
+
+        provider = self._store.get(provider_id)
+        config = self._store.connection_secret(provider_id)
+        provider_type = str(provider["provider_type"])
+        discovery = _discovery_request(provider_type, config)
+        probes: list[CompatibilityProbe] = []
+        model_id = ""
+
+        async with httpx.AsyncClient(transport=self._transport, timeout=15.0) as client:
+            for capability in ("authentication", "model_discovery"):
+                started = time.perf_counter()
+                try:
+                    response = await client.request(**discovery)
+                    response.raise_for_status()
+                    parsed = _parse_models(provider_type, response.json(), config)
+                    if parsed:
+                        model_id = str(parsed[0]["id"])
+                    passed = bool(parsed) if capability == "model_discovery" else True
+                    detail = (
+                        f"Discovered {len(parsed)} model(s)."
+                        if capability == "model_discovery"
+                        else "Stored credentials were accepted by the provider."
+                    )
+                except (httpx.HTTPError, ValueError, KeyError) as exc:
+                    passed, detail = False, self._safe_error(exc)
+                probes.append(
+                    CompatibilityProbe(
+                        capability,
+                        passed,
+                        int((time.perf_counter() - started) * 1000),
+                        detail,
+                    )
+                )
+
+            if not model_id:
+                models = self._store.models(provider_id)
+                model_id = str(models[0]["id"]) if models else "compatibility-probe"
+
+            for capability, request in self._capability_requests(
+                provider_type, config, model_id
+            ):
+                started = time.perf_counter()
+                try:
+                    response = await client.request(**request)
+                    response.raise_for_status()
+                    passed, detail = self._validate_response(capability, response)
+                except (httpx.HTTPError, ValueError) as exc:
+                    passed, detail = False, self._safe_error(exc)
+                probes.append(
+                    CompatibilityProbe(
+                        capability,
+                        passed,
+                        int((time.perf_counter() - started) * 1000),
+                        detail,
+                    )
+                )
+        return ProviderCompatibilityLab().evaluate(
+            provider_id=provider_id, probes=probes
+        )
+
+    def _capability_requests(
+        self, provider_type: str, config: dict[str, Any], model_id: str
+    ) -> list[tuple[str, dict[str, Any]]]:
+        base = str(config.get("base_url", "")).rstrip("/")
+        headers: dict[str, str] = {"content-type": "application/json"}
+        params: dict[str, str] = {}
+        if provider_type in {"openai", "openai_compatible", "custom"}:
+            key = str(config.get("api_key", ""))
+            header = str(config.get("auth_header", "Authorization"))
+            prefix = str(config.get("auth_prefix", "Bearer "))
+            if key:
+                headers[header] = prefix + key
+            chat_url = base + "/chat/completions"
+            embeddings_url = base + "/embeddings"
+        elif provider_type == "azure_openai":
+            headers["api-key"] = str(config.get("api_key", ""))
+            params["api-version"] = str(config.get("api_version", ""))
+            chat_url = base + f"/openai/deployments/{model_id}/chat/completions"
+            embeddings_url = base + f"/openai/deployments/{model_id}/embeddings"
+        elif provider_type == "anthropic":
+            headers.update(
+                {
+                    "x-api-key": str(config.get("api_key", "")),
+                    "anthropic-version": "2023-06-01",
+                }
+            )
+            chat_url = base + "/messages"
+            embeddings_url = base + "/embeddings"
+        elif provider_type == "gemini":
+            params["key"] = str(config.get("api_key", ""))
+            chat_url = base + f"/models/{model_id}:generateContent"
+            embeddings_url = base + f"/models/{model_id}:embedContent"
+        else:
+            return []
+
+        if provider_type == "anthropic":
+            basic = {
+                "model": model_id,
+                "max_tokens": 1,
+                "messages": [{"role": "user", "content": "Return OK"}],
+            }
+            tools = {
+                **basic,
+                "tools": [
+                    {
+                        "name": "ping",
+                        "description": "Compatibility probe",
+                        "input_schema": {"type": "object", "properties": {}},
+                    }
+                ],
+            }
+        elif provider_type == "gemini":
+            basic = {"contents": [{"parts": [{"text": "Return OK"}]}]}
+            tools = basic
+        else:
+            basic = {
+                "model": model_id,
+                "max_tokens": 1,
+                "messages": [{"role": "user", "content": "Return OK"}],
+            }
+            tools = {
+                **basic,
+                "tools": [
+                    {
+                        "type": "function",
+                        "function": {
+                            "name": "ping",
+                            "description": "Compatibility probe",
+                            "parameters": {"type": "object", "properties": {}},
+                        },
+                    }
+                ],
+                "tool_choice": "auto",
+            }
+
+        structured = (
+            {**basic, "response_format": {"type": "json_object"}}
+            if provider_type not in {"anthropic", "gemini"}
+            else basic
+        )
+        streaming = {**basic, "stream": True}
+        embedding_body = (
+            {"model": model_id, "input": "compatibility probe"}
+            if provider_type != "gemini"
+            else {"content": {"parts": [{"text": "compatibility probe"}]}}
+        )
+        return [
+            (
+                "chat",
+                {
+                    "method": "POST",
+                    "url": chat_url,
+                    "headers": headers,
+                    "params": params,
+                    "json": basic,
+                },
+            ),
+            (
+                "streaming",
+                {
+                    "method": "POST",
+                    "url": chat_url,
+                    "headers": headers,
+                    "params": params,
+                    "json": streaming,
+                },
+            ),
+            (
+                "tools",
+                {
+                    "method": "POST",
+                    "url": chat_url,
+                    "headers": headers,
+                    "params": params,
+                    "json": tools,
+                },
+            ),
+            (
+                "structured_output",
+                {
+                    "method": "POST",
+                    "url": chat_url,
+                    "headers": headers,
+                    "params": params,
+                    "json": structured,
+                },
+            ),
+            (
+                "embeddings",
+                {
+                    "method": "POST",
+                    "url": embeddings_url,
+                    "headers": headers,
+                    "params": params,
+                    "json": embedding_body,
+                },
+            ),
+        ]
+
+    @staticmethod
+    def _validate_response(capability: str, response: object) -> tuple[bool, str]:
+        content_type = str(response.headers.get("content-type", ""))
+        if capability == "streaming":
+            text = response.text
+            passed = "text/event-stream" in content_type or "data:" in text
+            return (
+                passed,
+                "Streaming response received."
+                if passed
+                else "Provider returned a non-streaming response.",
+            )
+        try:
+            payload = response.json()
+        except ValueError:
+            return False, "Provider returned a non-JSON response."
+        return isinstance(payload, dict), "Provider returned a valid response object."
+
+    @staticmethod
+    def _safe_error(exc: Exception) -> str:
+        text = re.sub(r"(?i)bearer\s+\S+", "[REDACTED]", str(exc))
+        text = re.sub(r"\bsk-[A-Za-z0-9_-]{8,}\b", "[REDACTED]", text)
+        return text[:300]

@@ -1,17 +1,21 @@
 # Safety Operations API
 
-Research-ranked P0 workflows are served by the unified console app.
-
-## Provider Compatibility Lab
-
-`POST /v1/console/compatibility/evaluate` accepts a `provider_id` and a non-empty list of unique capability probes. Each probe contains `capability`, `passed`, `latency_ms`, and optional `detail`. The response reports `ready`, `degraded`, or `blocked`, a 0-100 score, evidence, and ordered repair actions. Invalid or duplicate probes return HTTP 422.
+Safety evidence endpoints are restricted to clients on the local machine.
 
 ## Runaway Cost Firewall
 
-`POST /v1/console/runaway/evaluate` evaluates cost, token, tool-call, delegation-depth, elapsed-time, retry, and emergency-stop ceilings before the next agent step. It returns an explainable allow/block decision and next action.
+`POST /v1/console/runaway/evaluate` makes a fail-closed pre-step decision across cost, tokens, tool calls, delegation depth, elapsed time, retries, and emergency-stop state. The React Safety workspace invokes this API and displays the explanation and next action.
 
-## Explain-and-Fix Incident Timeline
+## Measured Provider Compatibility Lab
 
-`POST /v1/console/incidents/events` appends one evidence event and returns HTTP 201. Secret-bearing fields and key-like values are redacted before SQLite persistence.
+`POST /v1/console/compatibility/{provider_id}/run` loads the named encrypted provider connection and executes non-destructive HTTP checks for authentication, model discovery, chat, streaming, tools, structured output, and embeddings. It records measured latency and redacted failure evidence. Provider-specific unsupported capabilities fail visibly rather than being reported as successful.
 
-`GET /v1/console/incidents/{incident_id}` returns chronological evidence, status, impact, root explanation, and a concrete fix. Unknown incidents return HTTP 404.
+`GET /v1/console/compatibility/{provider_id}/history?limit=20` returns the newest 1-100 measured or imported checks.
+
+`POST /v1/console/compatibility/evaluate` is retained for importing externally measured offline probe evidence. It does not claim to execute provider traffic.
+
+## Explain-and-Fix from real request evidence
+
+`GET /v1/console/incidents/from-request/{request_id}` reads an actual product routing decision and creates a timeline for the request, route/model choice, provider outcome, latency, reason, and recorded cost. It returns `why`, `impact`, and a concrete next action.
+
+`POST /v1/console/incidents/events` remains available for importing evidence from external systems. `GET /v1/console/incidents/{incident_id}` retrieves a previously built or imported timeline. Secret-bearing keys and common bearer, OpenAI-style, AWS access-key, and JWT patterns are redacted before persistence.

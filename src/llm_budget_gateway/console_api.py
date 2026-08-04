@@ -17,9 +17,11 @@ from .console_ui import catalog, render_console
 from .console_workflows import get_workflow, search_workflows
 from .p0_workflows import (
     CompatibilityProbe,
+    CompatibilityRunStore,
     IncidentEvidence,
     IncidentTimelineStore,
     ProviderCompatibilityLab,
+    ProviderCompatibilityRunner,
 )
 from .priority_features import (
     CockpitService,
@@ -84,6 +86,13 @@ def _render_managed_console() -> str:
     )
 
 
+def _require_local_client(request: Request) -> None:
+    """Restrict sensitive console evidence workflows to local callers."""
+    client = request.client.host if request.client else ""
+    if client not in {"127.0.0.1", "::1", "testclient", "console"}:
+        raise HTTPException(403, "safety evidence workflows are local-only")
+
+
 def _require_local_action(request: Request, action: str | None) -> None:
     client = request.client.host if request.client else ""
     if client not in {"127.0.0.1", "::1", "testclient", "console"}:
@@ -101,6 +110,7 @@ def create_console_app(
     routing_connection: sqlite3.Connection | None = None,
     priority_routing_connection: sqlite3.Connection | None = None,
     incident_connection: sqlite3.Connection | None = None,
+    compatibility_connection: sqlite3.Connection | None = None,
     project_root: Path | None = None,
     product_connection: sqlite3.Connection | None = None,
     provider_connection: sqlite3.Connection | None = None,
@@ -135,12 +145,18 @@ def create_console_app(
         priority_routing_connection
         or sqlite3.connect(":memory:", check_same_thread=False)
     )
+    compatibility_store = CompatibilityRunStore(
+        compatibility_connection or sqlite3.connect(":memory:", check_same_thread=False)
+    )
     incident_store = IncidentTimelineStore(
         incident_connection or sqlite3.connect(":memory:", check_same_thread=False)
     )
     provider_discovery = ProviderDiscovery(
         provider_store, transport=provider_discovery_transport
     )  # type: ignore[arg-type]
+    compatibility_runner = ProviderCompatibilityRunner(
+        provider_store, provider_discovery_transport
+    )
 
     startup_results: list[dict[str, object]] = []
 
@@ -266,8 +282,11 @@ def create_console_app(
             raise HTTPException(422, str(exc)) from exc
 
     @app.post("/v1/console/compatibility/evaluate")
-    async def compatibility_evaluate(body: dict[str, object]) -> dict[str, object]:
-        """Score provider capability probes and return concrete repair actions."""
+    async def compatibility_evaluate(
+        body: dict[str, object], request: Request
+    ) -> dict[str, object]:
+        """Import externally measured probes for offline scoring and repair guidance."""
+        _require_local_client(request)
         try:
             probes = [
                 CompatibilityProbe(**dict(item))
@@ -276,30 +295,124 @@ def create_console_app(
             result = ProviderCompatibilityLab().evaluate(
                 provider_id=str(body.get("provider_id", "")), probes=probes
             )
+            import time
+
+            run = compatibility_store.save(result, checked_at=int(time.time()))
             return {
-                "provider_id": result.provider_id,
-                "status": result.status,
-                "score": result.score,
-                "passed": result.passed,
-                "total": result.total,
+                **run,
                 "probes": [probe.__dict__ for probe in result.probes],
-                "repairs": [repair.__dict__ for repair in result.repairs],
             }
         except (TypeError, ValueError) as exc:
             raise HTTPException(422, str(exc)) from exc
 
+    @app.post("/v1/console/compatibility/{provider_id}/run")
+    async def compatibility_run(
+        provider_id: str, request: Request
+    ) -> dict[str, object]:
+        """Execute measured, non-destructive checks against a stored provider."""
+        _require_local_client(request)
+        import time
+
+        try:
+            result = await compatibility_runner.run(provider_id)
+            run = compatibility_store.save(result, checked_at=int(time.time()))
+            return {
+                **run,
+                "measured": True,
+                "probes": [probe.__dict__ for probe in result.probes],
+            }
+        except KeyError as exc:
+            raise HTTPException(404, "unknown provider connection") from exc
+        except ValueError as exc:
+            raise HTTPException(422, str(exc)) from exc
+
+    @app.get("/v1/console/compatibility/{provider_id}/history")
+    async def compatibility_history(
+        provider_id: str, request: Request, limit: int = 20
+    ) -> dict[str, object]:
+        """Return newest persisted compatibility runs for one provider."""
+        _require_local_client(request)
+        try:
+            return {
+                "provider_id": provider_id,
+                "runs": compatibility_store.list(provider_id, limit=limit),
+            }
+        except ValueError as exc:
+            raise HTTPException(422, str(exc)) from exc
+
     @app.post("/v1/console/incidents/events", status_code=201)
-    async def incident_event(body: dict[str, object]) -> dict[str, object]:
+    async def incident_event(
+        body: dict[str, object], request: Request
+    ) -> dict[str, object]:
         """Append one privacy-safe event to an incident timeline."""
+        _require_local_client(request)
         try:
             evidence = IncidentEvidence(**body)  # type: ignore[arg-type]
             return incident_store.append(evidence).__dict__
         except (TypeError, ValueError) as exc:
             raise HTTPException(422, str(exc)) from exc
 
+    @app.get("/v1/console/incidents/from-request/{request_id}")
+    async def incident_from_request(
+        request_id: str, request: Request
+    ) -> dict[str, object]:
+        """Build an incident explanation from a real product routing decision."""
+        _require_local_client(request)
+        try:
+            item = product.activity_item(request_id)
+        except KeyError as exc:
+            raise HTTPException(404, "unknown request") from exc
+        reason = str(
+            item.get("reason")
+            or ("Request succeeded" if item["success"] else "Request failed")
+        )
+        severity = "info" if item["success"] else "critical"
+        events = [
+            IncidentEvidence(
+                request_id,
+                0,
+                "request",
+                "completed" if item["success"] else "failed",
+                reason,
+                severity,
+                {"app_id": item["app_id"], "latency_ms": item["latency_ms"]},
+            ),
+            IncidentEvidence(
+                request_id,
+                1,
+                "route",
+                "selected",
+                f"Route {item['route']} selected {item['model']}",
+                "info",
+                {"route": item["route"]},
+            ),
+            IncidentEvidence(
+                request_id,
+                2,
+                "provider",
+                "completed" if item["success"] else "failed",
+                reason,
+                severity,
+                {"model": item["model"]},
+            ),
+            IncidentEvidence(
+                request_id,
+                3,
+                "cost",
+                "recorded",
+                f"Request cost ${float(item['cost_usd']):.6f}",
+                "warning" if float(item["cost_usd"]) > 1 else "info",
+                {"cost_usd": item["cost_usd"]},
+            ),
+        ]
+        for event in events:
+            incident_store.append(event)
+        return {**incident_store.explain(request_id), "source": "product_activity"}
+
     @app.get("/v1/console/incidents/{incident_id}")
-    async def incident_explain(incident_id: str) -> dict[str, object]:
+    async def incident_explain(incident_id: str, request: Request) -> dict[str, object]:
         """Explain why an incident happened, its impact, and the next fix."""
+        _require_local_client(request)
         try:
             return incident_store.explain(incident_id)
         except KeyError as exc:

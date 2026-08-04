@@ -93,15 +93,27 @@ cd ui && npm test && npm run build
 
 ## License
 
-Add the intended project license before public distribution if the repository does not already carry one.
+MIT. See [LICENSE](LICENSE).
 
 
-## Research-ranked safety workflows (13.3)
+## Research-ranked safety workflows (13.4.0)
 
 The validated market research prioritized three workflows because users repeatedly struggle with surprise agent bills, provider configuration failures, and operational ambiguity:
 
 1. **Runaway Cost Firewall:** use `POST /v1/console/runaway/evaluate` to fail closed before an agent exceeds cost, token, tool-call, depth, time, retry, or emergency-stop boundaries.
-2. **Provider Compatibility Lab:** open **Safety** in the React cockpit or call `POST /v1/console/compatibility/evaluate` to score capability probes and receive specific repair instructions.
-3. **Explain-and-Fix Incident Timeline:** append redacted evidence to `POST /v1/console/incidents/events`, then retrieve the ordered explanation and repair plan from `GET /v1/console/incidents/{incident_id}`.
+2. **Provider Compatibility Lab:** open **Safety** or call `POST /v1/console/compatibility/{provider_id}/run`. The gateway uses the stored encrypted connection to execute non-destructive authentication, model discovery, chat, streaming, tool, structured-output, and embedding checks. Measured history is available from `GET /v1/console/compatibility/{provider_id}/history`. The older `/evaluate` endpoint is only for importing externally measured offline evidence.
+3. **Explain-and-Fix Incident Timeline:** select a real recent routing decision in **Safety** or call `GET /v1/console/incidents/from-request/{request_id}`. The response derives route, model, outcome, latency, reason, and cost evidence from the product activity ledger. Manual evidence import remains available for external systems.
 
 The complete Safety UI flow is responsive, keyboard accessible, includes loading/result/error states, and is built into `ui/dist` by `npm run build`. See [Safety Operations API](docs/api/safety-operations-api.md).
+
+
+## Clean release packaging
+
+Build the cockpit first, then create a publication-safe archive:
+
+```bash
+cd ui && npm ci && npm test && npm run build && cd ..
+uv run python scripts/build_release.py dist/llm-budget-gateway.zip
+```
+
+The builder fails closed when `ui/dist` is missing and excludes virtual environments, Node modules, caches, databases, WAL/SHM files, logs, generated keys, and TypeScript build metadata.

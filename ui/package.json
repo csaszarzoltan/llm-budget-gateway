@@ -1,7 +1,7 @@
 {
   "name": "llm-budget-gateway-cockpit",
   "private": true,
-  "version": "13.3.0",
+  "version": "13.4.0",
   "type": "module",
   "scripts": {
     "dev": "vite",
@@ -20,6 +20,7 @@
     "@types/node": "^24.0.0",
     "@types/react": "19.1.10",
     "@types/react-dom": "19.1.7",
+    "jsdom": "26.1.0",
     "vitest": "3.2.4"
   }
 }

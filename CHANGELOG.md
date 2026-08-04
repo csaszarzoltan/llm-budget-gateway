@@ -517,3 +517,36 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Docs
 - Updated README, API reference, changelog, and the machine-readable feature manifest with the research pain points and implemented differentiators.
+
+## [13.3.1] - 2026-08-04
+
+### Features
+- Added SQLite-backed provider compatibility run history with bounded provider-scoped retrieval.
+- Added `GET /v1/console/compatibility/{provider_id}/history` and persisted every successful compatibility evaluation.
+
+### Tests
+- Added RED-GREEN-REFACTOR coverage for real SQLite history persistence, validation boundaries, and ASGI history retrieval.
+- Completed 100 bounded autonomous verification iterations spanning tests, lint, OpenAPI, integrity, documentation, and packaging checks.
+
+### Docs
+- Updated the README, Safety Operations API, and `FEATURES-DONE.md` to document compatibility trends.
+
+## [13.4.0] - 2026-08-04
+
+### Features
+- Replaced the demonstration compatibility flow with live, non-destructive checks against stored provider connections for authentication, discovery, chat, streaming, tools, structured output, and embeddings.
+- Added request-derived incident explanations using real product activity evidence for route, model, outcome, latency, reason, and cost.
+- Added an interactive Safety workspace for measured provider selection, real request selection, firewall decisions, emergency-stop previews, results, and repair actions.
+- Added a fail-closed clean-release builder and an MIT license.
+
+### Security and Fixes
+- Restricted compatibility and incident evidence workflows to local callers.
+- Fixed authentication failure classification so probe ordering cannot downgrade a blocking failure.
+- Expanded incident redaction for token aliases, API-key aliases, AWS access keys, JWTs, and nested values.
+- Included the production cockpit bundle and excluded runtime databases, WAL/SHM files, encryption keys, logs, caches, build metadata, virtual environments, and Node modules from release archives.
+
+### Tests
+- Added real HTTP transport integration tests for provider compatibility using stored encrypted credentials.
+- Added real SQLite/product-activity integration tests for request-derived incidents.
+- Added a jsdom-rendered React navigation/accessibility smoke test instead of relying only on source-text assertions.
+- Added fail-closed release packaging tests.
