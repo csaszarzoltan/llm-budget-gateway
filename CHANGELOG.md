@@ -1,3 +1,17 @@
+## [13.9.0] - 2026-08-04
+
+### Features
+- Added 13 researched provider presets covering Z.AI, Xiaomi MiMo, coding/token plans, DeepInfra, Together AI, Fireworks AI, Nebius, SiliconFlow, Moonshot Kimi, MiniMax, Alibaba Model Studio, and Volcengine Ark.
+- Prefilled each provider's documented OpenAI-compatible base URL and connection protocol while keeping credentials empty and encrypted at rest.
+- Added provider search, grouping, and compatibility badges to the connection wizard.
+- Generalized automatic `GET /models` discovery across all OpenAI-compatible presets.
+
+### Tests
+- Added provider-catalog completeness, uniqueness, coding-plan separation, default application, and UI regression tests.
+
+### Docs
+- Added endpoint provenance, plan/key boundaries, and setup cautions for every new preset.
+
 ## [13.8.0] - 2026-08-04
 
 ### Fixed

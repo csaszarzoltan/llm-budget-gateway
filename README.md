@@ -149,6 +149,15 @@ Console endpoints are `POST /v1/console/releases/plan`, `POST /v1/console/releas
 - Safe release, optimization and OpenTelemetry evidence controls are interactive cockpit workflows, not links to POST-only endpoints.
 - Final distribution must be created with `uv run python scripts/build_release.py <output>`; archive tests reject databases, keys, logs, environments, caches and Node modules.
 
+
+## Expanded provider catalog (13.9.0)
+
+The connection wizard now includes ready-made, searchable presets for Z.AI, Z.AI Coding Plan, Xiaomi MiMo, Xiaomi MiMo Token Plan, DeepInfra, Together AI, Fireworks AI, Nebius Token Factory, SiliconFlow, Moonshot Kimi, MiniMax, Alibaba Cloud Model Studio, and Volcengine Ark.
+
+For every preset, the official OpenAI-compatible protocol and current documented base URL are filled in automatically. The operator only needs to provide a connection name, slug, region, and the corresponding API or subscription key. Pay-as-you-go and coding-plan credentials are separate presets so a subscription key is not accidentally sent to the billable API endpoint.
+
+See [Provider preset catalog](docs/provider-preset-catalog.md) for endpoint provenance and provider-specific cautions.
+
 ## Clean release packaging
 
 Build the cockpit first, then create a publication-safe archive:

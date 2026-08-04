@@ -15,6 +15,145 @@ from typing import Any
 import httpx
 from cryptography.hazmat.primitives.ciphers.aead import AESGCM
 
+
+def _openai_preset(
+    provider_id: str,
+    name: str,
+    description: str,
+    base_url: str,
+    group: str,
+    docs_url: str,
+    *,
+    badge: str = "OpenAI compatible",
+) -> dict[str, Any]:
+    """Build a provider card with safe, editable connection defaults."""
+    return {
+        "id": provider_id,
+        "name": name,
+        "description": description,
+        "default_base_url": base_url,
+        "discovery": "openai",
+        "protocol": "openai",
+        "group": group,
+        "badge": badge,
+        "docs_url": docs_url,
+        "fields": [
+            {"name": "api_key", "label": "API key", "type": "secret", "required": True},
+            {"name": "base_url", "label": "Base URL", "type": "url", "required": True},
+        ],
+    }
+
+
+_OPENAI_PRESETS: list[dict[str, Any]] = [
+    _openai_preset(
+        "zai",
+        "Z.AI",
+        "GLM model API for international production traffic",
+        "https://api.z.ai/api/paas/v4",
+        "Frontier providers",
+        "https://docs.z.ai/guides/develop/openai/python",
+    ),
+    _openai_preset(
+        "zai_coding_plan",
+        "Z.AI Coding Plan",
+        "Dedicated GLM Coding Plan quota endpoint",
+        "https://api.z.ai/api/coding/paas/v4",
+        "Coding plans",
+        "https://docs.z.ai/devpack/tool/others",
+        badge="Coding plan",
+    ),
+    _openai_preset(
+        "xiaomi_mimo",
+        "Xiaomi MiMo",
+        "Pay-as-you-go MiMo API",
+        "https://api.xiaomimimo.com/v1",
+        "Frontier providers",
+        "https://mimo.mi.com/docs/en-US/quick-start/summary/first-api-call",
+    ),
+    _openai_preset(
+        "xiaomi_coding_plan",
+        "Xiaomi MiMo Token Plan",
+        "Dedicated MiMo coding subscription endpoint",
+        "https://token-plan-cn.xiaomimimo.com/v1",
+        "Coding plans",
+        "https://mimo.mi.com/docs/en-US/tokenplan/integration/tools-overview",
+        badge="Coding plan",
+    ),
+    _openai_preset(
+        "deepinfra",
+        "DeepInfra",
+        "Hosted open-model inference and embeddings",
+        "https://api.deepinfra.com/v1/openai",
+        "Open model clouds",
+        "https://docs.deepinfra.com/chat/overview",
+    ),
+    _openai_preset(
+        "together",
+        "Together AI",
+        "Hosted open models, vision, tools and embeddings",
+        "https://api.together.ai/v1",
+        "Open model clouds",
+        "https://docs.together.ai/docs/inference/openai-compatibility",
+    ),
+    _openai_preset(
+        "fireworks",
+        "Fireworks AI",
+        "Fast serverless and dedicated open-model inference",
+        "https://api.fireworks.ai/inference/v1",
+        "Open model clouds",
+        "https://docs.fireworks.ai/tools-sdks/openai-compatibility",
+    ),
+    _openai_preset(
+        "nebius",
+        "Nebius Token Factory",
+        "Managed open-model inference with regional infrastructure",
+        "https://api.tokenfactory.nebius.com/v1",
+        "Open model clouds",
+        "https://docs.tokenfactory.nebius.com/api-reference/introduction",
+    ),
+    _openai_preset(
+        "siliconflow",
+        "SiliconFlow",
+        "International open-model inference catalog",
+        "https://api.siliconflow.com/v1",
+        "Open model clouds",
+        "https://docs.siliconflow.com/en/userguide/quickstart",
+    ),
+    _openai_preset(
+        "moonshot",
+        "Moonshot Kimi",
+        "Kimi long-context and agent models",
+        "https://api.moonshot.ai/v1",
+        "Frontier providers",
+        "https://platform.kimi.ai/docs/api/quickstart",
+    ),
+    _openai_preset(
+        "minimax",
+        "MiniMax",
+        "MiniMax agentic, coding and multimodal models",
+        "https://api.minimax.io/v1",
+        "Frontier providers",
+        "https://platform.minimax.io/docs/api-reference/text-openai-api",
+    ),
+    _openai_preset(
+        "dashscope",
+        "Alibaba Cloud Model Studio",
+        "Qwen and partner models through compatible mode",
+        "https://dashscope-intl.aliyuncs.com/compatible-mode/v1",
+        "Cloud platforms",
+        "https://www.alibabacloud.com/help/en/model-studio/compatibility-of-openai-with-dashscope",
+    ),
+    _openai_preset(
+        "volcengine_ark",
+        "Volcengine Ark",
+        "Doubao and partner model runtime",
+        "https://ark.cn-beijing.volces.com/api/v3",
+        "Cloud platforms",
+        "https://www.volcengine.com/docs/82379/1298459",
+    ),
+]
+
+
 PROVIDER_TYPES: list[dict[str, Any]] = [
     {
         "id": "openai",
@@ -95,14 +234,49 @@ PROVIDER_TYPES: list[dict[str, Any]] = [
         "default_base_url": "",
         "discovery": "custom",
         "fields": [
-            {"name": "api_key", "label": "API key or token", "type": "secret", "required": False},
+            {
+                "name": "api_key",
+                "label": "API key or token",
+                "type": "secret",
+                "required": False,
+            },
             {"name": "base_url", "label": "Base URL", "type": "url", "required": True},
-            {"name": "model_list_path", "label": "Model-list path", "type": "text", "required": True},
-            {"name": "auth_header", "label": "Authentication header", "type": "text", "required": False},
-            {"name": "auth_prefix", "label": "Authentication prefix", "type": "text", "required": False},
-            {"name": "extra_headers_json", "label": "Extra headers JSON", "type": "text", "required": False},
-            {"name": "models_field", "label": "Models array field", "type": "text", "required": True},
-            {"name": "model_id_field", "label": "Model ID field", "type": "text", "required": True},
+            {
+                "name": "model_list_path",
+                "label": "Model-list path",
+                "type": "text",
+                "required": True,
+            },
+            {
+                "name": "auth_header",
+                "label": "Authentication header",
+                "type": "text",
+                "required": False,
+            },
+            {
+                "name": "auth_prefix",
+                "label": "Authentication prefix",
+                "type": "text",
+                "required": False,
+            },
+            {
+                "name": "extra_headers_json",
+                "label": "Extra headers JSON",
+                "type": "text",
+                "required": False,
+            },
+            {
+                "name": "models_field",
+                "label": "Models array field",
+                "type": "text",
+                "required": True,
+            },
+            {
+                "name": "model_id_field",
+                "label": "Model ID field",
+                "type": "text",
+                "required": True,
+            },
         ],
     },
     {
@@ -134,6 +308,22 @@ PROVIDER_TYPES: list[dict[str, Any]] = [
         ],
     },
 ]
+
+
+PROVIDER_TYPES = [*_OPENAI_PRESETS, *PROVIDER_TYPES]
+for _provider in PROVIDER_TYPES:
+    _provider.setdefault("protocol", "native")
+    _provider.setdefault(
+        "group",
+        "Custom"
+        if _provider["id"] in {"custom", "openai_compatible"}
+        else "Cloud platforms",
+    )
+    _provider.setdefault(
+        "badge",
+        "Native API" if _provider["protocol"] == "native" else "OpenAI compatible",
+    )
+    _provider.setdefault("docs_url", "")
 
 
 class CredentialVault:
@@ -382,7 +572,9 @@ def _discovery_request(provider_type: str, config: dict[str, Any]) -> dict[str, 
         if not path.startswith("/"):
             path = "/" + path
         try:
-            extra_headers = json.loads(str(config.get("extra_headers_json", "{}")) or "{}")
+            extra_headers = json.loads(
+                str(config.get("extra_headers_json", "{}")) or "{}"
+            )
         except json.JSONDecodeError as exc:
             raise ValueError("extra headers must be a JSON object") from exc
         if not isinstance(extra_headers, dict) or not all(
@@ -396,7 +588,10 @@ def _discovery_request(provider_type: str, config: dict[str, Any]) -> dict[str, 
         if api_key and auth_header:
             headers[auth_header] = str(config.get("auth_prefix", "Bearer ")) + api_key
         return {"method": "GET", "url": base + path, "headers": headers}
-    if provider_type in {"openai", "openai_compatible"}:
+    schema = next(
+        (item for item in PROVIDER_TYPES if item["id"] == provider_type), None
+    )
+    if schema and schema.get("discovery") == "openai":
         headers = {"Authorization": f"Bearer {config['api_key']}"}
         if config.get("organization"):
             headers["OpenAI-Organization"] = str(config["organization"])

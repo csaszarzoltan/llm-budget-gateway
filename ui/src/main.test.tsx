@@ -48,3 +48,5 @@ it('exposes the portable OpenTelemetry evidence plane',()=>{expect(source).toCon
 it('exposes safe releases and outcome-aware autopilot',()=>{expect(source).toContain('Safe release');expect(source).toContain('/v1/console/releases/plan');expect(source).toContain('Outcome-aware optimization');expect(source).toContain('/v1/console/autopilot/recommend')})
 
 it('uses workflow controls instead of dead POST endpoint links',()=>{expect(source).toContain('Evaluate 10% canary');expect(source).toContain('Evaluate measured candidate');expect(source).toContain('Load trace evidence');expect(source).not.toContain("['Safe releases','Verified canary and rollback planning'")})
+
+it('shows searchable provider presets with prefilled endpoint UX',()=>{expect(source).toContain('Search providers');expect(source).toContain('Endpoint and protocol are already filled in');expect(source).toContain('type.group');expect(source).toContain('type.badge')})
