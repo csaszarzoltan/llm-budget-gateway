@@ -2,9 +2,11 @@
 
 from __future__ import annotations
 
+import os
 import sqlite3
 from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
+from datetime import UTC, datetime
 from pathlib import Path
 
 from fastapi import FastAPI, Header, HTTPException, Request
@@ -21,6 +23,7 @@ from .priority_features import (
     RunState,
     SchemaFormService,
 )
+from .routing_control_plane import RoutingControlPlane
 from .service_manager import ServiceManager
 from .supply_chain import SBOMService, UpgradeRiskService
 from .trace_outcomes import OutcomeAnalytics, OutcomeRecord, TraceSpan, TraceStore
@@ -77,10 +80,19 @@ def create_console_app(
     *,
     trace_connection: sqlite3.Connection | None = None,
     project_root: Path | None = None,
+    routing_connection: sqlite3.Connection | None = None,
 ) -> FastAPI:
     """Create the console with local one-click lifecycle controls."""
     service_manager = manager or ServiceManager()
     repository_root = project_root or Path(__file__).resolve().parents[2]
+    if routing_connection is None:
+        routing_url = os.getenv(
+            "GATEWAY_ROUTING_DATABASE_URL", "sqlite:///.gateway-console/routing.db"
+        )
+        routing_path = Path(routing_url.removeprefix("sqlite:///"))
+        routing_path.parent.mkdir(parents=True, exist_ok=True)
+        routing_connection = sqlite3.connect(routing_path, check_same_thread=False)
+    routing = RoutingControlPlane(routing_connection)
     trace_store = TraceStore(
         trace_connection or sqlite3.connect(":memory:", check_same_thread=False)
     )
@@ -261,6 +273,108 @@ def create_console_app(
             return MigrationPlanner().assess(**body)
         except (TypeError, ValueError) as exc:
             raise HTTPException(422, str(exc)) from exc
+
+    @app.post("/v1/admin/applications", status_code=201)
+    async def create_application(body: dict[str, object]) -> dict[str, object]:
+        """Connect an application and return its gateway key once."""
+        try:
+            return routing.create_application(
+                str(body.get("name", "")), str(body.get("default_route", ""))
+            )
+        except ValueError as exc:
+            raise HTTPException(422, str(exc)) from exc
+
+    @app.get("/v1/admin/applications")
+    async def list_applications() -> dict[str, object]:
+        """List connected applications without secret material."""
+        return {"applications": routing.list_applications()}
+
+    @app.post("/v1/admin/routes", status_code=201)
+    async def create_route(body: dict[str, object]) -> dict[str, object]:
+        """Create a validated logical route draft."""
+        try:
+            return routing.create_route(body)
+        except ValueError as exc:
+            raise HTTPException(422, str(exc)) from exc
+
+    @app.get("/v1/admin/routes")
+    async def list_routes() -> dict[str, object]:
+        """List logical routes and current versions."""
+        return {"routes": routing.list_routes()}
+
+    @app.get("/v1/admin/routes/{route_id}")
+    async def get_route(route_id: str) -> dict[str, object]:
+        """Return one logical route."""
+        try:
+            return routing.get_route(route_id)
+        except KeyError as exc:
+            raise HTTPException(404, "unknown route") from exc
+
+    @app.put("/v1/admin/routes/{route_id}")
+    async def update_route(route_id: str, body: dict[str, object]) -> dict[str, object]:
+        """Create a new immutable draft version."""
+        try:
+            return routing.update_route(route_id, body)
+        except KeyError as exc:
+            raise HTTPException(404, "unknown route") from exc
+        except ValueError as exc:
+            raise HTTPException(422, str(exc)) from exc
+
+    @app.post("/v1/admin/routes/{route_id}/simulate")
+    async def simulate_route(
+        route_id: str, body: dict[str, object]
+    ) -> dict[str, object]:
+        """Preview the exact routing decision without calling a provider."""
+        try:
+            return routing.simulate(
+                route_id,
+                now=datetime.fromisoformat(str(body.get("at"))),
+                quality_tier=str(body.get("quality_tier", "balanced")),
+                estimated_cost=float(body.get("estimated_cost", 0)),
+                spend_by_model=dict(body.get("spend_by_model", {})),
+                health=dict(body.get("health", {})),
+                region=str(body.get("region", "eu")),
+                capabilities=list(body.get("capabilities", [])),
+            )
+        except KeyError as exc:
+            raise HTTPException(404, "unknown route") from exc
+        except (TypeError, ValueError, RuntimeError) as exc:
+            raise HTTPException(422, str(exc)) from exc
+
+    @app.post("/v1/admin/routes/{route_id}/publish")
+    async def publish_route(route_id: str) -> dict[str, object]:
+        """Publish the current route draft atomically."""
+        try:
+            return routing.publish_route(route_id)
+        except KeyError as exc:
+            raise HTTPException(404, "unknown route") from exc
+
+    @app.post("/v1/admin/routes/{route_id}/rollback")
+    async def rollback_route(route_id: str) -> dict[str, object]:
+        """Restore the immediately previous production version."""
+        try:
+            return routing.rollback_route(route_id)
+        except KeyError as exc:
+            raise HTTPException(404, "unknown route") from exc
+        except ValueError as exc:
+            raise HTTPException(409, str(exc)) from exc
+
+    @app.get("/v1/admin/routes/{route_id}/usage")
+    async def route_usage(route_id: str) -> dict[str, object]:
+        """Return current-month model spend and budget headroom."""
+        try:
+            return routing.route_usage(route_id, at=datetime.now(UTC))
+        except KeyError as exc:
+            raise HTTPException(404, "unknown route") from exc
+
+    @app.get("/v1/admin/routes/{route_id}/activity")
+    async def route_activity(route_id: str) -> dict[str, object]:
+        """Return newest-first explainable decisions."""
+        try:
+            routing.get_route(route_id)
+            return {"activity": routing.route_activity(route_id)}
+        except KeyError as exc:
+            raise HTTPException(404, "unknown route") from exc
 
     @app.get("/v1/console/services")
     async def services(

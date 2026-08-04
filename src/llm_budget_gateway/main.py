@@ -8,6 +8,8 @@ analysis brief §4 P0-1.
 from __future__ import annotations
 
 import json
+import sqlite3
+from pathlib import Path
 
 from fastapi import FastAPI, Request
 from fastapi.responses import JSONResponse, Response, StreamingResponse
@@ -23,6 +25,7 @@ from .cost_tracking import CostCalculator, CostStore, CostTracker, ModelPrice, P
 from .gateway_home import install_gateway_home
 from .gateway_proxy import GatewayProxy, ProviderResponse
 from .model_fallback import FallbackConfig, FallbackManager
+from .routing_control_plane import RoutingControlPlane
 
 
 def create_app(settings: Settings | None = None) -> FastAPI:
@@ -66,8 +69,14 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         budget_enforcer=enforcer,
         fallback_manager=manager,
     )
+    routing_path = Path(_sqlite_path(settings.routing_database_url))
+    routing_path.parent.mkdir(parents=True, exist_ok=True)
+    routing = RoutingControlPlane(
+        sqlite3.connect(routing_path, check_same_thread=False)
+    )
+    proxy.attach_routing_control_plane(routing)
 
-    app = FastAPI(title="LLM Budget Gateway", version="0.1.0")
+    app = FastAPI(title="LLM Budget Gateway", version="11.1.0")
 
     @app.post("/v1/chat/completions")
     async def chat_completions(request: Request) -> Response:
@@ -137,6 +146,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         for cfg in fallback_configs:
             models.add(cfg.model)
             models.update(cfg.chain)
+        models.update(route["name"] for route in routing.list_routes() if route["published_version"])
         try:
             import litellm
 
@@ -155,6 +165,8 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         return JSONResponse({"status": "ok"})
 
     return install_gateway_home(app)
+
+
 async def _read_json_body(request: Request) -> dict | ProviderResponse:
     """Parse the request body as a JSON object; 400 on malformed input.
 
