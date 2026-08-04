@@ -14,7 +14,7 @@ A local-first, OpenAI-compatible AI gateway and operations control plane with bu
 uv sync --extra dev --frozen
 ```
 
-The release archive includes the built cockpit in `ui/dist`. To rebuild it:
+Clean release archives built by `scripts/build_release.py` include the verified cockpit in `ui/dist` and exclude runtime state. Raw development trees may require the rebuild below. To rebuild it:
 
 ```bash
 cd ui
@@ -140,6 +140,14 @@ The control plane now turns release and optimization evidence into fail-closed d
 - **Outcome-aware autopilot:** recommends the lowest-cost measured candidate only when quality, success rate, and latency floors remain satisfied. It never applies a production change automatically and always requires approval.
 
 Console endpoints are `POST /v1/console/releases/plan`, `POST /v1/console/releases/canary-decision`, and `POST /v1/console/autopilot/recommend`.
+
+
+## Review remediation release (13.8.0)
+
+- Production Replay now performs an explicit bounded HTTP execution through the fixed local gateway and compares measured candidate output, tokens, latency and estimated cost. Configure `GATEWAY_REPLAY_API_KEY` with an application key before starting the system. The UI requires a privacy-safe prompt, candidate model, prior output and visible cost preflight before execution.
+- Live compatibility runs now populate the provider/model contract catalog. The eligibility endpoint fails closed on missing, stale, unsupported, wrong-region or unpriced contracts and returns a route-health score.
+- Safe release, optimization and OpenTelemetry evidence controls are interactive cockpit workflows, not links to POST-only endpoints.
+- Final distribution must be created with `uv run python scripts/build_release.py <output>`; archive tests reject databases, keys, logs, environments, caches and Node modules.
 
 ## Clean release packaging
 

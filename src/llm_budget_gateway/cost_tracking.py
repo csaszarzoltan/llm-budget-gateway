@@ -1,7 +1,7 @@
 """Cost tracking: per-request token x price math and SQLite (WAL) ledger.
 
 Placeholder stub for the TDD RED phase — behavioral methods raise
-NotImplementedError until implemented (P0-2). Interface is normative per
+Implemented production interface; contracts remain normative per
 analysis brief §4 P0-2.
 """
 

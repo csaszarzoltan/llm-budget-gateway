@@ -2,7 +2,7 @@
 
 Pre-development stub: the public interface is complete and constructible so
 interface tests pass immediately; every behavioral method raises
-``NotImplementedError`` until the developer implements it (TDD RED phase).
+implemented production behavior with TDD regression coverage.
 """
 
 from __future__ import annotations

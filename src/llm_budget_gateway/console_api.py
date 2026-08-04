@@ -53,6 +53,7 @@ from .provider_connections import (
     ProviderConnectionStore,
     ProviderDiscovery,
 )
+from .replay_execution import LocalReplayExecutor, ReplayRequest
 from .routing_control_plane import RoutingControlPlane
 from .service_manager import ServiceManager
 from .supply_chain import SBOMService, UpgradeRiskService
@@ -136,6 +137,7 @@ def create_console_app(
     provider_discovery_transport: object | None = None,
     auto_start_services: bool = False,
     cockpit_first: bool = False,
+    replay_executor: LocalReplayExecutor | None = None,
 ) -> FastAPI:
     """Create the console with local one-click lifecycle controls."""
     repository_root = project_root or Path(__file__).resolve().parents[2]
@@ -350,6 +352,45 @@ def create_console_app(
         except KeyError as exc:
             raise HTTPException(404, "trace evidence not found") from exc
 
+    @app.post("/v1/console/replay/run")
+    async def replay_run(body: dict[str, object], request: Request) -> dict[str, object]:
+        """Explicitly execute a bounded candidate through the fixed local gateway."""
+        _require_local_client(request)
+        if replay_executor is None:
+            raise HTTPException(503, "replay execution is not configured")
+        try:
+            execution = await replay_executor.execute(
+                ReplayRequest(
+                    request_id=str(body.get("request_id", "")),
+                    model=str(body.get("candidate_model", "")),
+                    messages=tuple(dict(item) for item in list(body.get("messages", []))),  # type: ignore[arg-type]
+                    max_completion_tokens=int(body.get("max_completion_tokens", 0)),
+                    estimated_cost_usd=float(body.get("estimated_cost_usd", 0)),
+                )
+            )
+            baseline = ReplayTrace(
+                str(body.get("request_id", "")),
+                str(body.get("baseline_output", "")),
+                tuple(str(item) for item in list(body.get("baseline_tools", []))),
+                float(body.get("baseline_cost_usd", 0)),
+                int(body.get("baseline_tokens", 0)),
+                int(body.get("baseline_latency_ms", 0)),
+                str(body.get("baseline_policy", "allow")),
+            )
+            candidate = ReplayCandidate(
+                execution.model,
+                execution.output,
+                tuple(),
+                execution.estimated_cost_usd,
+                execution.tokens,
+                round(execution.latency_ms),
+                "allow",
+            )
+            from dataclasses import asdict
+            return {"executed": True, "candidate": asdict(execution), "impact": asdict(ChangeImpactLab().compare(baseline, candidate))}
+        except (TypeError, ValueError) as exc:
+            raise HTTPException(422, str(exc)) from exc
+
     @app.post("/v1/console/replay/compare")
     async def replay_compare(body: dict[str, object], request: Request) -> dict[str, object]:
         """Compare privacy-safe production evidence with a candidate replay."""
@@ -386,6 +427,24 @@ def create_console_app(
         try:
             from dataclasses import asdict
             return asdict(market_catalog.record(CompatibilityContract(**body)))
+        except (TypeError, ValueError) as exc:
+            raise HTTPException(422, str(exc)) from exc
+
+    @app.post("/v1/console/contracts/{provider_id}/eligibility")
+    async def contract_eligibility(provider_id: str, body: dict[str, object], request: Request) -> dict[str, object]:
+        """Fail closed unless all required provider contracts are fresh and supported."""
+        _require_local_client(request)
+        try:
+            required=tuple(str(item) for item in list(body.get("required", [])))
+            eligible=market_catalog.eligible(
+                provider_id=provider_id,
+                model_id=str(body.get("model_id", "")),
+                required=required,
+                max_age_seconds=int(body.get("max_age_seconds", 86400)),
+                region=str(body.get("region", "global")),
+                require_price=bool(body.get("require_price", False)),
+            )
+            return {"eligible": eligible, "route_health_score": 100 if eligible else 0, "required": list(required)}
         except (TypeError, ValueError) as exc:
             raise HTTPException(422, str(exc)) from exc
 
@@ -439,10 +498,19 @@ def create_console_app(
 
         try:
             result = await compatibility_runner.run(provider_id)
-            run = compatibility_store.save(result, checked_at=int(time.time()))
+            checked_at = int(time.time())
+            run = compatibility_store.save(result, checked_at=checked_at)
+            provider = provider_store.get(provider_id)
+            models = provider_store.models(provider_id)
+            model_ids = [str(model["id"]) for model in models] or ["*"]
+            for model_id in model_ids:
+                market_catalog.record_result(
+                    result, model_id=model_id, checked_at=checked_at, region=str(provider["region"])
+                )
             return {
                 **run,
                 "measured": True,
+                "contracts_recorded": len(result.probes) * len(model_ids),
                 "probes": [probe.__dict__ for probe in result.probes],
             }
         except KeyError as exc:

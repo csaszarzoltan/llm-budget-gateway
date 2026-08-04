@@ -1,3 +1,19 @@
+## [13.8.0] - 2026-08-04
+
+### Fixed
+- Replaced the replay comparator facade with explicit local-gateway execution, candidate selection, measured evidence, and cost preflight.
+- Connected live provider compatibility runs to the model contract catalog and added fail-closed eligibility scoring.
+- Replaced dead raw-API navigation with interactive release, optimization, and trace-evidence workflows.
+- Corrected release documentation and stale RED-phase source descriptions.
+- Added exact API documentation, pricing guidance, and sovereign deployment guidance.
+
+### Security
+- Clean release validation excludes encryption keys, runtime databases, WAL/SHM files, logs, caches, environments, and dependency directories.
+- Replay is restricted to the fixed loopback gateway and does not persist prompts or outputs.
+
+### Tests
+- Added real HTTP replay-executor tests, ASGI replay integration, contract-ingestion tests, UI workflow contracts, and final-archive extraction validation.
+
 ## [13.7.0] - 2026-08-04
 
 ### Features

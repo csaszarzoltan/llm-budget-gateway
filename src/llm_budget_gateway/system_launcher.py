@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import os
 import sqlite3
 import threading
 import webbrowser
@@ -12,6 +13,7 @@ import uvicorn
 from fastapi import FastAPI
 
 from .console_api import create_console_app
+from .replay_execution import LocalReplayExecutor
 from .service_manager import ServiceManager
 
 HOST = "127.0.0.1"
@@ -61,6 +63,9 @@ def create_system_app(
         credential_key_path=data_dir / "provider-master.key",
         auto_start_services=True,
         cockpit_first=True,
+        replay_executor=LocalReplayExecutor(
+            api_key=os.getenv("GATEWAY_REPLAY_API_KEY", "")
+        ),
     )
     if open_browser:
         threading.Timer(1.0, lambda: webbrowser.open(COCKPIT_URL)).start()

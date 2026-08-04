@@ -2,7 +2,7 @@
 
 Owns the request lifecycle: auth -> scopes -> sync enforce -> forward -> cost
 record. Placeholder stub for the TDD RED phase — behavioral methods raise
-NotImplementedError until implemented (P0-1). Interface is normative per
+Implemented production interface; contracts remain normative per
 analysis brief §4 P0-1.
 """
 

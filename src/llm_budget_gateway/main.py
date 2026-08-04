@@ -1,7 +1,7 @@
 """FastAPI app factory for the LLM budget gateway.
 
 Placeholder stub for the TDD RED phase — create_app raises
-NotImplementedError until implemented (P0-1). Interface is normative per
+Implemented production interface; contracts remain normative per
 analysis brief §4 P0-1.
 """
 

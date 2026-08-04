@@ -41,8 +41,10 @@ it('safety workflows use selected live product evidence instead of hardcoded dem
   expect(source).toContain('/v1/console/runaway/evaluate')
 })
 
-it('ships the market-priority replay flow',()=>{expect(source).toContain('Production Replay Lab');expect(source).toContain('/v1/console/replay/compare');expect(source).toContain('Compare latest request');expect(source).toContain('role="status"')})
+it('ships the market-priority replay flow',()=>{expect(source).toContain('Production Replay Lab');expect(source).toContain('/v1/console/replay/run');expect(source).toContain('Execute replay and compare');expect(source).toContain('role="status"')})
 
 it('exposes the portable OpenTelemetry evidence plane',()=>{expect(source).toContain('OpenTelemetry evidence');expect(source).toContain('/v1/console/evidence/traces')})
 
-it('exposes safe releases and outcome-aware autopilot',()=>{expect(source).toContain('Safe releases');expect(source).toContain('/v1/console/releases/plan');expect(source).toContain('Optimization autopilot');expect(source).toContain('/v1/console/autopilot/recommend')})
+it('exposes safe releases and outcome-aware autopilot',()=>{expect(source).toContain('Safe release');expect(source).toContain('/v1/console/releases/plan');expect(source).toContain('Outcome-aware optimization');expect(source).toContain('/v1/console/autopilot/recommend')})
+
+it('uses workflow controls instead of dead POST endpoint links',()=>{expect(source).toContain('Evaluate 10% canary');expect(source).toContain('Evaluate measured candidate');expect(source).toContain('Load trace evidence');expect(source).not.toContain("['Safe releases','Verified canary and rollback planning'")})

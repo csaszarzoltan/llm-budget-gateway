@@ -2,7 +2,7 @@
 
 RED-phase stub package per docs/architecture/mcp-governance.md. Constructors,
 schemas, exceptions and db helpers are functional so interface tests pass
-immediately; every behavioral method raises NotImplementedError until the
+immediately; behavioral methods are implemented and validated while the
 implementer lands the feature.
 """
 

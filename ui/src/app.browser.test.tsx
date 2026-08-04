@@ -1,5 +1,6 @@
 // @vitest-environment jsdom
 import { afterEach, expect, it, vi } from 'vitest'
+import axe from 'axe-core'
 
 const payloads: Record<string, unknown> = {
   '/v1/product/home?role=developer': {gateway:{endpoint:'http://local/v1'},counts:{applications:0,routes:0,providers:1},activation:{complete:5,steps:[]},metrics:{requests:1,success_rate:100,cost_usd:0.1,p95_latency_ms:10},attention:[],routes:[],activity:[]},
@@ -27,4 +28,8 @@ it('renders and navigates the real Safety workspace with accessible controls', a
   expect(document.querySelector('select[aria-label="Provider connection"]')).toBeTruthy()
   expect(document.querySelector('select[aria-label="Request evidence"]')).toBeTruthy()
   expect(document.querySelector('[role="alert"]')).toBeNull()
+  document.documentElement.lang='en'
+  document.title='Gateway Cockpit'
+  const accessibility=await axe.run(document,{rules:{'color-contrast':{enabled:false}}})
+  expect(accessibility.violations).toEqual([])
 })
