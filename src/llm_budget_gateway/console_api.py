@@ -11,6 +11,7 @@ from fastapi import FastAPI, Header, HTTPException, Request
 from fastapi.responses import FileResponse, HTMLResponse
 from fastapi.staticfiles import StaticFiles
 
+from .completion_features import MigrationPlanner, PolicyRouteSimulator
 from .console_ui import catalog, render_console
 from .console_workflows import get_workflow, search_workflows
 from .priority_features import (
@@ -188,6 +189,13 @@ def create_console_app(
         except (TypeError, ValueError) as exc:
             raise HTTPException(422, str(exc)) from exc
 
+    @app.get("/v1/console/traces")
+    async def list_traces(x_tenant_id: str | None = Header(None)) -> dict[str, object]:
+        """List privacy-safe trace run summaries for one tenant."""
+        if not x_tenant_id:
+            raise HTTPException(422, "X-Tenant-Id is required")
+        return {"runs": trace_store.list_runs(x_tenant_id)}
+
     @app.get("/v1/console/traces/{run_id}")
     async def get_trace(
         run_id: str, x_tenant_id: str | None = Header(None)
@@ -230,6 +238,27 @@ def create_console_app(
                 proposed=dict(body.get("proposed", {})),
                 security_advisories=dict(body.get("security_advisories", {})),
             )
+        except (TypeError, ValueError) as exc:
+            raise HTTPException(422, str(exc)) from exc
+
+    @app.post("/v1/console/simulate")
+    async def simulate_policy_route(body: dict[str, object]) -> dict[str, object]:
+        """Simulate policy and route decisions without provider execution."""
+        try:
+            return PolicyRouteSimulator().simulate(
+                request=dict(body.get("request", {})),
+                policy=dict(body.get("policy", {})),
+                routes=list(body.get("routes", [])),
+                minimum_quality=float(body.get("minimum_quality", 0)),
+            )
+        except (TypeError, ValueError) as exc:
+            raise HTTPException(422, str(exc)) from exc
+
+    @app.post("/v1/console/production/migration-readiness")
+    async def migration_readiness(body: dict[str, object]) -> dict[str, object]:
+        """Evaluate SQLite-to-Postgres production migration evidence."""
+        try:
+            return MigrationPlanner().assess(**body)
         except (TypeError, ValueError) as exc:
             raise HTTPException(422, str(exc)) from exc
 

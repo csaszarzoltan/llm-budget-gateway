@@ -373,3 +373,33 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Docs
 - Updated README, API reference, frontend, and the machine-readable feature manifest.
+
+## [10.0.0] - 2026-08-04
+
+### Features
+- Added strict tenant-keyed persistence with canonical migration exports.
+- Added transactional, idempotent shared counters suitable for a shared SQL adapter and hard limit enforcement.
+- Added fail-closed SQLite-to-Postgres migration readiness and zero-data-loss execution steps.
+- Added signed reverse-proxy SSO claim verification with tenant, expiry, and role enforcement.
+- Added an explainable policy and routing simulator covering budget, residency, tools, health, quality, and cost.
+- Added a graphical trace preview and live simulator flow to the React cockpit.
+- Added `/v1/console/simulate` and `/v1/console/production/migration-readiness`.
+
+### Tests
+- Added tenant isolation, canonical export, atomic reservation, idempotency, migration evidence, identity signature, expiration, role, route-selection, rejection, and real HTTP integration tests.
+
+### Docs
+- Declared completion of every feature recommended by the market research roadmap and updated the API reference and machine-readable manifest.
+
+## [10.1.0] - 2026-08-04
+
+### Features
+- Added tenant-scoped `GET /v1/console/traces` run summaries.
+- Added a production React trace-explorer flow with tenant input, loading, empty, result, and error states.
+- Added deep links from run summaries to nested trace evidence.
+
+### Tests
+- Added real SQLite and ASGI integration coverage for run ordering, tenant isolation, nested trace retrieval, missing tenant validation, and production UI serving.
+
+### Docs
+- Updated README, API documentation, frontend version, and the machine-readable feature manifest.
