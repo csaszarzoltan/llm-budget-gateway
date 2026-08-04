@@ -15,7 +15,6 @@ class Settings(BaseSettings):
     """
 
     database_url: str = "sqlite:///./gateway.db"
-    routing_database_url: str = "sqlite:///.gateway-console/routing.db"
     budget_config_path: str = "budgets.yaml"
     virtual_keys: dict[str, str] = {}  # api_key -> key_id (v0.1 static table)
     user_header_mappings: dict[

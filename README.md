@@ -1,7 +1,7 @@
 # LLM Budget Gateway
 
 [![Python 3.11+](https://img.shields.io/badge/python-3.11%2B-blue.svg)](https://www.python.org/downloads/)
-![Version 11.1.0](https://img.shields.io/badge/version-9.4.0-blue.svg)
+![Version 13.0.0](https://img.shields.io/badge/version-9.4.0-blue.svg)
 ![Tests 800 passing](https://img.shields.io/badge/tests-800%20passing-brightgreen.svg)
 ![New Scale modules 97% coverage](https://img.shields.io/badge/scale%20coverage-97%25-brightgreen.svg)
 [![License MIT](https://img.shields.io/badge/license-MIT-blue.svg)](https://opensource.org/licenses/MIT)
@@ -10,7 +10,7 @@
 
 Applications continue to send OpenAI-shaped requests. The gateway authenticates virtual keys, resolves tenant and budget scopes, enforces limits, selects or falls back between models, forwards through the LiteLLM SDK, and records usage and cost without persisting prompt or response content.
 
-**Current package version:** `11.1.0`
+**Current package version:** `13.0.0`
 
 > [!IMPORTANT]
 > The built-in SQLite repositories are intended for development and single-node deployments. Multi-instance production deployments must use transactional shared repository adapters. Scale Center provides planning and validation decisions, but it does not provision Postgres, Redis, or other infrastructure.
@@ -520,7 +520,7 @@ Migration guides are available from `docs/migration-0.7.md` through [`docs/migra
 
 ## Versioning and release history
 
-The package version is `11.1.0`. Historical center versions in documentation describe the release in which a capability family was introduced. They are all included in the current package.
+The package version is `13.0.0`. Historical center versions in documentation describe the release in which a capability family was introduced. They are all included in the current package.
 
 Major milestones include:
 
@@ -602,7 +602,7 @@ See [MCP Governance](docs/mcp-governance.md), the [MCP Governance API](docs/api/
 
 ## AI Operations Cockpit 10.0
 
-Version 11.1 implements the three P0 priorities validated in `research-findings.md`: one live graphical cockpit, a pre-step Agent Runaway Firewall, and schema-generated guided forms. These address fragmented operations, runaway agent spend, and raw-JSON onboarding friction.
+Version 13.0 implements the three P0 priorities validated in `research-findings.md`: one live graphical cockpit, a pre-step Agent Runaway Firewall, and schema-generated guided forms. These address fragmented operations, runaway agent spend, and raw-JSON onboarding friction.
 
 ### Main user flow
 
@@ -629,7 +629,7 @@ See `docs/priority-features-api.md` for the implemented endpoint contracts and `
 
 ## Agent trace and outcome intelligence 10.0
 
-Version 11.1 continues the priority roadmap from `research-findings.md` with the first two P1 differentiators:
+Version 13.0 continues the priority roadmap from `research-findings.md` with the first two P1 differentiators:
 
 - **End-to-end agent trace explorer:** tenant-isolated nested spans connect agent planning, tool calls, duration, status and cost without retaining prompt or response content.
 - **Cost-to-outcome analytics:** reports total cost, cost per successful outcome, quality-weighted cost, and breakdowns by feature, project, model and tool.
@@ -638,7 +638,7 @@ Use `POST /v1/console/traces` to append a span, then retrieve a run through `GET
 
 ## Verified software supply chain 10.0
 
-Version 11.1 implements the remaining high-value research recommendation for signed, reproducible distribution:
+Version 13.0 implements the remaining high-value research recommendation for signed, reproducible distribution:
 
 - **Deterministic SBOM:** `GET /v1/console/supply-chain/sbom` inventories pinned Python and npm packages in CycloneDX-compatible JSON.
 - **Artifact provenance:** `ProvenanceService` binds release bytes to builder and source identity through SHA-256 in an in-toto/SLSA-style statement and verifies artifacts offline.
@@ -648,7 +648,7 @@ The implementation uses only local files and standard-library cryptographic hash
 
 ## Research roadmap completion 10.0
 
-Version 11.1 completes the feature roadmap prioritized in `research-findings.md`. In addition to the cockpit, runaway firewall, generated forms, traces, outcome economics, and verified supply chain, this release adds:
+Version 13.0 completes the feature roadmap prioritized in `research-findings.md`. In addition to the cockpit, runaway firewall, generated forms, traces, outcome economics, and verified supply chain, this release adds:
 
 - **Visual policy and routing simulation:** preview budget, residency, tool, health, quality, and cost decisions without invoking a provider.
 - **Production migration readiness:** fail closed until backup, schema validation, rehearsal, rollback, and full regression evidence exist.
@@ -659,22 +659,19 @@ Version 11.1 completes the feature roadmap prioritized in `research-findings.md`
 
 The complete market-research feature set is now represented by implemented domain logic, tested APIs, a production frontend, and synchronized documentation.
 
-## Live trace explorer 11.1
+## Live trace explorer 13.0
 
 The cockpit now contains a real trace-explorer flow rather than a static preview. Enter a tenant, load privacy-safe run summaries, compare span count, duration, and attributed cost, then open the nested trace endpoint for drill-down. The API enforces `X-Tenant-Id`, and summaries never include prompt or response content.
 
-## Logical routing product experience 11.1
+## Task-first product console 13.0
 
-Version 11.1 changes the primary product experience from a broad operations dashboard to a focused gateway configurator:
+Version 12 replaces the capability-catalog landing page with a gateway control plane designed around the real activation path:
 
-1. **Connect an application.** Create a stable gateway key without exposing provider credentials.
-2. **Create a logical route.** The client sends `model="support-balanced"`, not a provider model name.
-3. **Configure simple rules.** Choose default and fallback models, monthly budget, IANA timezone, schedule, quality-tier models, transient fallback statuses, region, capabilities, and a request cost ceiling.
-4. **Test before deployment.** The route simulator explains every gate and the exact selected model without calling a provider.
-5. **Publish safely.** Immutable drafts publish atomically and roll back to the prior production version.
-6. **Observe decisions.** Activity stores the route version, decision ID, selected model, fallback reason, decision path, and response-header contract.
+```text
+Add provider → Create route → Publish → Connect application → Send first request
+```
 
-### Run the product UI
+Primary navigation is Home, Applications, Routes, Providers, Activity, and Usage. Traces, policies, security, services, supply chain, and raw API tooling remain available under Advanced.
 
 ```bash
 uv sync --extra dev
@@ -682,30 +679,27 @@ cd ui && npm ci && npm run build && cd ..
 uv run uvicorn llm_budget_gateway.console_api:create_console_app --factory --host 127.0.0.1 --port 8013
 ```
 
-Open `http://127.0.0.1:8013/cockpit`. The expert console remains at `/console`, and advanced operational tools remain available without dominating onboarding.
+Open `http://127.0.0.1:8013/cockpit`.
 
-### Stable client example
+## Operational maturity 13.0
 
-```python
-from openai import OpenAI
+Ten autonomous iterations extend the task-first console with production lifecycle controls: key rotation, budgets, alerts, environments, saved views, provider verification, route rollback, soft archive, portable configuration, recommendations, and audit evidence.
 
-client = OpenAI(
-    base_url="http://localhost:8000/v1",
-    api_key="gw_your_application_key",
-)
+Important endpoints include:
 
-response = client.chat.completions.create(
-    model="support-balanced",
-    messages=[{"role": "user", "content": "Help this customer"}],
-)
+```text
+POST /v1/product/applications/{app_id}/keys/rotate
+POST /v1/product/keys/{key_id}/revoke
+PUT  /v1/product/budgets/{scope}
+GET|POST /v1/product/alerts
+GET|POST /v1/product/environments
+GET|POST /v1/product/views
+POST /v1/product/providers/{provider_id}/check
+POST /v1/product/routes/{route_id}/snapshots/{version}
+POST /v1/product/routes/{route_id}/rollback/{version}
+POST /v1/product/archive/{kind}/{resource_id}
+GET  /v1/product/export
+POST /v1/product/import
+GET  /v1/product/recommendations
+GET  /v1/product/audit
 ```
-
-Routing changes no longer require a client application redeployment. The route decision contract includes `X-Gateway-Route`, `X-Gateway-Route-Version`, `X-Gateway-Serving-Model`, `X-Gateway-Decision-Id`, and `X-Gateway-Fallback`.
-
-## Live logical-route execution 11.1
-
-Published route aliases now execute on the actual OpenAI-compatible data plane. Both services use `GATEWAY_ROUTING_DATABASE_URL` (default `sqlite:///.gateway-console/routing.db`), so a route published in the cockpit is immediately available to gateway requests and remains available after restart.
-
-An application key can call `model="support-balanced"`. The proxy authenticates the application, resolves quality/schedule/region/capability policy, reads current-month model spend and provider health, calls the selected model, and retries the ordered route chain only for configured transient statuses. Successful cost is attributed to the actual serving model.
-
-The Usage and Activity navigation items now show live backend data rather than placeholders. `/v1/models` also includes published logical aliases.

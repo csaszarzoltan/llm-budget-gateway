@@ -404,44 +404,36 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ### Docs
 - Updated README, API documentation, frontend version, and the machine-readable feature manifest.
 
-## [11.0.0] - 2026-08-04
+## [12.0.0] - 2026-08-04
 
 ### Features
-- Reframed the product around one stable endpoint and logical model routes.
-- Added a SQLite-backed application registry with one-time gateway key display and secret-safe listing.
-- Added immutable route drafts, atomic publish, previous-version rollback, and decision activity.
-- Added schedule, timezone, quality-tier, per-request cost, region, capability, budget, provider-health, and transient-status routing controls.
-- Added deterministic budget and health fallback with explainable response headers.
-- Added the complete `/v1/admin/applications` and `/v1/admin/routes` API family.
-- Rebuilt the React UI around Overview, Applications, Routes, Usage, Activity, and Advanced.
-- Added a simple route builder and real Connect → Create → Test → Publish → Observe flow.
-
-### Fixes
-- Added pinned `tzdata` for consistent IANA schedule behavior in minimal containers.
-- Moved operational tools out of the primary navigation to reduce first-use cognitive load.
+- Rebuilt the complete product experience around Home, Applications, Routes, Providers, Activity, and Usage.
+- Added a role-adaptive, state-derived home dashboard with gateway endpoint, activation checklist, attention feed, traffic KPIs, active routes, and explainable recent decisions.
+- Added application, provider/model catalog, route template, immutable route version, route testing, publish, activity, and cost aggregation product APIs.
+- Added developer, operator, FinOps, and security home emphasis.
+- Moved traces, policies, security, services, supply chain, and raw API access under Advanced.
+- Added full responsive light and dark visual systems with mobile navigation and actionable empty states.
 
 ### Tests
-- Added real SQLite lifecycle, versioning, rollback, timezone, budget, health, quality, capability, validation, activity, and ASGI integration tests.
+- Added real SQLite and ASGI integration coverage for the complete product activation flow, provider health, route templates, timezone selection, versions, role views, activity, and usage.
 
 ### Docs
-- Updated README, API documentation, feature manifest, package version, and frontend package version.
+- Added GUI architecture and user-flow documentation, updated README, API documentation, version metadata, and FEATURES-DONE.md.
 
-## [11.1.0] - 2026-08-04
+## [13.0.0] - 2026-08-04
 
 ### Features
-- Connected published logical routes to the real OpenAI-compatible gateway data plane.
-- Added application-key authentication against the shared routing database.
-- Added persisted monthly model spend and model-health eligibility.
-- Added ordered logical-route failover for configured transient provider statuses.
-- Added live gateway decision headers and logical aliases to `/v1/models`.
-- Added `GET /v1/admin/routes/{route_id}/usage` and real Usage and Activity screens.
-
-### Fixes
-- Console and gateway now share `GATEWAY_ROUTING_DATABASE_URL` by default, so route publication survives restarts and requires no client redeployment.
-- Serving cost is attributed to the actual model after fallback rather than the requested logical alias.
+- Added application key rotation and revocation.
+- Added scoped budget headroom and spend accounting.
+- Added alert rules for cost, error rate, latency, and fallback rate.
+- Added a multi-environment registry and default environment selection.
+- Added role-scoped saved views.
+- Added provider health and latency evidence.
+- Added route snapshots and rollback.
+- Added non-destructive resource archival.
+- Added non-secret configuration export and validated import.
+- Added actionable recommendations and audit logging.
+- Exposed every capability through product APIs and Advanced console links.
 
 ### Tests
-- Added application-key auth, alias lookup, live monthly ledger, health exclusion, transient failover, response header, usage headroom, and proxy integration coverage.
-
-### Docs
-- Updated README, logical routing API documentation, version metadata, and `FEATURES-DONE.md`.
+- Added one focused test per autonomous iteration, validation edge coverage, and an end-to-end ASGI contract test spanning the extension API.

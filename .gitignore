@@ -31,6 +31,3 @@ ui/coverage/
 *.log
 build/
 dist/
-
-.gateway-console/*.db
-.gateway-console/*.db-*

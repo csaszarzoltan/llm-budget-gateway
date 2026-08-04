@@ -2,11 +2,9 @@
 
 from __future__ import annotations
 
-import os
 import sqlite3
 from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
-from datetime import UTC, datetime
 from pathlib import Path
 
 from fastapi import FastAPI, Header, HTTPException, Request
@@ -23,7 +21,8 @@ from .priority_features import (
     RunState,
     SchemaFormService,
 )
-from .routing_control_plane import RoutingControlPlane
+from .product_console import ProductConsoleStore
+from .product_extensions import ProductExtensions
 from .service_manager import ServiceManager
 from .supply_chain import SBOMService, UpgradeRiskService
 from .trace_outcomes import OutcomeAnalytics, OutcomeRecord, TraceSpan, TraceStore
@@ -80,19 +79,17 @@ def create_console_app(
     *,
     trace_connection: sqlite3.Connection | None = None,
     project_root: Path | None = None,
-    routing_connection: sqlite3.Connection | None = None,
+    product_connection: sqlite3.Connection | None = None,
 ) -> FastAPI:
     """Create the console with local one-click lifecycle controls."""
     service_manager = manager or ServiceManager()
     repository_root = project_root or Path(__file__).resolve().parents[2]
-    if routing_connection is None:
-        routing_url = os.getenv(
-            "GATEWAY_ROUTING_DATABASE_URL", "sqlite:///.gateway-console/routing.db"
-        )
-        routing_path = Path(routing_url.removeprefix("sqlite:///"))
-        routing_path.parent.mkdir(parents=True, exist_ok=True)
-        routing_connection = sqlite3.connect(routing_path, check_same_thread=False)
-    routing = RoutingControlPlane(routing_connection)
+    extensions = ProductExtensions(
+        product_connection or sqlite3.connect(":memory:", check_same_thread=False)
+    )
+    product = ProductConsoleStore(
+        product_connection or sqlite3.connect(":memory:", check_same_thread=False)
+    )
     trace_store = TraceStore(
         trace_connection or sqlite3.connect(":memory:", check_same_thread=False)
     )
@@ -274,107 +271,205 @@ def create_console_app(
         except (TypeError, ValueError) as exc:
             raise HTTPException(422, str(exc)) from exc
 
-    @app.post("/v1/admin/applications", status_code=201)
-    async def create_application(body: dict[str, object]) -> dict[str, object]:
-        """Connect an application and return its gateway key once."""
+    @app.get("/v1/product/home")
+    async def product_home(role: str = "developer") -> dict[str, object]:
+        """Return the role-aware product home state."""
+        return product.home(role)
+
+    @app.get("/v1/product/templates")
+    async def product_templates() -> dict[str, object]:
+        return {"templates": product.route_templates()}
+
+    @app.get("/v1/product/applications")
+    async def product_applications() -> dict[str, object]:
+        return {"applications": product.applications()}
+
+    @app.post("/v1/product/applications", status_code=201)
+    async def create_product_application(body: dict[str, object]) -> dict[str, object]:
         try:
-            return routing.create_application(
+            return product.create_application(
                 str(body.get("name", "")), str(body.get("default_route", ""))
             )
         except ValueError as exc:
             raise HTTPException(422, str(exc)) from exc
 
-    @app.get("/v1/admin/applications")
-    async def list_applications() -> dict[str, object]:
-        """List connected applications without secret material."""
-        return {"applications": routing.list_applications()}
+    @app.get("/v1/product/providers")
+    async def product_providers() -> dict[str, object]:
+        return {"providers": product.providers()}
 
-    @app.post("/v1/admin/routes", status_code=201)
-    async def create_route(body: dict[str, object]) -> dict[str, object]:
-        """Create a validated logical route draft."""
+    @app.post("/v1/product/providers", status_code=201)
+    async def create_product_provider(body: dict[str, object]) -> dict[str, object]:
         try:
-            return routing.create_route(body)
-        except ValueError as exc:
+            return product.create_provider(
+                str(body.get("name", "")),
+                str(body.get("slug", "")),
+                str(body.get("region", "global")),
+                list(body.get("models", [])),
+            )
+        except (ValueError, TypeError) as exc:
             raise HTTPException(422, str(exc)) from exc
 
-    @app.get("/v1/admin/routes")
-    async def list_routes() -> dict[str, object]:
-        """List logical routes and current versions."""
-        return {"routes": routing.list_routes()}
+    @app.get("/v1/product/routes")
+    async def product_routes() -> dict[str, object]:
+        return {"routes": product.routes()}
 
-    @app.get("/v1/admin/routes/{route_id}")
-    async def get_route(route_id: str) -> dict[str, object]:
-        """Return one logical route."""
+    @app.post("/v1/product/routes", status_code=201)
+    async def create_product_route(body: dict[str, object]) -> dict[str, object]:
         try:
-            return routing.get_route(route_id)
-        except KeyError as exc:
-            raise HTTPException(404, "unknown route") from exc
-
-    @app.put("/v1/admin/routes/{route_id}")
-    async def update_route(route_id: str, body: dict[str, object]) -> dict[str, object]:
-        """Create a new immutable draft version."""
-        try:
-            return routing.update_route(route_id, body)
-        except KeyError as exc:
-            raise HTTPException(404, "unknown route") from exc
-        except ValueError as exc:
+            return product.create_route(
+                str(body.get("name", "")), list(body.get("targets", []))
+            )
+        except (ValueError, TypeError) as exc:
             raise HTTPException(422, str(exc)) from exc
 
-    @app.post("/v1/admin/routes/{route_id}/simulate")
-    async def simulate_route(
+    @app.put("/v1/product/routes/{route_id}")
+    async def update_product_route(
         route_id: str, body: dict[str, object]
     ) -> dict[str, object]:
-        """Preview the exact routing decision without calling a provider."""
         try:
-            return routing.simulate(
-                route_id,
-                now=datetime.fromisoformat(str(body.get("at"))),
-                quality_tier=str(body.get("quality_tier", "balanced")),
-                estimated_cost=float(body.get("estimated_cost", 0)),
-                spend_by_model=dict(body.get("spend_by_model", {})),
-                health=dict(body.get("health", {})),
-                region=str(body.get("region", "eu")),
-                capabilities=list(body.get("capabilities", [])),
+            return product.update_route(route_id, list(body.get("targets", [])))
+        except KeyError as exc:
+            raise HTTPException(404, "unknown route") from exc
+        except (ValueError, TypeError) as exc:
+            raise HTTPException(422, str(exc)) from exc
+
+    @app.post("/v1/product/routes/{route_id}/publish")
+    async def publish_product_route(route_id: str) -> dict[str, object]:
+        try:
+            return product.publish_route(route_id)
+        except KeyError as exc:
+            raise HTTPException(404, "unknown route") from exc
+
+    @app.post("/v1/product/routes/{route_id}/test")
+    async def test_product_route(
+        route_id: str, body: dict[str, object]
+    ) -> dict[str, object]:
+        try:
+            return product.test_route(
+                route_id, str(body.get("at")), list(body.get("capabilities", []))
             )
         except KeyError as exc:
             raise HTTPException(404, "unknown route") from exc
-        except (TypeError, ValueError, RuntimeError) as exc:
+        except (ValueError, RuntimeError) as exc:
             raise HTTPException(422, str(exc)) from exc
 
-    @app.post("/v1/admin/routes/{route_id}/publish")
-    async def publish_route(route_id: str) -> dict[str, object]:
-        """Publish the current route draft atomically."""
-        try:
-            return routing.publish_route(route_id)
-        except KeyError as exc:
-            raise HTTPException(404, "unknown route") from exc
+    @app.get("/v1/product/activity")
+    async def product_activity() -> dict[str, object]:
+        return {"activity": product.activity()}
 
-    @app.post("/v1/admin/routes/{route_id}/rollback")
-    async def rollback_route(route_id: str) -> dict[str, object]:
-        """Restore the immediately previous production version."""
+    @app.get("/v1/product/usage")
+    async def product_usage() -> dict[str, object]:
+        return product.usage()
+
+    @app.post("/v1/product/applications/{app_id}/keys/rotate")
+    async def rotate_product_key(app_id: str) -> dict[str, object]:
+        return extensions.rotate_key(app_id)
+
+    @app.post("/v1/product/keys/{key_id}/revoke")
+    async def revoke_product_key(key_id: str) -> dict[str, object]:
         try:
-            return routing.rollback_route(route_id)
+            return extensions.revoke_key(key_id)
         except KeyError as exc:
-            raise HTTPException(404, "unknown route") from exc
+            raise HTTPException(404, "unknown active key") from exc
+
+    @app.put("/v1/product/budgets/{scope}")
+    async def set_product_budget(
+        scope: str, body: dict[str, object]
+    ) -> dict[str, object]:
+        try:
+            return extensions.set_budget(
+                scope, float(body.get("limit_usd", 0)), int(body.get("reset_day", 1))
+            )
         except ValueError as exc:
-            raise HTTPException(409, str(exc)) from exc
+            raise HTTPException(422, str(exc)) from exc
 
-    @app.get("/v1/admin/routes/{route_id}/usage")
-    async def route_usage(route_id: str) -> dict[str, object]:
-        """Return current-month model spend and budget headroom."""
-        try:
-            return routing.route_usage(route_id, at=datetime.now(UTC))
-        except KeyError as exc:
-            raise HTTPException(404, "unknown route") from exc
+    @app.get("/v1/product/alerts")
+    async def product_alerts() -> dict[str, object]:
+        return {"alerts": extensions.alerts()}
 
-    @app.get("/v1/admin/routes/{route_id}/activity")
-    async def route_activity(route_id: str) -> dict[str, object]:
-        """Return newest-first explainable decisions."""
+    @app.post("/v1/product/alerts", status_code=201)
+    async def create_product_alert(body: dict[str, object]) -> dict[str, object]:
         try:
-            routing.get_route(route_id)
-            return {"activity": routing.route_activity(route_id)}
+            return extensions.create_alert(
+                str(body.get("name", "")),
+                str(body.get("metric", "")),
+                float(body.get("threshold", 0)),
+            )
+        except ValueError as exc:
+            raise HTTPException(422, str(exc)) from exc
+
+    @app.get("/v1/product/environments")
+    async def product_environments() -> dict[str, object]:
+        return {"environments": extensions.environments()}
+
+    @app.post("/v1/product/environments", status_code=201)
+    async def create_product_environment(body: dict[str, object]) -> dict[str, object]:
+        try:
+            return extensions.create_environment(
+                str(body.get("name", "")),
+                str(body.get("base_url", "")),
+                bool(body.get("default", False)),
+            )
+        except ValueError as exc:
+            raise HTTPException(422, str(exc)) from exc
+
+    @app.get("/v1/product/views")
+    async def product_views(role: str = "developer") -> dict[str, object]:
+        return {"views": extensions.views(role)}
+
+    @app.post("/v1/product/views", status_code=201)
+    async def create_product_view(body: dict[str, object]) -> dict[str, object]:
+        return extensions.save_view(
+            str(body.get("name", "")),
+            str(body.get("role", "developer")),
+            dict(body.get("filters", {})),
+        )
+
+    @app.post("/v1/product/providers/{provider_id}/check")
+    async def check_product_provider(
+        provider_id: str, body: dict[str, object]
+    ) -> dict[str, object]:
+        return extensions.provider_check(
+            provider_id, bool(body.get("healthy", True)), int(body.get("latency_ms", 0))
+        )
+
+    @app.post("/v1/product/routes/{route_id}/snapshots/{version}")
+    async def snapshot_product_route(
+        route_id: str, version: int, body: dict[str, object]
+    ) -> dict[str, object]:
+        return extensions.snapshot_route(route_id, version, body)
+
+    @app.post("/v1/product/routes/{route_id}/rollback/{version}")
+    async def rollback_product_route(route_id: str, version: int) -> dict[str, object]:
+        try:
+            return extensions.rollback_route(route_id, version)
         except KeyError as exc:
-            raise HTTPException(404, "unknown route") from exc
+            raise HTTPException(404, "unknown route snapshot") from exc
+
+    @app.post("/v1/product/archive/{kind}/{resource_id}")
+    async def archive_product_resource(
+        kind: str, resource_id: str, body: dict[str, object]
+    ) -> dict[str, object]:
+        return extensions.archive(kind, resource_id, body)
+
+    @app.get("/v1/product/export")
+    async def export_product_bundle() -> dict[str, object]:
+        return extensions.export_bundle()
+
+    @app.post("/v1/product/import")
+    async def import_product_bundle(body: dict[str, object]) -> dict[str, object]:
+        try:
+            return extensions.import_bundle(body)
+        except ValueError as exc:
+            raise HTTPException(422, str(exc)) from exc
+
+    @app.get("/v1/product/recommendations")
+    async def product_recommendations() -> dict[str, object]:
+        return {"recommendations": extensions.recommendations()}
+
+    @app.get("/v1/product/audit")
+    async def product_audit() -> dict[str, object]:
+        return {"audit": extensions.audit()}
 
     @app.get("/v1/console/services")
     async def services(

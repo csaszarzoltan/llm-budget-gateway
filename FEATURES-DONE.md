@@ -1,14 +1,15 @@
 ## Features Done (this pass)
-- Logical Route Data Plane: OpenAI-compatible chat, completion, and embedding requests now execute published logical aliases against real serving models.
-- Application-Key Authentication: One-time application keys authenticate directly on the gateway through constant-time stored hashes without provider secrets.
-- Shared Persistent Routing Store: The console and gateway use the same configurable SQLite routing database so published changes apply without client redeployment.
-- Live Monthly Budget Ledger: Successful provider cost is attributed to the actual serving model and used by future route decisions in the same calendar month.
-- Runtime Provider Health Eligibility: Persisted model-health state removes unhealthy route targets before a provider call.
-- Transient Status Failover: Logical routes retry ordered eligible models only for configured retry-safe statuses such as 429, 500, 502, 503, and 504.
-- Gateway Decision Headers: Live responses expose route, version, actual serving model, decision ID, and fallback reason.
-- Live Usage View: The React Usage screen shows per-route model spend, budget, percentage used, and remaining headroom.
-- Live Activity View: The React Activity screen shows real explainable route decisions and provider fallback reasons.
-- Logical Alias Discovery: Published route names are included by the gateway models endpoint.
+- Iteration 1 — Application Key Lifecycle: One-time key rotation automatically revokes prior active keys and explicit revocation is supported.
+- Iteration 2 — Budget Headroom: Per-scope limits, spend accumulation, reset day, remaining amount, and percentage used are persisted.
+- Iteration 3 — Alert Rules: Cost, error-rate, latency, and fallback-rate thresholds are configurable and listable.
+- Iteration 4 — Environment Registry: Multiple gateway environments with validated base URLs and one default environment are supported.
+- Iteration 5 — Saved Role Views: Developer, operator, FinOps, and security filters can be stored as reusable views.
+- Iteration 6 — Provider Verification: Health checks record availability, latency, time, and create actionable audit evidence.
+- Iteration 7 — Route Snapshots and Rollback: Versioned route payloads can be snapshotted and restored safely.
+- Iteration 8 — Soft Archival: Routes and other product resources can be archived without destructive deletion.
+- Iteration 9 — Portable Configuration: Non-secret environments, alerts, budgets, and views can be exported and validated imports restore supported settings.
+- Iteration 10 — Recommendations and Audit: Budget pressure and provider outages generate recommendations; sensitive lifecycle actions are recorded in an audit stream.
+- Extension API Surface: All ten iterations are exposed through FastAPI endpoints and linked from Advanced tools.
 ## Sources
-- research-findings.md items addressed: runtime enforcement, budget fallback, provider failover, cost attribution, actionable incident UX, unified live graphical cockpit
-- CHANGELOG.md section this maps to: [11.1.0] - 2026-08-04
+- research-findings.md items addressed: governed keys, scoped budget control, proactive alerts, multi-environment operations, health-aware routing, version safety, auditability, portable self-hosted configuration
+- CHANGELOG.md section this maps to: [13.0.0] - 2026-08-04

@@ -13,9 +13,7 @@ import inspect
 import json
 import logging
 import time
-from collections.abc import Callable
 from dataclasses import dataclass
-from datetime import UTC, datetime
 from uuid import uuid4
 
 import litellm
@@ -114,16 +112,6 @@ class GatewayProxy:
         self._cost_tracker = cost_tracker
         self._budget_enforcer = budget_enforcer
         self._fallback_manager = fallback_manager
-        self._routing_control_plane = None
-        self._routing_now: Callable[[], datetime] = lambda: datetime.now(UTC)
-
-    def attach_routing_control_plane(
-        self, plane: object, *, now: Callable[[], datetime] | None = None
-    ) -> None:
-        """Attach logical-route execution while preserving legacy proxy wiring."""
-        self._routing_control_plane = plane
-        if now is not None:
-            self._routing_now = now
 
     async def handle_chat_completion(
         self, body: dict, api_key: str, headers: dict
@@ -161,40 +149,7 @@ class GatewayProxy:
             )
             return self._error_response(401, "invalid or missing api key", model)
 
-        route_decision = None
-        logical_model = model
-        if self._routing_control_plane is not None:
-            plane = self._routing_control_plane
-            if plane.has_published_route(model):
-                metadata = (
-                    body.get("metadata", {})
-                    if isinstance(body.get("metadata", {}), dict)
-                    else {}
-                )
-                capabilities = []
-                if body.get("tools"):
-                    capabilities.append("tools")
-                if body.get("response_format"):
-                    capabilities.append("structured_output")
-                try:
-                    route_decision = plane.resolve_alias(
-                        model,
-                        now=self._routing_now(),
-                        quality_tier=str(metadata.get("quality_tier", "balanced")),
-                        estimated_cost=float(metadata.get("max_cost_usd", 0.0)),
-                        region=str(metadata.get("region", "eu")),
-                        capabilities=capabilities,
-                    )
-                    model = str(route_decision["selected_model"])
-                    body = {**body, "model": model}
-                except (KeyError, RuntimeError, TypeError, ValueError) as exc:
-                    return self._error_response(422, str(exc), logical_model)
-            elif self._settings.virtual_keys.get(api_key) is None:
-                return self._error_response(
-                    404, f"unknown logical route: {model}", model
-                )
-
-        if route_decision is None and not self._model_known(model):
+        if not self._model_known(model):
             return self._error_response(404, f"unknown model: {model}", model)
 
         est_input_tokens = self._estimate_input_tokens(body)
@@ -211,12 +166,7 @@ class GatewayProxy:
             return self._error_response(412, str(exc), model)
 
         try:
-            if route_decision is not None:
-                response = await self._forward_logical_route(route_decision, body)
-            else:
-                response = await self._forward_with_fallback(
-                    model, body, api_key, headers
-                )
+            response = await self._forward_with_fallback(model, body, api_key, headers)
         except ProviderTimeoutError:
             logger.warning("provider timeout request=%s model=%s", request_id, model)
             await self._record(
@@ -245,7 +195,7 @@ class GatewayProxy:
             )
             return self._error_response(502, "upstream provider error", model)
 
-        recorded_cost = await self._record(
+        await self._record(
             request_id=request_id,
             scope=scopes[0],
             model=response.model,
@@ -253,41 +203,7 @@ class GatewayProxy:
             latency_ms=response.latency_ms,
             status="success",
         )
-        if route_decision is not None and self._routing_control_plane is not None:
-            response.headers = {
-                **response.headers,
-                **route_decision["response_headers"],
-            }
-            self._routing_control_plane.record_model_spend(
-                logical_model, response.model, recorded_cost, at=self._routing_now()
-            )
         return response
-
-    async def _forward_logical_route(
-        self, decision: dict, body: dict
-    ) -> ProviderResponse:
-        """Try eligible route models in order for configured transient statuses."""
-        statuses = {int(value) for value in decision.get("fallback_statuses", [])}
-        candidates = list(decision.get("candidate_models", []))
-        last: ProviderResponse | None = None
-        last_status: int | None = None
-        for index, candidate in enumerate(candidates):
-            response = await self.forward(str(candidate), {**body, "model": candidate})
-            last = response
-            if response.status_code not in statuses or index == len(candidates) - 1:
-                if index:
-                    decision["fallback_reason"] = f"provider_status_{last_status}"
-                    decision["response_headers"]["X-Gateway-Fallback"] = decision[
-                        "fallback_reason"
-                    ]
-                    decision["response_headers"]["X-Gateway-Serving-Model"] = str(
-                        response.model
-                    )
-                return response
-            last_status = response.status_code
-        if last is None:
-            raise RuntimeError("logical route has no eligible models")
-        return last
 
     async def _forward_with_fallback(
         self, model: str, body: dict, api_key: str, headers: dict
@@ -512,13 +428,6 @@ class GatewayProxy:
         Raises ApiKeyError (401) if api_key is not in Settings.virtual_keys.
         """
         key_id = self._settings.virtual_keys.get(api_key)
-        if key_id is None and self._routing_control_plane is not None:
-            try:
-                key_id = self._routing_control_plane.authenticate_application(api_key)[
-                    "id"
-                ]
-            except PermissionError:
-                key_id = None
         if key_id is None:
             raise ApiKeyError("invalid or missing api key")
         scopes = [BudgetScope(kind="key", key=key_id)]
@@ -539,8 +448,8 @@ class GatewayProxy:
         usage: TokenUsage | None,
         latency_ms: int,
         status: str,
-    ) -> float:
-        """Best-effort cost record and return the calculated serving cost.
+    ) -> None:
+        """Best-effort cost record; tolerates non-awaitable tracker doubles.
 
         A recording failure is logged and swallowed — it must never surface as
         a provider error (internal DB failure != provider failure).
@@ -548,7 +457,7 @@ class GatewayProxy:
         try:
             record = getattr(self._cost_tracker, "build_record", None)
             if record is None:
-                return 0.0
+                return
             usage_record = record(
                 request_id=request_id,
                 scope=scope,
@@ -561,7 +470,6 @@ class GatewayProxy:
             result = self._cost_tracker.record(usage_record)
             if inspect.isawaitable(result):
                 await result
-            return float(getattr(usage_record, "total_cost", 0.0))
         except Exception:
             logger.exception(
                 "cost record failed request=%s model=%s status=%s",
@@ -569,7 +477,6 @@ class GatewayProxy:
                 model,
                 status,
             )
-            return 0.0
 
     def _estimate_input_tokens(self, body: dict) -> int:
         """Estimate prompt tokens via the fallback manager (0 when unknown)."""
