@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "llm-budget-gateway"
-version = "13.0.0"
+version = "13.2.0"
 description = "LLM budget gateway: OpenAI-compatible proxy with budget enforcement and automatic model fallback"
 readme = "README.md"
 requires-python = ">=3.11"
@@ -18,7 +18,11 @@ dependencies = [
     "mcp==1.29.0",
     "jsonschema==4.26.0",
     "tzdata==2025.2",
+    "cryptography==45.0.7",
 ]
+
+[project.scripts]
+gateway-system = "llm_budget_gateway.system_launcher:main"
 
 [project.optional-dependencies]
 dev = [

@@ -1,7 +1,7 @@
 # LLM Budget Gateway
 
 [![Python 3.11+](https://img.shields.io/badge/python-3.11%2B-blue.svg)](https://www.python.org/downloads/)
-![Version 13.0.0](https://img.shields.io/badge/version-9.4.0-blue.svg)
+![Version 13.2.0](https://img.shields.io/badge/version-9.4.0-blue.svg)
 ![Tests 800 passing](https://img.shields.io/badge/tests-800%20passing-brightgreen.svg)
 ![New Scale modules 97% coverage](https://img.shields.io/badge/scale%20coverage-97%25-brightgreen.svg)
 [![License MIT](https://img.shields.io/badge/license-MIT-blue.svg)](https://opensource.org/licenses/MIT)
@@ -10,7 +10,7 @@
 
 Applications continue to send OpenAI-shaped requests. The gateway authenticates virtual keys, resolves tenant and budget scopes, enforces limits, selects or falls back between models, forwards through the LiteLLM SDK, and records usage and cost without persisting prompt or response content.
 
-**Current package version:** `13.0.0`
+**Current package version:** `13.2.0`
 
 > [!IMPORTANT]
 > The built-in SQLite repositories are intended for development and single-node deployments. Multi-instance production deployments must use transactional shared repository adapters. Scale Center provides planning and validation decisions, but it does not provision Postgres, Redis, or other infrastructure.
@@ -520,7 +520,7 @@ Migration guides are available from `docs/migration-0.7.md` through [`docs/migra
 
 ## Versioning and release history
 
-The package version is `13.0.0`. Historical center versions in documentation describe the release in which a capability family was introduced. They are all included in the current package.
+The package version is `13.2.0`. Historical center versions in documentation describe the release in which a capability family was introduced. They are all included in the current package.
 
 Major milestones include:
 
@@ -602,7 +602,7 @@ See [MCP Governance](docs/mcp-governance.md), the [MCP Governance API](docs/api/
 
 ## AI Operations Cockpit 10.0
 
-Version 13.0 implements the three P0 priorities validated in `research-findings.md`: one live graphical cockpit, a pre-step Agent Runaway Firewall, and schema-generated guided forms. These address fragmented operations, runaway agent spend, and raw-JSON onboarding friction.
+Version 13.2 implements the three P0 priorities validated in `research-findings.md`: one live graphical cockpit, a pre-step Agent Runaway Firewall, and schema-generated guided forms. These address fragmented operations, runaway agent spend, and raw-JSON onboarding friction.
 
 ### Main user flow
 
@@ -629,7 +629,7 @@ See `docs/priority-features-api.md` for the implemented endpoint contracts and `
 
 ## Agent trace and outcome intelligence 10.0
 
-Version 13.0 continues the priority roadmap from `research-findings.md` with the first two P1 differentiators:
+Version 13.2 continues the priority roadmap from `research-findings.md` with the first two P1 differentiators:
 
 - **End-to-end agent trace explorer:** tenant-isolated nested spans connect agent planning, tool calls, duration, status and cost without retaining prompt or response content.
 - **Cost-to-outcome analytics:** reports total cost, cost per successful outcome, quality-weighted cost, and breakdowns by feature, project, model and tool.
@@ -638,7 +638,7 @@ Use `POST /v1/console/traces` to append a span, then retrieve a run through `GET
 
 ## Verified software supply chain 10.0
 
-Version 13.0 implements the remaining high-value research recommendation for signed, reproducible distribution:
+Version 13.2 implements the remaining high-value research recommendation for signed, reproducible distribution:
 
 - **Deterministic SBOM:** `GET /v1/console/supply-chain/sbom` inventories pinned Python and npm packages in CycloneDX-compatible JSON.
 - **Artifact provenance:** `ProvenanceService` binds release bytes to builder and source identity through SHA-256 in an in-toto/SLSA-style statement and verifies artifacts offline.
@@ -648,7 +648,7 @@ The implementation uses only local files and standard-library cryptographic hash
 
 ## Research roadmap completion 10.0
 
-Version 13.0 completes the feature roadmap prioritized in `research-findings.md`. In addition to the cockpit, runaway firewall, generated forms, traces, outcome economics, and verified supply chain, this release adds:
+Version 13.2 completes the feature roadmap prioritized in `research-findings.md`. In addition to the cockpit, runaway firewall, generated forms, traces, outcome economics, and verified supply chain, this release adds:
 
 - **Visual policy and routing simulation:** preview budget, residency, tool, health, quality, and cost decisions without invoking a provider.
 - **Production migration readiness:** fail closed until backup, schema validation, rehearsal, rollback, and full regression evidence exist.
@@ -659,11 +659,11 @@ Version 13.0 completes the feature roadmap prioritized in `research-findings.md`
 
 The complete market-research feature set is now represented by implemented domain logic, tested APIs, a production frontend, and synchronized documentation.
 
-## Live trace explorer 13.0
+## Live trace explorer 13.2
 
 The cockpit now contains a real trace-explorer flow rather than a static preview. Enter a tenant, load privacy-safe run summaries, compare span count, duration, and attributed cost, then open the nested trace endpoint for drill-down. The API enforces `X-Tenant-Id`, and summaries never include prompt or response content.
 
-## Task-first product console 13.0
+## Task-first product console 13.2
 
 Version 12 replaces the capability-catalog landing page with a gateway control plane designed around the real activation path:
 
@@ -681,7 +681,7 @@ uv run uvicorn llm_budget_gateway.console_api:create_console_app --factory --hos
 
 Open `http://127.0.0.1:8013/cockpit`.
 
-## Operational maturity 13.0
+## Operational maturity 13.2
 
 Ten autonomous iterations extend the task-first console with production lifecycle controls: key rotation, budgets, alerts, environments, saved views, provider verification, route rollback, soft archive, portable configuration, recommendations, and audit evidence.
 
@@ -703,3 +703,36 @@ POST /v1/product/import
 GET  /v1/product/recommendations
 GET  /v1/product/audit
 ```
+
+## Cockpit-first one-command startup 13.2
+
+The normal local entry point is now:
+
+```bash
+uv sync --extra dev
+uv run gateway-system
+```
+
+This starts the cockpit host on port 8013, automatically starts every registered gateway service, waits for each service's readiness check, opens `http://127.0.0.1:8013/cockpit`, and owns graceful shutdown for its child processes. The expert console remains available at `/console`, but it is not required for normal startup.
+
+For headless environments or servers where a browser must not open:
+
+```bash
+uv run uvicorn llm_budget_gateway.system_launcher:create_system_app \
+  --factory --host 127.0.0.1 --port 8013
+```
+
+System readiness is available from `GET /v1/system/status`.
+
+## Named provider connections and automatic model discovery 13.2
+
+Open **Providers & models** in the cockpit and choose **Connect provider**. The four-step wizard asks for:
+
+1. provider type;
+2. a unique connection name and slug;
+3. only the fields required by that provider;
+4. credential verification and model synchronization.
+
+One named connection stores one credential set. The same provider type can be added multiple times, for example `OpenAI Production`, `OpenAI Development`, and `OpenAI EU`, each with a separate slug and key. Models are downloaded from the provider's model-list API and become available as `@slug/model-id` in route model pickers.
+
+Secrets are encrypted at rest under `.gateway-console/`; plaintext credentials are never returned by provider APIs or included in configuration exports.

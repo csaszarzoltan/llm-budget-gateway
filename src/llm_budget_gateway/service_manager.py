@@ -143,12 +143,14 @@ class ServiceManager:
         host: str = "127.0.0.1",
         workdir: Path | None = None,
         log_dir: Path | None = None,
+        startup_timeout: float = 25.0,
     ) -> None:
         self._services = {service.slug: service for service in services}
         self._host = host
         self._workdir = Path(workdir or Path.cwd()).resolve()
         self._log_dir = Path(log_dir or self._workdir / ".gateway-console" / "logs")
         self._processes: dict[str, ManagedProcess] = {}
+        self._startup_timeout = max(0.2, float(startup_timeout))
         self._lock = threading.RLock()
 
     def definitions(self) -> list[dict[str, object]]:
@@ -226,7 +228,7 @@ class ServiceManager:
                 "stdin": subprocess.DEVNULL,
                 "stdout": log,
                 "stderr": subprocess.STDOUT,
-                "env": os.environ.copy(),
+                "env": self._child_environment(),
                 "shell": False,
             }
             if os.name == "nt":
@@ -239,13 +241,50 @@ class ServiceManager:
                 log.close()
                 raise
             self._processes[slug] = ManagedProcess(process, log, time.time())
-            time.sleep(0.08)
-            if process.poll() is not None:
-                self._reap(slug)
-                raise RuntimeError(
-                    f"{service.name} exited during startup; inspect {self._log_dir / f'{slug}.log'}"
-                )
-            return self.status(slug)
+            deadline = time.monotonic() + self._startup_timeout
+            while time.monotonic() < deadline:
+                if process.poll() is not None:
+                    break
+                if self._is_port_open(service.port):
+                    return self.status(slug)
+                time.sleep(0.05)
+            alive = process.poll() is None
+            if alive:
+                process.terminate()
+                try:
+                    process.wait(timeout=1.0)
+                except subprocess.TimeoutExpired:
+                    process.kill()
+                    process.wait(timeout=1.0)
+            self._reap(slug)
+            reason = "did not become reachable" if alive else "exited during startup"
+            raise RuntimeError(
+                f"{service.name} {reason} on port {service.port}. "
+                f"Recent log: {self._log_tail(slug)}"
+            )
+
+    def _child_environment(self) -> dict[str, str]:
+        """Return an import-safe environment for source and installed checkouts."""
+        environment = os.environ.copy()
+        source = str(self._workdir / "src")
+        existing = environment.get("PYTHONPATH", "")
+        environment["PYTHONPATH"] = (
+            source if not existing else source + os.pathsep + existing
+        )
+        environment.setdefault("PYTHONUNBUFFERED", "1")
+        return environment
+
+    def _log_tail(self, slug: str, limit: int = 1800) -> str:
+        """Return bounded startup diagnostics from a child log."""
+        try:
+            text = (
+                (self._log_dir / f"{slug}.log")
+                .read_text(encoding="utf-8", errors="replace")[-limit:]
+                .strip()
+            )
+        except OSError:
+            return "log unavailable"
+        return " | ".join(text.splitlines()[-8:]) or "log is empty"
 
     def start_all(self) -> list[dict[str, object]]:
         """Start every service and report per-service failures without aborting the batch."""

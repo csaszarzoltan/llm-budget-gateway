@@ -25,7 +25,7 @@ def test_start_uses_current_python_without_shell(one_service, tmp_path):
     process.poll.return_value = None
     manager = ServiceManager(one_service, workdir=tmp_path, log_dir=tmp_path / "logs")
     with (
-        patch.object(manager, "_is_port_open", return_value=False),
+        patch.object(manager, "_is_port_open", side_effect=[False, True, True]),
         patch(
             "llm_budget_gateway.service_manager.subprocess.Popen", return_value=process
         ) as popen,

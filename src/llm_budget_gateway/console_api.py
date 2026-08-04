@@ -8,7 +8,7 @@ from contextlib import asynccontextmanager
 from pathlib import Path
 
 from fastapi import FastAPI, Header, HTTPException, Request
-from fastapi.responses import FileResponse, HTMLResponse
+from fastapi.responses import FileResponse, HTMLResponse, RedirectResponse
 from fastapi.staticfiles import StaticFiles
 
 from .completion_features import MigrationPlanner, PolicyRouteSimulator
@@ -23,6 +23,11 @@ from .priority_features import (
 )
 from .product_console import ProductConsoleStore
 from .product_extensions import ProductExtensions
+from .provider_connections import (
+    CredentialVault,
+    ProviderConnectionStore,
+    ProviderDiscovery,
+)
 from .service_manager import ServiceManager
 from .supply_chain import SBOMService, UpgradeRiskService
 from .trace_outcomes import OutcomeAnalytics, OutcomeRecord, TraceSpan, TraceStore
@@ -80,6 +85,11 @@ def create_console_app(
     trace_connection: sqlite3.Connection | None = None,
     project_root: Path | None = None,
     product_connection: sqlite3.Connection | None = None,
+    provider_connection: sqlite3.Connection | None = None,
+    credential_key_path: Path | None = None,
+    provider_discovery_transport: object | None = None,
+    auto_start_services: bool = False,
+    cockpit_first: bool = False,
 ) -> FastAPI:
     """Create the console with local one-click lifecycle controls."""
     service_manager = manager or ServiceManager()
@@ -93,9 +103,23 @@ def create_console_app(
     trace_store = TraceStore(
         trace_connection or sqlite3.connect(":memory:", check_same_thread=False)
     )
+    provider_store = ProviderConnectionStore(
+        provider_connection or sqlite3.connect(":memory:", check_same_thread=False),
+        CredentialVault(
+            credential_key_path
+            or repository_root / ".gateway-console" / "provider-master.key"
+        ),
+    )
+    provider_discovery = ProviderDiscovery(
+        provider_store, transport=provider_discovery_transport
+    )  # type: ignore[arg-type]
+
+    startup_results: list[dict[str, object]] = []
 
     @asynccontextmanager
     async def lifespan(_: FastAPI) -> AsyncIterator[None]:
+        if auto_start_services:
+            startup_results[:] = service_manager.start_all()
         yield
         service_manager.stop_all()
 
@@ -120,10 +144,32 @@ def create_console_app(
     async def health() -> dict[str, str]:
         return {"status": "ok"}
 
-    @app.get("/", response_class=HTMLResponse)
+    if cockpit_first:
+
+        @app.get("/", response_class=RedirectResponse)
+        async def cockpit_root() -> RedirectResponse:
+            """Make the product cockpit the default landing page."""
+            return RedirectResponse("/cockpit")
+    else:
+
+        @app.get("/", response_class=HTMLResponse)
+        async def console_root() -> str:
+            return _render_managed_console()
+
     @app.get("/console", response_class=HTMLResponse)
     async def console() -> str:
         return _render_managed_console()
+
+    @app.get("/v1/system/status")
+    async def system_status() -> dict[str, object]:
+        states = startup_results or service_manager.statuses()
+        failures = [state for state in states if not state.get("reachable")]
+        return {
+            "ready": not failures,
+            "cockpit_available": cockpit_dist.exists(),
+            "services": states,
+            "failures": failures,
+        }
 
     @app.get("/v1/console/catalog")
     async def console_catalog() -> dict[str, object]:
@@ -274,7 +320,14 @@ def create_console_app(
     @app.get("/v1/product/home")
     async def product_home(role: str = "developer") -> dict[str, object]:
         """Return the role-aware product home state."""
-        return product.home(role)
+        payload = product.home(role)
+        connection_count = len(provider_store.list())
+        payload["counts"]["providers"] = connection_count  # type: ignore[index]
+        if connection_count:
+            payload["activation"]["steps"][0]["done"] = True  # type: ignore[index]
+            complete = sum(step["done"] for step in payload["activation"]["steps"])  # type: ignore[index]
+            payload["activation"]["complete"] = complete  # type: ignore[index]
+        return payload
 
     @app.get("/v1/product/templates")
     async def product_templates() -> dict[str, object]:
@@ -292,6 +345,52 @@ def create_console_app(
             )
         except ValueError as exc:
             raise HTTPException(422, str(exc)) from exc
+
+    @app.get("/v1/product/provider-types")
+    async def product_provider_types() -> dict[str, object]:
+        """Return provider-specific connection fields for the setup wizard."""
+        return {"provider_types": provider_store.provider_types()}
+
+    @app.get("/v1/product/provider-connections")
+    async def product_provider_connections() -> dict[str, object]:
+        """List named provider accounts without secret material."""
+        return {"providers": provider_store.list()}
+
+    @app.post("/v1/product/provider-connections", status_code=201)
+    async def create_product_provider_connection(
+        body: dict[str, object],
+    ) -> dict[str, object]:
+        """Store one encrypted credential set for one named provider account."""
+        try:
+            return provider_store.create(body)
+        except ValueError as exc:
+            raise HTTPException(422, str(exc)) from exc
+
+    @app.post("/v1/product/provider-connections/{provider_id}/sync-models")
+    async def sync_product_provider_models(provider_id: str) -> dict[str, object]:
+        """Verify credentials and download the provider-native model catalog."""
+        try:
+            return await provider_discovery.sync(provider_id)
+        except KeyError as exc:
+            raise HTTPException(404, "unknown provider connection") from exc
+        except ValueError as exc:
+            raise HTTPException(422, str(exc)) from exc
+
+    @app.get("/v1/product/discovered-models")
+    async def product_discovered_models() -> dict[str, object]:
+        """Return every discovered model with its named provider alias."""
+        models: list[dict[str, object]] = []
+        for connection in provider_store.list():
+            models.extend(provider_store.models(str(connection["id"])))
+        return {"models": models}
+
+    @app.get("/v1/product/provider-connections/{provider_id}/models")
+    async def product_provider_models(provider_id: str) -> dict[str, object]:
+        """Return models discovered for one named provider account."""
+        try:
+            return {"models": provider_store.models(provider_id)}
+        except KeyError as exc:
+            raise HTTPException(404, "unknown provider connection") from exc
 
     @app.get("/v1/product/providers")
     async def product_providers() -> dict[str, object]:

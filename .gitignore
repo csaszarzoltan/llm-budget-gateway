@@ -31,3 +31,7 @@ ui/coverage/
 *.log
 build/
 dist/
+
+.gateway-console/provider-master.key
+.gateway-console/providers.db*
+.gateway-console/product.db*

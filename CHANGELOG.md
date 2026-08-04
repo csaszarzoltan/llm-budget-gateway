@@ -437,3 +437,35 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Tests
 - Added one focused test per autonomous iteration, validation edge coverage, and an end-to-end ASGI contract test spanning the extension API.
+
+## [13.1.0] - 2026-08-04
+
+### Features
+- Added the `gateway-system` one-command launcher.
+- Made the product cockpit the default landing page.
+- Automatically starts all registered local gateway services and waits for their existing readiness checks.
+- Opens the cockpit in the default browser for interactive local startup.
+- Added a headless factory entry point and `/v1/system/status` endpoint.
+- Keeps the expert console available at `/console` without requiring it for routine startup.
+- Stops all child services owned by the launcher during graceful shutdown.
+
+### Tests
+- Added cockpit redirect, automatic service lifecycle, startup plan, readiness status, and partial-failure regression tests.
+
+## [13.2.0] - 2026-08-04
+
+### Features
+- Added named provider-account connections with one encrypted credential set per connection.
+- Added provider-adaptive schemas for OpenAI, Anthropic, Gemini, Azure OpenAI, OpenAI-compatible endpoints and Vertex AI.
+- Added a four-step provider wizard: choose provider, enter connection details, save securely, verify and download models.
+- Added provider-native model discovery and normalized model catalog storage.
+- Added alias-prefixed gateway model IDs and route model selection from the live discovered catalog.
+- Added persistent provider storage to cockpit-first startup.
+- Added model resynchronization, masked credential state, last-sync information and actionable provider errors.
+
+### Security
+- Provider secrets are encrypted with AES-256-GCM and a dedicated local master key with restrictive file permissions.
+- Provider APIs never return plaintext secrets and configuration export remains secret-free.
+
+### Tests
+- Added duplicate provider-type aliases, adaptive schemas, encrypted round-trip, OpenAI-compatible, Anthropic and Gemini discovery, authentication errors, HTTP wizard flow, home activation and global model catalog coverage.
