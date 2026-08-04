@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import sqlite3
+import tempfile
 from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
 from pathlib import Path
@@ -21,6 +22,7 @@ from .priority_features import (
     RunState,
     SchemaFormService,
 )
+from .priority_routes import PriorityRouteStore
 from .product_console import ProductConsoleStore
 from .product_extensions import ProductExtensions
 from .provider_connections import (
@@ -28,6 +30,7 @@ from .provider_connections import (
     ProviderConnectionStore,
     ProviderDiscovery,
 )
+from .routing_control_plane import RoutingControlPlane
 from .service_manager import ServiceManager
 from .supply_chain import SBOMService, UpgradeRiskService
 from .trace_outcomes import OutcomeAnalytics, OutcomeRecord, TraceSpan, TraceStore
@@ -64,6 +67,12 @@ document.getElementById('svc-launcher').onclick=()=>{panel.classList.add('open')
 
 def _render_managed_console() -> str:
     page = render_console()
+    bootstrap = """<script>
+// Apply saved theme before first paint.
+(()=>{const saved=localStorage.getItem('gateway-theme');const dark=window.matchMedia('(prefers-color-scheme: dark)').matches;document.documentElement.dataset.theme=saved||(dark?'dark':'light')})();
+</script>"""
+    page = page.replace("<head>", "<head>" + bootstrap)
+    page = page.replace("id='theme'", "id='theme' aria-pressed='false'")
     return page.replace("</head>", _STYLE + "</head>").replace(
         "</body>", _PANEL + "</body>"
     )
@@ -83,6 +92,8 @@ def create_console_app(
     manager: ServiceManager | None = None,
     *,
     trace_connection: sqlite3.Connection | None = None,
+    routing_connection: sqlite3.Connection | None = None,
+    priority_routing_connection: sqlite3.Connection | None = None,
     project_root: Path | None = None,
     product_connection: sqlite3.Connection | None = None,
     provider_connection: sqlite3.Connection | None = None,
@@ -92,8 +103,8 @@ def create_console_app(
     cockpit_first: bool = False,
 ) -> FastAPI:
     """Create the console with local one-click lifecycle controls."""
-    service_manager = manager or ServiceManager()
     repository_root = project_root or Path(__file__).resolve().parents[2]
+    service_manager = manager or ServiceManager(workdir=repository_root)
     extensions = ProductExtensions(
         product_connection or sqlite3.connect(":memory:", check_same_thread=False)
     )
@@ -107,9 +118,11 @@ def create_console_app(
         provider_connection or sqlite3.connect(":memory:", check_same_thread=False),
         CredentialVault(
             credential_key_path
-            or repository_root / ".gateway-console" / "provider-master.key"
+            or Path(tempfile.mkdtemp(prefix="gateway-console-")) / "provider-master.key"
         ),
     )
+    routing = RoutingControlPlane(routing_connection or sqlite3.connect(":memory:", check_same_thread=False))
+    priority_routing = PriorityRouteStore(priority_routing_connection or sqlite3.connect(":memory:", check_same_thread=False))
     provider_discovery = ProviderDiscovery(
         provider_store, transport=provider_discovery_transport
     )  # type: ignore[arg-type]
@@ -124,8 +137,11 @@ def create_console_app(
         service_manager.stop_all()
 
     app = FastAPI(
-        title="LLM Budget Gateway Console", version="8.0.0", lifespan=lifespan
+        title="LLM Budget Gateway Console", version="13.2.2", lifespan=lifespan
     )
+    app.state.service_manager = service_manager
+    app.state.routing_control_plane = routing
+    app.state.priority_routing = priority_routing
 
     cockpit_dist = Path(__file__).resolve().parents[2] / "ui" / "dist"
     if cockpit_dist.exists():
@@ -569,6 +585,140 @@ def create_console_app(
     @app.get("/v1/product/audit")
     async def product_audit() -> dict[str, object]:
         return {"audit": extensions.audit()}
+
+
+    # Logical routing administration API.
+    @app.post("/v1/admin/applications", status_code=201)
+    async def admin_create_application(body: dict[str, object]) -> dict[str, object]:
+        try:
+            return routing.create_application(str(body.get("name", "")), str(body.get("default_route", "")))
+        except ValueError as exc:
+            raise HTTPException(422, str(exc)) from exc
+
+    @app.get("/v1/admin/applications")
+    async def admin_list_applications() -> dict[str, object]:
+        return {"applications": routing.list_applications()}
+
+    @app.post("/v1/admin/routes", status_code=201)
+    async def admin_create_route(body: dict[str, object]) -> dict[str, object]:
+        try:
+            return routing.create_route(dict(body))
+        except ValueError as exc:
+            raise HTTPException(422, str(exc)) from exc
+
+    @app.get("/v1/admin/routes")
+    async def admin_list_routes() -> dict[str, object]:
+        return {"routes": routing.list_routes()}
+
+    @app.get("/v1/admin/routes/{route_id}")
+    async def admin_get_route(route_id: str) -> dict[str, object]:
+        try:
+            return routing.get_route(route_id)
+        except KeyError as exc:
+            raise HTTPException(404, "unknown route") from exc
+
+    @app.put("/v1/admin/routes/{route_id}")
+    async def admin_update_route(route_id: str, body: dict[str, object]) -> dict[str, object]:
+        try:
+            return routing.update_route(route_id, dict(body))
+        except KeyError as exc:
+            raise HTTPException(404, "unknown route") from exc
+        except ValueError as exc:
+            raise HTTPException(422, str(exc)) from exc
+
+    @app.post("/v1/admin/routes/{route_id}/publish")
+    async def admin_publish_route(route_id: str) -> dict[str, object]:
+        try:
+            return routing.publish_route(route_id)
+        except KeyError as exc:
+            raise HTTPException(404, "unknown route") from exc
+
+    @app.post("/v1/admin/routes/{route_id}/rollback")
+    async def admin_rollback_route(route_id: str) -> dict[str, object]:
+        try:
+            return routing.rollback_route(route_id)
+        except KeyError as exc:
+            raise HTTPException(404, "unknown route") from exc
+        except ValueError as exc:
+            raise HTTPException(422, str(exc)) from exc
+
+    @app.post("/v1/admin/routes/{route_id}/simulate")
+    async def admin_simulate_route(route_id: str, body: dict[str, object]) -> dict[str, object]:
+        from datetime import datetime
+        try:
+            routing.get_route(route_id)
+            return routing.simulate(
+                route_id,
+                now=datetime.fromisoformat(str(body.get("at", ""))),
+                quality_tier=str(body.get("quality_tier", "balanced")),
+                estimated_cost=float(body.get("estimated_cost", 0)),
+                spend_by_model=dict(body.get("spend_by_model", {})),
+                health=dict(body.get("health", {})),
+                region=str(body.get("region", "")),
+                capabilities=list(body.get("capabilities", [])),
+            )
+        except KeyError as exc:
+            raise HTTPException(404, "unknown route") from exc
+        except (TypeError, ValueError, RuntimeError) as exc:
+            raise HTTPException(422, str(exc)) from exc
+
+    @app.get("/v1/admin/routes/{route_id}/activity")
+    async def admin_route_activity(route_id: str) -> dict[str, object]:
+        try:
+            routing.get_route(route_id)
+            return {"activity": routing.route_activity(route_id)}
+        except KeyError as exc:
+            raise HTTPException(404, "unknown route") from exc
+
+    # Priority route administration API.
+    @app.post("/v1/admin/priority-routes", status_code=201)
+    async def admin_create_priority_route(body: dict[str, object]) -> dict[str, object]:
+        try:
+            return priority_routing.create_route(str(body.get("name", "")), list(body.get("targets", [])))
+        except (TypeError, ValueError) as exc:
+            raise HTTPException(422, str(exc)) from exc
+
+    @app.get("/v1/admin/priority-routes")
+    async def admin_list_priority_routes() -> dict[str, object]:
+        return {"routes": priority_routing.list_routes()}
+
+    @app.get("/v1/admin/priority-routes/{route_id}")
+    async def admin_get_priority_route(route_id: str) -> dict[str, object]:
+        try:
+            return priority_routing.get_route(route_id)
+        except KeyError as exc:
+            raise HTTPException(404, "unknown priority route") from exc
+
+    @app.put("/v1/admin/priority-routes/{route_id}")
+    async def admin_update_priority_route(route_id: str, body: dict[str, object]) -> dict[str, object]:
+        try:
+            return priority_routing.update_route(route_id, str(body.get("name", "")), list(body.get("targets", [])))
+        except KeyError as exc:
+            raise HTTPException(404, "unknown priority route") from exc
+        except (TypeError, ValueError) as exc:
+            raise HTTPException(422, str(exc)) from exc
+
+    @app.post("/v1/admin/priority-routes/{route_id}/publish")
+    async def admin_publish_priority_route(route_id: str) -> dict[str, object]:
+        try:
+            return priority_routing.publish(route_id)
+        except KeyError as exc:
+            raise HTTPException(404, "unknown priority route") from exc
+
+    @app.post("/v1/admin/priority-routes/{route_id}/simulate")
+    async def admin_simulate_priority_route(route_id: str, body: dict[str, object]) -> dict[str, object]:
+        from datetime import datetime
+        try:
+            route = priority_routing.get_route(route_id)
+            return priority_routing.resolve(
+                str(route["name"]),
+                at=datetime.fromisoformat(str(body.get("at", ""))),
+                capabilities=list(body.get("capabilities", [])),
+            )
+        except KeyError as exc:
+            raise HTTPException(404, "unknown priority route") from exc
+        except (TypeError, ValueError, RuntimeError) as exc:
+            raise HTTPException(422, str(exc)) from exc
 
     @app.get("/v1/console/services")
     async def services(

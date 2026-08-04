@@ -1001,7 +1001,7 @@ wheels = [
 
 [[package]]
 name = "llm-budget-gateway"
-version = "13.2.2"
+version = "13.2.3"
 source = { editable = "." }
 dependencies = [
     { name = "cryptography" },

@@ -483,3 +483,22 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Tests
 - Added duplicate provider-type aliases, adaptive schemas, encrypted round-trip, OpenAI-compatible, Anthropic and Gemini discovery, authentication errors, HTTP wizard flow, home activation and global model catalog coverage.
+
+## [13.2.3] - 2026-08-04
+
+### Fixed
+- Restored logical routing on the OpenAI-compatible data plane, including application-key authentication, published alias resolution, transient-status fallback, decision headers, and model-spend attribution.
+- Restored logical and priority route administration APIs and their injectable SQLite stores in the unified console factory.
+- Made console theme selection apply before first paint with system dark-mode fallback and explicit pressed state.
+- Made the default service manager resolve the repository root independently of the caller working directory.
+- Prevented default in-memory console construction from creating a provider master key inside the repository.
+- Replaced the hotfix-only root README with complete install, run, test, UI, and security instructions.
+- Removed runtime databases, encryption keys, WAL/SHM files, generated metadata, and hotfix backup files from the release package.
+- Added frontend source-contract tests and ensured the production cockpit bundle is included.
+
+### Validation
+- Python: 898 passed.
+- Frontend: 3 passed.
+- Ruff: clean.
+- Vite production build: successful.
+- Twenty-three autonomous targeted, regression, build, smoke, and hygiene iterations recorded in `fix-iterations.md`.

@@ -13,7 +13,9 @@ import inspect
 import json
 import logging
 import time
+from collections.abc import Callable
 from dataclasses import dataclass
+from datetime import UTC, datetime
 from uuid import uuid4
 
 import litellm
@@ -112,6 +114,14 @@ class GatewayProxy:
         self._cost_tracker = cost_tracker
         self._budget_enforcer = budget_enforcer
         self._fallback_manager = fallback_manager
+        self._routing_control_plane = None
+        self._routing_now: Callable[[], datetime] = lambda: datetime.now(UTC)
+
+    def attach_routing_control_plane(self, plane: object, *, now: Callable[[], datetime] | None = None) -> None:
+        """Attach logical-route resolution for application gateway keys."""
+        self._routing_control_plane = plane
+        if now is not None:
+            self._routing_now = now
 
     async def handle_chat_completion(
         self, body: dict, api_key: str, headers: dict
@@ -139,6 +149,13 @@ class GatewayProxy:
         """
         request_id = uuid4().hex
         model = body.get("model", "") if isinstance(body, dict) else ""
+        if self._routing_control_plane is not None:
+            try:
+                self._routing_control_plane.authenticate_application(api_key)
+            except PermissionError:
+                pass
+            else:
+                return await self._handle_logical_route(body, api_key, headers, request_id)
         try:
             scopes = self.resolve_scopes(api_key, headers)
         except ApiKeyError:
@@ -203,6 +220,78 @@ class GatewayProxy:
             latency_ms=response.latency_ms,
             status="success",
         )
+        return response
+
+    async def _handle_logical_route(
+        self, body: dict, api_key: str, headers: dict, request_id: str
+    ) -> ProviderResponse:
+        """Resolve and execute a published logical route for an application key."""
+        plane = self._routing_control_plane
+        alias = str(body.get("model", ""))
+        if not alias or not plane.has_published_route(alias):
+            return self._error_response(404, f"unknown route: {alias}", alias)
+        metadata = body.get("metadata", {})
+        metadata = metadata if isinstance(metadata, dict) else {}
+        capabilities = []
+        if body.get("tools"):
+            capabilities.append("tools")
+        if body.get("response_format"):
+            capabilities.append("structured_output")
+        for value in metadata.get("capabilities", []):
+            if isinstance(value, str) and value not in capabilities:
+                capabilities.append(value)
+        try:
+            decision = plane.resolve_alias(
+                alias,
+                now=self._routing_now(),
+                quality_tier=str(metadata.get("quality_tier", "balanced")),
+                estimated_cost=float(metadata.get("max_cost_usd", 0)),
+                region=str(metadata.get("region", "eu")),
+                capabilities=capabilities,
+            )
+        except (KeyError, RuntimeError, TypeError, ValueError) as exc:
+            return self._error_response(422, str(exc), alias)
+
+        candidates = list(decision.get("candidate_models", []))
+        selected = str(decision["selected_model"])
+        if selected in candidates:
+            candidates.remove(selected)
+        candidates.insert(0, selected)
+        response = None
+        fallback = decision.get("fallback_reason") or "none"
+        outbound = {k: v for k, v in body.items() if k != "metadata"}
+        for index, candidate in enumerate(candidates):
+            response = await self.forward(candidate, outbound)
+            if response.status_code not in set(decision.get("fallback_statuses", [])):
+                break
+            if index + 1 < len(candidates):
+                fallback = f"provider_status_{response.status_code}"
+        assert response is not None
+        response.headers = dict(response.headers)
+        response.headers.update(decision["response_headers"])
+        response.headers["X-Gateway-Serving-Model"] = response.model
+        response.headers["X-Gateway-Fallback"] = str(fallback)
+
+        scope = BudgetScope(kind="key", key=str(plane.authenticate_application(api_key)["id"]))
+        cost = 0.0
+        try:
+            record = self._cost_tracker.build_record(
+                request_id=request_id,
+                scope=scope,
+                model=response.model,
+                provider="litellm",
+                usage=response.usage,
+                latency_ms=response.latency_ms,
+                status="success" if response.status_code < 400 else "error",
+            )
+            cost = float(getattr(record, "total_cost", 0.0))
+            result = self._cost_tracker.record(record)
+            if inspect.isawaitable(result):
+                await result
+        except Exception:
+            logger.exception("logical route cost record failed request=%s", request_id)
+        if response.status_code < 400:
+            plane.record_model_spend(alias, response.model, cost, at=self._routing_now())
         return response
 
     async def _forward_with_fallback(
