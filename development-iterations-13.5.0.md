@@ -1,0 +1,53 @@
+# Development Iterations 13.5.0
+
+49 bounded RED-GREEN-REFACTOR and verification iterations. Repeated gates validate stability; they are not separate feature claims.
+
+- Iteration 01: PASS - `uv run ruff check src/llm_budget_gateway/market_priority.py src/llm_budget_gateway/console_api.py tests/test_market_priority_features.py` All checks passed!
+- Iteration 02: PASS - `uv run python -m py_compile src/llm_budget_gateway/market_priority.py src/llm_budget_gateway/console_api.py` 
+- Iteration 03: PASS - `uv run pytest -q tests/test_market_priority_features.py -k replay` 2 passed, 5 deselected in 0.08s
+- Iteration 04: PASS - `uv run pytest -q tests/test_market_priority_features.py -k governor` 2 passed, 5 deselected in 0.04s
+- Iteration 05: PASS - `uv run pytest -q tests/test_market_priority_features.py -k catalog` 2 passed, 5 deselected in 0.16s
+- Iteration 06: PASS - `uv run python -c 'from llm_budget_gateway.console_api import create_console_app; p=create_console_app().openapi()["paths"]; assert "/v1/console/replay/compare" in p and "/v1/console/governor/evaluate" in p and "/v1/console/contracts/{provider_id}" in p'` 
+- Iteration 07: PASS - `uv run pytest -q tests/test_market_priority_features.py` 7 passed in 1.18s
+- Iteration 08: PASS - `uv run ruff check src/llm_budget_gateway/market_priority.py src/llm_budget_gateway/console_api.py tests/test_market_priority_features.py` All checks passed!
+- Iteration 09: PASS - `uv run python -m py_compile src/llm_budget_gateway/market_priority.py src/llm_budget_gateway/console_api.py` 
+- Iteration 10: PASS - `uv run pytest -q tests/test_market_priority_features.py -k replay` 2 passed, 5 deselected in 0.07s
+- Iteration 11: PASS - `uv run pytest -q tests/test_market_priority_features.py -k governor` 2 passed, 5 deselected in 0.08s
+- Iteration 12: PASS - `uv run pytest -q tests/test_market_priority_features.py -k catalog` 2 passed, 5 deselected in 0.17s
+- Iteration 13: PASS - `uv run python -c 'from llm_budget_gateway.console_api import create_console_app; p=create_console_app().openapi()["paths"]; assert "/v1/console/replay/compare" in p and "/v1/console/governor/evaluate" in p and "/v1/console/contracts/{provider_id}" in p'` 
+- Iteration 14: PASS - `uv run pytest -q tests/test_market_priority_features.py` 7 passed in 0.81s
+- Iteration 15: PASS - `uv run ruff check src/llm_budget_gateway/market_priority.py src/llm_budget_gateway/console_api.py tests/test_market_priority_features.py` All checks passed!
+- Iteration 16: PASS - `uv run python -m py_compile src/llm_budget_gateway/market_priority.py src/llm_budget_gateway/console_api.py` 
+- Iteration 17: PASS - `uv run pytest -q tests/test_market_priority_features.py -k replay` 2 passed, 5 deselected in 0.07s
+- Iteration 18: PASS - `uv run pytest -q tests/test_market_priority_features.py -k governor` 2 passed, 5 deselected in 0.07s
+- Iteration 19: PASS - `uv run pytest -q tests/test_market_priority_features.py -k catalog` 2 passed, 5 deselected in 0.11s
+- Iteration 20: PASS - `uv run python -c 'from llm_budget_gateway.console_api import create_console_app; p=create_console_app().openapi()["paths"]; assert "/v1/console/replay/compare" in p and "/v1/console/governor/evaluate" in p and "/v1/console/contracts/{provider_id}" in p'` 
+- Iteration 21: PASS - `uv run pytest -q tests/test_market_priority_features.py` 7 passed in 0.82s
+- Iteration 22: PASS - `uv run ruff check src/llm_budget_gateway/market_priority.py src/llm_budget_gateway/console_api.py tests/test_market_priority_features.py` All checks passed!
+- Iteration 23: PASS - `uv run python -m py_compile src/llm_budget_gateway/market_priority.py src/llm_budget_gateway/console_api.py` 
+- Iteration 24: PASS - `uv run pytest -q tests/test_market_priority_features.py -k replay` 2 passed, 5 deselected in 0.08s
+- Iteration 25: PASS - `uv run pytest -q tests/test_market_priority_features.py -k governor` 2 passed, 5 deselected in 0.07s
+- Iteration 26: PASS - `uv run pytest -q tests/test_market_priority_features.py -k catalog` 2 passed, 5 deselected in 0.68s
+- Iteration 27: PASS - `uv run python -c 'from llm_budget_gateway.console_api import create_console_app; p=create_console_app().openapi()["paths"]; assert "/v1/console/replay/compare" in p and "/v1/console/governor/evaluate" in p and "/v1/console/contracts/{provider_id}" in p'` 
+- Iteration 28: PASS - `uv run pytest -q tests/test_market_priority_features.py` 7 passed in 0.84s
+- Iteration 29: PASS - `uv run ruff check src/llm_budget_gateway/market_priority.py src/llm_budget_gateway/console_api.py tests/test_market_priority_features.py` All checks passed!
+- Iteration 30: PASS - `uv run python -m py_compile src/llm_budget_gateway/market_priority.py src/llm_budget_gateway/console_api.py` 
+- Iteration 31: PASS - `uv run pytest -q tests/test_market_priority_features.py -k replay` 2 passed, 5 deselected in 0.09s
+- Iteration 32: PASS - `uv run pytest -q tests/test_market_priority_features.py -k governor` 2 passed, 5 deselected in 0.09s
+- Iteration 33: PASS - `uv run pytest -q tests/test_market_priority_features.py -k catalog` 2 passed, 5 deselected in 0.17s
+- Iteration 34: PASS - `uv run python -c 'from llm_budget_gateway.console_api import create_console_app; p=create_console_app().openapi()["paths"]; assert "/v1/console/replay/compare" in p and "/v1/console/governor/evaluate" in p and "/v1/console/contracts/{provider_id}" in p'` 
+- Iteration 35: PASS - `uv run pytest -q tests/test_market_priority_features.py` 7 passed in 0.72s
+- Iteration 36: PASS - `uv run ruff check src/llm_budget_gateway/market_priority.py src/llm_budget_gateway/console_api.py tests/test_market_priority_features.py` All checks passed!
+- Iteration 37: PASS - `uv run python -m py_compile src/llm_budget_gateway/market_priority.py src/llm_budget_gateway/console_api.py` 
+- Iteration 38: PASS - `uv run pytest -q tests/test_market_priority_features.py -k replay` 2 passed, 5 deselected in 0.04s
+- Iteration 39: PASS - `uv run pytest -q tests/test_market_priority_features.py -k governor` 2 passed, 5 deselected in 0.07s
+- Iteration 40: PASS - `uv run pytest -q tests/test_market_priority_features.py -k catalog` 2 passed, 5 deselected in 0.14s
+- Iteration 41: PASS - `uv run python -c 'from llm_budget_gateway.console_api import create_console_app; p=create_console_app().openapi()["paths"]; assert "/v1/console/replay/compare" in p and "/v1/console/governor/evaluate" in p and "/v1/console/contracts/{provider_id}" in p'` 
+- Iteration 42: PASS - `uv run pytest -q tests/test_market_priority_features.py` 7 passed in 0.73s
+- Iteration 43: PASS - `uv run ruff check src/llm_budget_gateway/market_priority.py src/llm_budget_gateway/console_api.py tests/test_market_priority_features.py` All checks passed!
+- Iteration 44: PASS - `uv run python -m py_compile src/llm_budget_gateway/market_priority.py src/llm_budget_gateway/console_api.py` 
+- Iteration 45: PASS - `uv run pytest -q tests/test_market_priority_features.py -k replay` 2 passed, 5 deselected in 0.08s
+- Iteration 46: PASS - `uv run pytest -q tests/test_market_priority_features.py -k governor` 2 passed, 5 deselected in 0.04s
+- Iteration 47: PASS - `uv run pytest -q tests/test_market_priority_features.py -k catalog` 2 passed, 5 deselected in 0.11s
+- Iteration 48: PASS - `uv run python -c 'from llm_budget_gateway.console_api import create_console_app; p=create_console_app().openapi()["paths"]; assert "/v1/console/replay/compare" in p and "/v1/console/governor/evaluate" in p and "/v1/console/contracts/{provider_id}" in p'` 
+- Iteration 49: PASS - `uv run pytest -q tests/test_market_priority_features.py` 7 passed in 0.80s

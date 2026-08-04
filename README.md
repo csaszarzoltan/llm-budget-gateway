@@ -107,6 +107,17 @@ The validated market research prioritized three workflows because users repeated
 The complete Safety UI flow is responsive, keyboard accessible, includes loading/result/error states, and is built into `ui/dist` by `npm run build`. See [Safety Operations API](docs/api/safety-operations-api.md).
 
 
+
+## Market-priority workflows (13.5.0)
+
+Research identified three high-value jobs that now have dedicated product workflows:
+
+1. **Production Replay and Change Impact Lab** compares privacy-safe production evidence with a candidate model or configuration and reports semantic similarity, cost, token, latency, tool and safety-policy deltas. Use `POST /v1/console/replay/compare` or open **Safety** in the cockpit.
+2. **Agent Runtime Governor 2.0** detects repeated actions, intent drift and unapproved irreversible work before the next agent step. Use `POST /v1/console/governor/evaluate`.
+3. **Verified Compatibility and Pricing Catalog** stores measured provider/model capability contracts and exposes a freshness-aware matrix through `POST /v1/console/contracts` and `GET /v1/console/contracts/{provider_id}`.
+
+These workflows address the market-research findings that teams will pay for exact production replay, need enforcement before runaway agent spend occurs, and repeatedly lose time to provider capability and pricing uncertainty. All safety-evidence endpoints are local-only by default.
+
 ## Clean release packaging
 
 Build the cockpit first, then create a publication-safe archive:

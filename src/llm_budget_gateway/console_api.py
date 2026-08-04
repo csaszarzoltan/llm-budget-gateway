@@ -15,6 +15,15 @@ from fastapi.staticfiles import StaticFiles
 from .completion_features import MigrationPlanner, PolicyRouteSimulator
 from .console_ui import catalog, render_console
 from .console_workflows import get_workflow, search_workflows
+from .market_priority import (
+    ChangeImpactLab,
+    CompatibilityContract,
+    CompatibilityContractCatalog,
+    ReplayCandidate,
+    ReplayTrace,
+    RuntimeGovernor,
+    RuntimeStep,
+)
 from .p0_workflows import (
     CompatibilityProbe,
     CompatibilityRunStore,
@@ -111,6 +120,7 @@ def create_console_app(
     priority_routing_connection: sqlite3.Connection | None = None,
     incident_connection: sqlite3.Connection | None = None,
     compatibility_connection: sqlite3.Connection | None = None,
+    market_connection: sqlite3.Connection | None = None,
     project_root: Path | None = None,
     product_connection: sqlite3.Connection | None = None,
     provider_connection: sqlite3.Connection | None = None,
@@ -147,6 +157,9 @@ def create_console_app(
     )
     compatibility_store = CompatibilityRunStore(
         compatibility_connection or sqlite3.connect(":memory:", check_same_thread=False)
+    )
+    market_catalog = CompatibilityContractCatalog(
+        market_connection or sqlite3.connect(":memory:", check_same_thread=False)
     )
     incident_store = IncidentTimelineStore(
         incident_connection or sqlite3.connect(":memory:", check_same_thread=False)
@@ -270,6 +283,51 @@ def create_console_app(
             }
         except (TypeError, ValueError) as exc:
             raise HTTPException(422, str(exc)) from exc
+
+    @app.post("/v1/console/replay/compare")
+    async def replay_compare(body: dict[str, object], request: Request) -> dict[str, object]:
+        """Compare privacy-safe production evidence with a candidate replay."""
+        _require_local_client(request)
+        try:
+            from dataclasses import asdict
+            result = ChangeImpactLab().compare(
+                ReplayTrace(**dict(body.get("baseline", {}))),
+                ReplayCandidate(**dict(body.get("candidate", {}))),
+            )
+            return asdict(result)
+        except (TypeError, ValueError) as exc:
+            raise HTTPException(422, str(exc)) from exc
+
+    @app.post("/v1/console/governor/evaluate")
+    async def governor_evaluate(body: dict[str, object], request: Request) -> dict[str, object]:
+        """Detect loops, intent drift, and unapproved irreversible actions."""
+        _require_local_client(request)
+        try:
+            from dataclasses import asdict
+            decision = RuntimeGovernor(int(body.get("loop_threshold", 3))).evaluate(
+                intent=str(body.get("intent", "")),
+                steps=[RuntimeStep(**dict(item)) for item in list(body.get("steps", []))],
+                approved_actions=set(body.get("approved_actions", [])),
+            )
+            return asdict(decision)
+        except (TypeError, ValueError) as exc:
+            raise HTTPException(422, str(exc)) from exc
+
+    @app.post("/v1/console/contracts", status_code=201)
+    async def record_contract(body: dict[str, object], request: Request) -> dict[str, object]:
+        """Persist one measured provider/model capability contract."""
+        _require_local_client(request)
+        try:
+            from dataclasses import asdict
+            return asdict(market_catalog.record(CompatibilityContract(**body)))
+        except (TypeError, ValueError) as exc:
+            raise HTTPException(422, str(exc)) from exc
+
+    @app.get("/v1/console/contracts/{provider_id}")
+    async def contract_matrix(provider_id: str, request: Request) -> dict[str, object]:
+        """Return a provider's fresh compatibility and pricing evidence."""
+        _require_local_client(request)
+        return {"provider_id": provider_id, "contracts": market_catalog.matrix(provider_id)}
 
     @app.post("/v1/console/forms/generate")
     async def generate_form(body: dict[str, object]) -> dict[str, object]:

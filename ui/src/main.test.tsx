@@ -40,3 +40,5 @@ it('safety workflows use selected live product evidence instead of hardcoded dem
   expect(source).not.toContain('/v1/console/incidents/demo-incident')
   expect(source).toContain('/v1/console/runaway/evaluate')
 })
+
+it('ships the market-priority replay flow',()=>{expect(source).toContain('Production Replay Lab');expect(source).toContain('/v1/console/replay/compare');expect(source).toContain('Compare latest request');expect(source).toContain('role="status"')})

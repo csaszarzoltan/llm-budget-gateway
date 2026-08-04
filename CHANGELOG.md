@@ -1,3 +1,18 @@
+## [13.5.0] - 2026-08-04
+
+### Features
+- Added a Production Replay and Change Impact Lab for semantic, cost, token, latency, tool and policy comparisons.
+- Added Agent Runtime Governor 2.0 loop, intent-drift and irreversible-action approval gates.
+- Added a SQLite-backed verified provider/model compatibility and pricing contract catalog with freshness-aware route eligibility.
+- Added local-only console APIs and a responsive React Safety flow for replay results.
+
+### Tests
+- Added domain boundary, error, safety and real SQLite I/O coverage plus an ASGI integration flow.
+- Rebuilt and tested the production React cockpit.
+
+### Docs
+- Documented the three research-ranked features, their rationale, endpoints and machine-readable feature manifest.
+
 # Changelog
 
 All notable changes to this project will be documented in this file.
