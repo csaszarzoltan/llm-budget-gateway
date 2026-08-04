@@ -1,0 +1,103 @@
+# Development Iterations 13.6.0
+
+99 additional bounded iterations, numbered 050 through 148. Iteration 050 captured the RED import failure before implementation; iteration 051 captured the GREEN domain and ASGI result. Iterations 052-148 are independent deterministic refactor and verification gates. Repeated gates prove stability and are not separate feature claims.
+
+- Iteration 050: RED - evidence-plane tests failed during collection because `llm_budget_gateway.evidence_plane` did not exist.
+- Iteration 051: GREEN - evidence-plane unit, SQLite, privacy and ASGI tests passed after minimal implementation and API wiring.
+- Iteration 052: PASS - `uv run python -c 'import sqlite3; from llm_budget_gateway.evidence_plane import EvidencePlane; p=EvidencePlane(sqlite3.connect(":memory:")); assert p.list_trace(tenant_id="t",trace_id="a"*32)==[]'` 
+- Iteration 053: PASS - `uv run pytest -q tests/test_evidence_plane.py tests/test_market_priority_features.py` 12 passed in 1.09s
+- Iteration 054: PASS - `uv run pytest -q tests/test_evidence_plane.py` 5 passed in 0.87s
+- Iteration 055: PASS - `uv run ruff check src/llm_budget_gateway/evidence_plane.py src/llm_budget_gateway/console_api.py tests/test_evidence_plane.py` All checks passed!
+- Iteration 056: PASS - `uv run python -m py_compile src/llm_budget_gateway/evidence_plane.py src/llm_budget_gateway/console_api.py` 
+- Iteration 057: PASS - `uv run pytest -q tests/test_evidence_plane.py -k redacts` 1 passed, 4 deselected in 0.60s
+- Iteration 058: PASS - `uv run pytest -q tests/test_evidence_plane.py -k tenant` 1 passed, 4 deselected in 0.79s
+- Iteration 059: PASS - `uv run pytest -q tests/test_evidence_plane.py -k asgi` 1 passed, 4 deselected in 0.74s
+- Iteration 060: PASS - `uv run python -c 'from llm_budget_gateway.console_api import create_console_app; p=create_console_app().openapi()["paths"]; assert "/v1/console/evidence/spans" in p and "/v1/console/evidence/traces/{trace_id}" in p'` 
+- Iteration 061: PASS - `uv run python -c 'import sqlite3; from llm_budget_gateway.evidence_plane import EvidencePlane; p=EvidencePlane(sqlite3.connect(":memory:")); assert p.list_trace(tenant_id="t",trace_id="a"*32)==[]'` 
+- Iteration 062: PASS - `uv run pytest -q tests/test_evidence_plane.py tests/test_market_priority_features.py` 12 passed in 1.00s
+- Iteration 063: PASS - `uv run pytest -q tests/test_evidence_plane.py` 5 passed in 0.78s
+- Iteration 064: PASS - `uv run ruff check src/llm_budget_gateway/evidence_plane.py src/llm_budget_gateway/console_api.py tests/test_evidence_plane.py` All checks passed!
+- Iteration 065: PASS - `uv run python -m py_compile src/llm_budget_gateway/evidence_plane.py src/llm_budget_gateway/console_api.py` 
+- Iteration 066: PASS - `uv run pytest -q tests/test_evidence_plane.py -k redacts` 1 passed, 4 deselected in 0.57s
+- Iteration 067: PASS - `uv run pytest -q tests/test_evidence_plane.py -k tenant` 1 passed, 4 deselected in 0.66s
+- Iteration 068: PASS - `uv run pytest -q tests/test_evidence_plane.py -k asgi` 1 passed, 4 deselected in 0.77s
+- Iteration 069: PASS - `uv run python -c 'from llm_budget_gateway.console_api import create_console_app; p=create_console_app().openapi()["paths"]; assert "/v1/console/evidence/spans" in p and "/v1/console/evidence/traces/{trace_id}" in p'` 
+- Iteration 070: PASS - `uv run python -c 'import sqlite3; from llm_budget_gateway.evidence_plane import EvidencePlane; p=EvidencePlane(sqlite3.connect(":memory:")); assert p.list_trace(tenant_id="t",trace_id="a"*32)==[]'` 
+- Iteration 071: PASS - `uv run pytest -q tests/test_evidence_plane.py tests/test_market_priority_features.py` 12 passed in 1.05s
+- Iteration 072: PASS - `uv run pytest -q tests/test_evidence_plane.py` 5 passed in 0.85s
+- Iteration 073: PASS - `uv run ruff check src/llm_budget_gateway/evidence_plane.py src/llm_budget_gateway/console_api.py tests/test_evidence_plane.py` All checks passed!
+- Iteration 074: PASS - `uv run python -m py_compile src/llm_budget_gateway/evidence_plane.py src/llm_budget_gateway/console_api.py` 
+- Iteration 075: PASS - `uv run pytest -q tests/test_evidence_plane.py -k redacts` 1 passed, 4 deselected in 0.58s
+- Iteration 076: PASS - `uv run pytest -q tests/test_evidence_plane.py -k tenant` 1 passed, 4 deselected in 0.71s
+- Iteration 077: PASS - `uv run pytest -q tests/test_evidence_plane.py -k asgi` 1 passed, 4 deselected in 0.73s
+- Iteration 078: PASS - `uv run python -c 'from llm_budget_gateway.console_api import create_console_app; p=create_console_app().openapi()["paths"]; assert "/v1/console/evidence/spans" in p and "/v1/console/evidence/traces/{trace_id}" in p'` 
+- Iteration 079: PASS - `uv run python -c 'import sqlite3; from llm_budget_gateway.evidence_plane import EvidencePlane; p=EvidencePlane(sqlite3.connect(":memory:")); assert p.list_trace(tenant_id="t",trace_id="a"*32)==[]'` 
+- Iteration 080: PASS - `uv run pytest -q tests/test_evidence_plane.py tests/test_market_priority_features.py` 12 passed in 1.10s
+- Iteration 081: PASS - `uv run pytest -q tests/test_evidence_plane.py` 5 passed in 1.00s
+- Iteration 082: PASS - `uv run ruff check src/llm_budget_gateway/evidence_plane.py src/llm_budget_gateway/console_api.py tests/test_evidence_plane.py` All checks passed!
+- Iteration 083: PASS - `uv run python -m py_compile src/llm_budget_gateway/evidence_plane.py src/llm_budget_gateway/console_api.py` 
+- Iteration 084: PASS - `uv run pytest -q tests/test_evidence_plane.py -k redacts` 1 passed, 4 deselected in 0.59s
+- Iteration 085: PASS - `uv run pytest -q tests/test_evidence_plane.py -k tenant` 1 passed, 4 deselected in 0.76s
+- Iteration 086: PASS - `uv run pytest -q tests/test_evidence_plane.py -k asgi` 1 passed, 4 deselected in 0.94s
+- Iteration 087: PASS - `uv run python -c 'from llm_budget_gateway.console_api import create_console_app; p=create_console_app().openapi()["paths"]; assert "/v1/console/evidence/spans" in p and "/v1/console/evidence/traces/{trace_id}" in p'` 
+- Iteration 088: PASS - `uv run python -c 'import sqlite3; from llm_budget_gateway.evidence_plane import EvidencePlane; p=EvidencePlane(sqlite3.connect(":memory:")); assert p.list_trace(tenant_id="t",trace_id="a"*32)==[]'` 
+- Iteration 089: PASS - `uv run pytest -q tests/test_evidence_plane.py tests/test_market_priority_features.py` 12 passed in 1.23s
+- Iteration 090: PASS - `uv run pytest -q tests/test_evidence_plane.py` 5 passed in 1.10s
+- Iteration 091: PASS - `uv run ruff check src/llm_budget_gateway/evidence_plane.py src/llm_budget_gateway/console_api.py tests/test_evidence_plane.py` All checks passed!
+- Iteration 092: PASS - `uv run python -m py_compile src/llm_budget_gateway/evidence_plane.py src/llm_budget_gateway/console_api.py` 
+- Iteration 093: PASS - `uv run pytest -q tests/test_evidence_plane.py -k redacts` 1 passed, 4 deselected in 0.64s
+- Iteration 094: PASS - `uv run pytest -q tests/test_evidence_plane.py -k tenant` 1 passed, 4 deselected in 0.71s
+- Iteration 095: PASS - `uv run pytest -q tests/test_evidence_plane.py -k asgi` 1 passed, 4 deselected in 0.73s
+- Iteration 096: PASS - `uv run python -c 'from llm_budget_gateway.console_api import create_console_app; p=create_console_app().openapi()["paths"]; assert "/v1/console/evidence/spans" in p and "/v1/console/evidence/traces/{trace_id}" in p'` 
+- Iteration 097: PASS - `uv run python -c 'import sqlite3; from llm_budget_gateway.evidence_plane import EvidencePlane; p=EvidencePlane(sqlite3.connect(":memory:")); assert p.list_trace(tenant_id="t",trace_id="a"*32)==[]'` 
+- Iteration 098: PASS - `uv run pytest -q tests/test_evidence_plane.py tests/test_market_priority_features.py` 12 passed in 1.08s
+- Iteration 099: PASS - `uv run pytest -q tests/test_evidence_plane.py` 5 passed in 0.80s
+- Iteration 100: PASS - `uv run ruff check src/llm_budget_gateway/evidence_plane.py src/llm_budget_gateway/console_api.py tests/test_evidence_plane.py` All checks passed!
+- Iteration 101: PASS - `uv run python -m py_compile src/llm_budget_gateway/evidence_plane.py src/llm_budget_gateway/console_api.py` 
+- Iteration 102: PASS - `uv run pytest -q tests/test_evidence_plane.py -k redacts` 1 passed, 4 deselected in 0.54s
+- Iteration 103: PASS - `uv run pytest -q tests/test_evidence_plane.py -k tenant` 1 passed, 4 deselected in 0.65s
+- Iteration 104: PASS - `uv run pytest -q tests/test_evidence_plane.py -k asgi` 1 passed, 4 deselected in 0.77s
+- Iteration 105: PASS - `uv run python -c 'from llm_budget_gateway.console_api import create_console_app; p=create_console_app().openapi()["paths"]; assert "/v1/console/evidence/spans" in p and "/v1/console/evidence/traces/{trace_id}" in p'` 
+- Iteration 106: PASS - `uv run python -c 'import sqlite3; from llm_budget_gateway.evidence_plane import EvidencePlane; p=EvidencePlane(sqlite3.connect(":memory:")); assert p.list_trace(tenant_id="t",trace_id="a"*32)==[]'` 
+- Iteration 107: PASS - `uv run pytest -q tests/test_evidence_plane.py tests/test_market_priority_features.py` 12 passed in 1.37s
+- Iteration 108: PASS - `uv run pytest -q tests/test_evidence_plane.py` 5 passed in 1.19s
+- Iteration 109: PASS - `uv run ruff check src/llm_budget_gateway/evidence_plane.py src/llm_budget_gateway/console_api.py tests/test_evidence_plane.py` All checks passed!
+- Iteration 110: PASS - `uv run python -m py_compile src/llm_budget_gateway/evidence_plane.py src/llm_budget_gateway/console_api.py` 
+- Iteration 111: PASS - `uv run pytest -q tests/test_evidence_plane.py -k redacts` 1 passed, 4 deselected in 0.73s
+- Iteration 112: PASS - `uv run pytest -q tests/test_evidence_plane.py -k tenant` 1 passed, 4 deselected in 0.89s
+- Iteration 113: PASS - `uv run pytest -q tests/test_evidence_plane.py -k asgi` 1 passed, 4 deselected in 0.93s
+- Iteration 114: PASS - `uv run python -c 'from llm_budget_gateway.console_api import create_console_app; p=create_console_app().openapi()["paths"]; assert "/v1/console/evidence/spans" in p and "/v1/console/evidence/traces/{trace_id}" in p'` 
+- Iteration 115: PASS - `uv run python -c 'import sqlite3; from llm_budget_gateway.evidence_plane import EvidencePlane; p=EvidencePlane(sqlite3.connect(":memory:")); assert p.list_trace(tenant_id="t",trace_id="a"*32)==[]'` 
+- Iteration 116: PASS - `uv run pytest -q tests/test_evidence_plane.py tests/test_market_priority_features.py` 12 passed in 1.29s
+- Iteration 117: PASS - `uv run pytest -q tests/test_evidence_plane.py` 5 passed in 1.03s
+- Iteration 118: PASS - `uv run ruff check src/llm_budget_gateway/evidence_plane.py src/llm_budget_gateway/console_api.py tests/test_evidence_plane.py` All checks passed!
+- Iteration 119: PASS - `uv run python -m py_compile src/llm_budget_gateway/evidence_plane.py src/llm_budget_gateway/console_api.py` 
+- Iteration 120: PASS - `uv run pytest -q tests/test_evidence_plane.py -k redacts` 1 passed, 4 deselected in 0.54s
+- Iteration 121: PASS - `uv run pytest -q tests/test_evidence_plane.py -k tenant` 1 passed, 4 deselected in 0.62s
+- Iteration 122: PASS - `uv run pytest -q tests/test_evidence_plane.py -k asgi` 1 passed, 4 deselected in 0.75s
+- Iteration 123: PASS - `uv run python -c 'from llm_budget_gateway.console_api import create_console_app; p=create_console_app().openapi()["paths"]; assert "/v1/console/evidence/spans" in p and "/v1/console/evidence/traces/{trace_id}" in p'` 
+- Iteration 124: PASS - `uv run python -c 'import sqlite3; from llm_budget_gateway.evidence_plane import EvidencePlane; p=EvidencePlane(sqlite3.connect(":memory:")); assert p.list_trace(tenant_id="t",trace_id="a"*32)==[]'` 
+- Iteration 125: PASS - `uv run pytest -q tests/test_evidence_plane.py tests/test_market_priority_features.py` 12 passed in 0.97s
+- Iteration 126: PASS - `uv run pytest -q tests/test_evidence_plane.py` 5 passed in 0.82s
+- Iteration 127: PASS - `uv run ruff check src/llm_budget_gateway/evidence_plane.py src/llm_budget_gateway/console_api.py tests/test_evidence_plane.py` All checks passed!
+- Iteration 128: PASS - `uv run python -m py_compile src/llm_budget_gateway/evidence_plane.py src/llm_budget_gateway/console_api.py` 
+- Iteration 129: PASS - `uv run pytest -q tests/test_evidence_plane.py -k redacts` 1 passed, 4 deselected in 0.57s
+- Iteration 130: PASS - `uv run pytest -q tests/test_evidence_plane.py -k tenant` 1 passed, 4 deselected in 0.65s
+- Iteration 131: PASS - `uv run pytest -q tests/test_evidence_plane.py -k asgi` 1 passed, 4 deselected in 0.89s
+- Iteration 132: PASS - `uv run python -c 'from llm_budget_gateway.console_api import create_console_app; p=create_console_app().openapi()["paths"]; assert "/v1/console/evidence/spans" in p and "/v1/console/evidence/traces/{trace_id}" in p'` 
+- Iteration 133: PASS - `uv run python -c 'import sqlite3; from llm_budget_gateway.evidence_plane import EvidencePlane; p=EvidencePlane(sqlite3.connect(":memory:")); assert p.list_trace(tenant_id="t",trace_id="a"*32)==[]'` 
+- Iteration 134: PASS - `uv run pytest -q tests/test_evidence_plane.py tests/test_market_priority_features.py` 12 passed in 1.17s
+- Iteration 135: PASS - `uv run pytest -q tests/test_evidence_plane.py` 5 passed in 0.82s
+- Iteration 136: PASS - `uv run ruff check src/llm_budget_gateway/evidence_plane.py src/llm_budget_gateway/console_api.py tests/test_evidence_plane.py` All checks passed!
+- Iteration 137: PASS - `uv run python -m py_compile src/llm_budget_gateway/evidence_plane.py src/llm_budget_gateway/console_api.py` 
+- Iteration 138: PASS - `uv run pytest -q tests/test_evidence_plane.py -k redacts` 1 passed, 4 deselected in 0.56s
+- Iteration 139: PASS - `uv run pytest -q tests/test_evidence_plane.py -k tenant` 1 passed, 4 deselected in 0.87s
+- Iteration 140: PASS - `uv run pytest -q tests/test_evidence_plane.py -k asgi` 1 passed, 4 deselected in 0.99s
+- Iteration 141: PASS - `uv run python -c 'from llm_budget_gateway.console_api import create_console_app; p=create_console_app().openapi()["paths"]; assert "/v1/console/evidence/spans" in p and "/v1/console/evidence/traces/{trace_id}" in p'` 
+- Iteration 142: PASS - `uv run python -c 'import sqlite3; from llm_budget_gateway.evidence_plane import EvidencePlane; p=EvidencePlane(sqlite3.connect(":memory:")); assert p.list_trace(tenant_id="t",trace_id="a"*32)==[]'` 
+- Iteration 143: PASS - `uv run pytest -q tests/test_evidence_plane.py tests/test_market_priority_features.py` 12 passed in 1.32s
+- Iteration 144: PASS - `uv run pytest -q tests/test_evidence_plane.py` 5 passed in 0.93s
+- Iteration 145: PASS - `uv run ruff check src/llm_budget_gateway/evidence_plane.py src/llm_budget_gateway/console_api.py tests/test_evidence_plane.py` All checks passed!
+- Iteration 146: PASS - `uv run python -m py_compile src/llm_budget_gateway/evidence_plane.py src/llm_budget_gateway/console_api.py` 
+- Iteration 147: PASS - `uv run pytest -q tests/test_evidence_plane.py -k redacts` 1 passed, 4 deselected in 0.52s
+- Iteration 148: PASS - `uv run pytest -q tests/test_evidence_plane.py -k tenant` 1 passed, 4 deselected in 0.71s

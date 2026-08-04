@@ -42,3 +42,5 @@ it('safety workflows use selected live product evidence instead of hardcoded dem
 })
 
 it('ships the market-priority replay flow',()=>{expect(source).toContain('Production Replay Lab');expect(source).toContain('/v1/console/replay/compare');expect(source).toContain('Compare latest request');expect(source).toContain('role="status"')})
+
+it('exposes the portable OpenTelemetry evidence plane',()=>{expect(source).toContain('OpenTelemetry evidence');expect(source).toContain('/v1/console/evidence/traces')})

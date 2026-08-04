@@ -1,3 +1,18 @@
+## [13.6.0] - 2026-08-04
+
+### Features
+- Added a tenant-isolated OpenTelemetry/OpenInference evidence plane for gateway, model, agent, tool, policy, and budget spans.
+- Added deterministic OTLP-shaped and JSON Lines exports with local-only console endpoints.
+- Added recursive sensitive-field redaction and idempotent SQLite persistence.
+- Added the evidence plane to the React cockpit's Advanced workspace.
+
+### Tests
+- Added RED-GREEN-REFACTOR unit, boundary, secret-redaction, tenant-isolation, real SQLite I/O, deterministic export, and ASGI integration coverage.
+- Completed 99 additional bounded development and verification iterations.
+
+### Docs
+- Updated README, API reference, feature manifest, version metadata, and iteration evidence.
+
 ## [13.5.0] - 2026-08-04
 
 ### Features

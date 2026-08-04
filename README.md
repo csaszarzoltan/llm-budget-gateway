@@ -118,6 +118,17 @@ Research identified three high-value jobs that now have dedicated product workfl
 
 These workflows address the market-research findings that teams will pay for exact production replay, need enforcement before runaway agent spend occurs, and repeatedly lose time to provider capability and pricing uncertainty. All safety-evidence endpoints are local-only by default.
 
+
+## OpenTelemetry evidence plane (13.6.0)
+
+The local console now records gateway, model, agent, tool, policy, and budget evidence as tenant-isolated spans and exports OTLP-shaped documents with OpenInference semantic attributes. Sensitive prompt, output, authorization, password, token, and secret fields are redacted before SQLite persistence.
+
+- `POST /v1/console/evidence/spans` records one validated span.
+- `GET /v1/console/evidence/traces/{trace_id}?tenant_id=...` exports a portable trace.
+- Canonical JSON Lines export is available through the `EvidencePlane` domain service for offline ingestion.
+
+This addresses the market-research priority for telemetry portability and avoids locking operational evidence into a single observability vendor.
+
 ## Clean release packaging
 
 Build the cockpit first, then create a publication-safe archive:

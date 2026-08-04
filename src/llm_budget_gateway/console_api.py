@@ -15,6 +15,7 @@ from fastapi.staticfiles import StaticFiles
 from .completion_features import MigrationPlanner, PolicyRouteSimulator
 from .console_ui import catalog, render_console
 from .console_workflows import get_workflow, search_workflows
+from .evidence_plane import EvidenceEvent, EvidencePlane
 from .market_priority import (
     ChangeImpactLab,
     CompatibilityContract,
@@ -121,6 +122,7 @@ def create_console_app(
     incident_connection: sqlite3.Connection | None = None,
     compatibility_connection: sqlite3.Connection | None = None,
     market_connection: sqlite3.Connection | None = None,
+    evidence_connection: sqlite3.Connection | None = None,
     project_root: Path | None = None,
     product_connection: sqlite3.Connection | None = None,
     provider_connection: sqlite3.Connection | None = None,
@@ -157,6 +159,9 @@ def create_console_app(
     )
     compatibility_store = CompatibilityRunStore(
         compatibility_connection or sqlite3.connect(":memory:", check_same_thread=False)
+    )
+    evidence_plane = EvidencePlane(
+        evidence_connection or sqlite3.connect(":memory:", check_same_thread=False)
     )
     market_catalog = CompatibilityContractCatalog(
         market_connection or sqlite3.connect(":memory:", check_same_thread=False)
@@ -283,6 +288,25 @@ def create_console_app(
             }
         except (TypeError, ValueError) as exc:
             raise HTTPException(422, str(exc)) from exc
+
+    @app.post("/v1/console/evidence/spans", status_code=201)
+    async def evidence_span(body: dict[str, object], request: Request) -> dict[str, object]:
+        """Persist one tenant-scoped OpenInference evidence span."""
+        _require_local_client(request)
+        try:
+            from dataclasses import asdict
+            return asdict(evidence_plane.record(EvidenceEvent(**body)))  # type: ignore[arg-type]
+        except (TypeError, ValueError) as exc:
+            raise HTTPException(422, str(exc)) from exc
+
+    @app.get("/v1/console/evidence/traces/{trace_id}")
+    async def evidence_trace(trace_id: str, tenant_id: str, request: Request) -> dict[str, object]:
+        """Export one tenant trace in an OTLP-shaped OpenInference document."""
+        _require_local_client(request)
+        try:
+            return evidence_plane.export_trace(tenant_id=tenant_id, trace_id=trace_id)
+        except KeyError as exc:
+            raise HTTPException(404, "trace evidence not found") from exc
 
     @app.post("/v1/console/replay/compare")
     async def replay_compare(body: dict[str, object], request: Request) -> dict[str, object]:
