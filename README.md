@@ -33,3 +33,8 @@ The script creates a backup under:
 ```
 
 It then rebuilds the production frontend. Restart `gateway-system` and hard-refresh the browser.
+
+
+## Provider picker and Custom provider
+
+The first provider-wizard step uses a fixed-height scroll region. Scroll inside the cards to reach **Custom provider**. Custom connections support an optional token, base URL, model-list path, authentication header/prefix, extra headers JSON, models-array field, and model-ID field.

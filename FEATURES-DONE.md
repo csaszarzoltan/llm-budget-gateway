@@ -1,4 +1,6 @@
 ## Features Done (this pass)
+- Scrollable Provider Picker: A fixed-height provider catalog with an always-visible scrollbar keeps every provider reachable on desktop and mobile.
+- Custom Provider Connections: Users can configure arbitrary HTTP model catalogs, authentication headers, extra headers, and response field mappings.
 - Named Provider Accounts: The same provider type can be registered multiple times under unique human-readable names and slugs such as `openai-prod` and `openai-dev`.
 - One Credential per Connection: A named provider connection stores one provider-specific credential set and reuses it for every discovered model.
 - Provider-Adaptive Setup Wizard: OpenAI, Anthropic, Gemini, Azure OpenAI, OpenAI-compatible and Vertex AI connections expose only their relevant fields.
@@ -11,4 +13,4 @@
 - Provider Catalog UX: Connection cards show alias, provider type, region, health, masked credential state, model count, last sync, errors and expandable model lists.
 ## Sources
 - research-findings.md items addressed: centralized provider credentials, governed model catalog, low-friction provider onboarding, secure local-first operation, model discovery
-- CHANGELOG.md section this maps to: [13.2.0] - 2026-08-04
+- CHANGELOG.md section this maps to: [13.2.2] - 2026-08-04

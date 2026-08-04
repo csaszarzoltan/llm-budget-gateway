@@ -2,6 +2,20 @@
 
 All notable changes to this project will be documented in this file.
 
+### [13.2.2] - 2026-08-04
+
+#### Fixed
+- Added a deliberately bounded 250 px provider picker with an always-visible vertical scrollbar, touch overscroll containment, and accessible list semantics.
+- Added a real Custom provider type instead of only documenting it.
+
+#### Features
+- Custom provider connections support a configurable model-list path, optional API key, authentication header and prefix, extra headers JSON, models-array field, and model-ID field.
+- Custom model discovery normalizes results into alias-prefixed gateway model IDs.
+
+#### Tests
+- Added schema, real HTTP discovery, custom authentication/header, model parsing, and scroll-overflow regression coverage.
+
+
 ## [9.4.0] - 2026-08-01
 
 ### Added

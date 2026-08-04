@@ -258,3 +258,60 @@ async def test_home_and_global_model_catalog_use_named_connections(
         assert (await client.get("/v1/product/discovered-models")).json()["models"][0][
             "gateway_model"
         ] == "@prod/gpt-test"
+
+
+def test_custom_provider_schema_is_available_and_configurable(
+    store: ProviderConnectionStore,
+) -> None:
+    """Custom endpoints must be available without pretending to be OpenAI."""
+    custom = next(item for item in store.provider_types() if item["id"] == "custom")
+    fields = {field["name"]: field for field in custom["fields"]}
+    assert fields["base_url"]["required"] is True
+    assert fields["api_key"]["required"] is False
+    assert {"model_list_path", "auth_header", "auth_prefix", "extra_headers_json", "models_field", "model_id_field"} <= fields.keys()
+
+
+@pytest.mark.asyncio
+async def test_custom_provider_discovers_models_with_configurable_contract(
+    store: ProviderConnectionStore,
+) -> None:
+    """Custom discovery must honor path, authentication, headers and JSON fields."""
+    created = store.create(
+        {
+            "name": "Private Catalog",
+            "slug": "private-catalog",
+            "provider_type": "custom",
+            "api_key": "token-123",
+            "base_url": "https://models.example/api",
+            "model_list_path": "/catalog",
+            "auth_header": "X-Token",
+            "auth_prefix": "Token ",
+            "extra_headers_json": '{"X-Workspace":"zurich"}',
+            "models_field": "items",
+            "model_id_field": "key",
+        }
+    )
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        assert str(request.url) == "https://models.example/api/catalog"
+        assert request.headers["X-Token"] == "Token token-123"
+        assert request.headers["X-Workspace"] == "zurich"
+        return httpx.Response(200, json={"items": [{"key": "local-a", "name": "Local A"}]})
+
+    result = await ProviderDiscovery(
+        store, transport=httpx.MockTransport(handler)
+    ).sync(created["id"])
+    assert result["models"][0]["id"] == "local-a"
+    assert result["models"][0]["display_name"] == "Local A"
+
+
+def test_provider_picker_has_a_real_scroll_overflow_and_custom_option() -> None:
+    """The seventh custom card must sit inside a visibly bounded scroll region."""
+    source = Path("ui/src/main.tsx").read_text(encoding="utf-8")
+    styles = Path("ui/src/styles.css").read_text(encoding="utf-8")
+    assert "Available providers" in source
+    assert "provider-picker-hint" in source
+    assert "Custom provider" in Path("src/llm_budget_gateway/provider_connections.py").read_text(encoding="utf-8")
+    rule = styles.split(".provider-picker{", 1)[1].split("}", 1)[0]
+    assert "height:250px" in rule
+    assert "overflow-y:scroll" in rule

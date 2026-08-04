@@ -89,6 +89,23 @@ PROVIDER_TYPES: list[dict[str, Any]] = [
         ],
     },
     {
+        "id": "custom",
+        "name": "Custom provider",
+        "description": "Any HTTP model catalog with configurable authentication and fields",
+        "default_base_url": "",
+        "discovery": "custom",
+        "fields": [
+            {"name": "api_key", "label": "API key or token", "type": "secret", "required": False},
+            {"name": "base_url", "label": "Base URL", "type": "url", "required": True},
+            {"name": "model_list_path", "label": "Model-list path", "type": "text", "required": True},
+            {"name": "auth_header", "label": "Authentication header", "type": "text", "required": False},
+            {"name": "auth_prefix", "label": "Authentication prefix", "type": "text", "required": False},
+            {"name": "extra_headers_json", "label": "Extra headers JSON", "type": "text", "required": False},
+            {"name": "models_field", "label": "Models array field", "type": "text", "required": True},
+            {"name": "model_id_field", "label": "Model ID field", "type": "text", "required": True},
+        ],
+    },
+    {
         "id": "vertex_ai",
         "name": "Google Vertex AI",
         "description": "Google Cloud Vertex AI project connection",
@@ -179,6 +196,13 @@ CREATE TABLE IF NOT EXISTS provider_models(provider_id TEXT NOT NULL,model_id TE
             raise ValueError("name and a URL-safe unique slug are required")
         merged = dict(config)
         merged.setdefault("base_url", schema["default_base_url"])
+        if provider_type == "custom":
+            merged.setdefault("model_list_path", "/models")
+            merged.setdefault("auth_header", "Authorization")
+            merged.setdefault("auth_prefix", "Bearer ")
+            merged.setdefault("extra_headers_json", "{}")
+            merged.setdefault("models_field", "data")
+            merged.setdefault("model_id_field", "id")
         missing = [
             field["label"]
             for field in schema["fields"]
@@ -339,7 +363,7 @@ class ProviderDiscovery:
                     "provider authentication failed; verify the stored credential"
                 )
             response.raise_for_status()
-            models = _parse_models(provider["provider_type"], response.json())
+            models = _parse_models(provider["provider_type"], response.json(), config)
             self.store.save_models(provider_id, models)
             return {
                 **self.store.get(provider_id),
@@ -353,6 +377,25 @@ class ProviderDiscovery:
 
 def _discovery_request(provider_type: str, config: dict[str, Any]) -> dict[str, Any]:
     base = str(config.get("base_url", "")).rstrip("/")
+    if provider_type == "custom":
+        path = str(config.get("model_list_path", "/models")).strip()
+        if not path.startswith("/"):
+            path = "/" + path
+        try:
+            extra_headers = json.loads(str(config.get("extra_headers_json", "{}")) or "{}")
+        except json.JSONDecodeError as exc:
+            raise ValueError("extra headers must be a JSON object") from exc
+        if not isinstance(extra_headers, dict) or not all(
+            isinstance(key, str) and isinstance(value, str)
+            for key, value in extra_headers.items()
+        ):
+            raise ValueError("extra headers must be a JSON object of string values")
+        headers = dict(extra_headers)
+        api_key = str(config.get("api_key", ""))
+        auth_header = str(config.get("auth_header", "Authorization")).strip()
+        if api_key and auth_header:
+            headers[auth_header] = str(config.get("auth_prefix", "Bearer ")) + api_key
+        return {"method": "GET", "url": base + path, "headers": headers}
     if provider_type in {"openai", "openai_compatible"}:
         headers = {"Authorization": f"Bearer {config['api_key']}"}
         if config.get("organization"):
@@ -385,16 +428,29 @@ def _discovery_request(provider_type: str, config: dict[str, Any]) -> dict[str, 
     )
 
 
-def _parse_models(provider_type: str, payload: dict[str, Any]) -> list[dict[str, Any]]:
-    source = (
-        payload.get("models", [])
-        if provider_type == "gemini"
-        else payload.get("data", payload.get("value", []))
-    )
+def _parse_models(
+    provider_type: str,
+    payload: dict[str, Any],
+    config: dict[str, Any] | None = None,
+) -> list[dict[str, Any]]:
+    config = config or {}
+    if provider_type == "custom":
+        source = payload.get(str(config.get("models_field", "data")), [])
+    else:
+        source = (
+            payload.get("models", [])
+            if provider_type == "gemini"
+            else payload.get("data", payload.get("value", []))
+        )
     models = []
     for raw in source:
+        configured_id = (
+            raw.get(str(config.get("model_id_field", "id")))
+            if provider_type == "custom"
+            else None
+        )
         model_id = str(
-            raw.get("id") or raw.get("name") or raw.get("model") or ""
+            configured_id or raw.get("id") or raw.get("name") or raw.get("model") or ""
         ).removeprefix("models/")
         if not model_id:
             continue
@@ -403,6 +459,7 @@ def _parse_models(provider_type: str, payload: dict[str, Any]) -> list[dict[str,
                 "id": model_id,
                 "display_name": raw.get("display_name")
                 or raw.get("displayName")
+                or raw.get("name")
                 or model_id,
                 "owned_by": raw.get("owned_by") or raw.get("publisher"),
                 "capabilities": _capabilities(model_id, raw),
