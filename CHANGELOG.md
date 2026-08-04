@@ -1,3 +1,18 @@
+## [13.7.0] - 2026-08-04
+
+### Features
+- Added verified SQLite backup, integrity checking, atomic restore, and tamper rejection.
+- Added fail-closed canary planning and measured promote-or-rollback guardrails.
+- Added evidence-constrained cost optimization recommendations with mandatory approval and rollback guidance.
+- Added local-only release and autopilot APIs and cockpit navigation.
+
+### Tests
+- Added TDD coverage for real backup/restore I/O, tampering, unsafe paths, guardrail boundaries, optimizer eligibility, and ASGI integration.
+- Completed 100 additional bounded development and verification iterations.
+
+### Docs
+- Updated README, API reference, feature manifest, changelog, and version metadata.
+
 ## [13.6.0] - 2026-08-04
 
 ### Features

@@ -129,6 +129,18 @@ The local console now records gateway, model, agent, tool, policy, and budget ev
 
 This addresses the market-research priority for telemetry portability and avoids locking operational evidence into a single observability vendor.
 
+
+## Safe releases and outcome-aware autopilot (13.7.0)
+
+The control plane now turns release and optimization evidence into fail-closed decisions:
+
+- **Verified backup and recovery:** creates consistent SQLite backups, binds them to SHA-256 evidence, runs SQLite integrity checks, and refuses tampered restores.
+- **Canary release gate:** requires provenance, backup, migration readiness, and full regression evidence before routing a bounded canary percentage.
+- **Measured promote/rollback decision:** rolls back when error rate, p95 latency, or quality crosses a configured guardrail.
+- **Outcome-aware autopilot:** recommends the lowest-cost measured candidate only when quality, success rate, and latency floors remain satisfied. It never applies a production change automatically and always requires approval.
+
+Console endpoints are `POST /v1/console/releases/plan`, `POST /v1/console/releases/canary-decision`, and `POST /v1/console/autopilot/recommend`.
+
 ## Clean release packaging
 
 Build the cockpit first, then create a publication-safe archive:

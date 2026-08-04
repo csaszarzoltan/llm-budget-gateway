@@ -43,6 +43,11 @@ from .priority_features import (
 from .priority_routes import PriorityRouteStore
 from .product_console import ProductConsoleStore
 from .product_extensions import ProductExtensions
+from .production_readiness import (
+    AutopilotCandidate,
+    OutcomeAutopilot,
+    ReleaseRecoveryService,
+)
 from .provider_connections import (
     CredentialVault,
     ProviderConnectionStore,
@@ -123,6 +128,7 @@ def create_console_app(
     compatibility_connection: sqlite3.Connection | None = None,
     market_connection: sqlite3.Connection | None = None,
     evidence_connection: sqlite3.Connection | None = None,
+    recovery_root: Path | None = None,
     project_root: Path | None = None,
     product_connection: sqlite3.Connection | None = None,
     provider_connection: sqlite3.Connection | None = None,
@@ -159,6 +165,9 @@ def create_console_app(
     )
     compatibility_store = CompatibilityRunStore(
         compatibility_connection or sqlite3.connect(":memory:", check_same_thread=False)
+    )
+    recovery = ReleaseRecoveryService(
+        recovery_root or Path(tempfile.mkdtemp(prefix="gateway-recovery-"))
     )
     evidence_plane = EvidencePlane(
         evidence_connection or sqlite3.connect(":memory:", check_same_thread=False)
@@ -286,6 +295,39 @@ def create_console_app(
                 "explanation": decision.explanation,
                 "next_action": decision.next_action,
             }
+        except (TypeError, ValueError) as exc:
+            raise HTTPException(422, str(exc)) from exc
+
+    @app.post("/v1/console/releases/plan")
+    async def release_plan(body: dict[str, object], request: Request) -> dict[str, object]:
+        """Validate provenance, backup, migration, regression, and canary gates."""
+        _require_local_client(request)
+        try:
+            return recovery.plan_rollout(**body)  # type: ignore[arg-type]
+        except (TypeError, ValueError) as exc:
+            raise HTTPException(422, str(exc)) from exc
+
+    @app.post("/v1/console/releases/canary-decision")
+    async def release_canary(body: dict[str, object], request: Request) -> dict[str, object]:
+        """Promote or roll back a canary from measured guardrails."""
+        _require_local_client(request)
+        try:
+            return recovery.canary_decision(**body)  # type: ignore[arg-type]
+        except (TypeError, ValueError) as exc:
+            raise HTTPException(422, str(exc)) from exc
+
+    @app.post("/v1/console/autopilot/recommend")
+    async def autopilot_recommend(body: dict[str, object], request: Request) -> dict[str, object]:
+        """Recommend a bounded route improvement without mutating production."""
+        _require_local_client(request)
+        try:
+            return OutcomeAutopilot().recommend(
+                baseline=AutopilotCandidate(**dict(body.get("baseline", {}))),
+                candidates=[AutopilotCandidate(**dict(item)) for item in list(body.get("candidates", []))],
+                minimum_quality=float(body.get("minimum_quality", 0)),
+                minimum_success_rate=float(body.get("minimum_success_rate", 0)),
+                maximum_latency_ms=float(body.get("maximum_latency_ms", 0)),
+            )
         except (TypeError, ValueError) as exc:
             raise HTTPException(422, str(exc)) from exc
 
