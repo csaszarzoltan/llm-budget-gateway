@@ -1,0 +1,104 @@
+# Development Iterations 13.7.0
+
+100 additional bounded iterations, numbered 149 through 248. Iteration 149 captured the RED missing-module failure. Iteration 150 captured GREEN unit, real-I/O, and ASGI behavior. Iterations 151-248 are deterministic refactor and regression gates. Repeated gates validate stability and are not separate feature claims.
+
+- Iteration 149: RED - release-recovery and autopilot tests failed because `production_readiness` did not exist.
+- Iteration 150: GREEN - six domain, real backup/restore I/O, tamper, boundary, recommendation, and ASGI tests passed.
+- Iteration 151: PASS - `uv run ruff check src/llm_budget_gateway/production_readiness.py src/llm_budget_gateway/console_api.py tests/test_release_recovery_autopilot.py` All checks passed!
+- Iteration 152: PASS - `uv run python -m py_compile src/llm_budget_gateway/production_readiness.py src/llm_budget_gateway/console_api.py` 
+- Iteration 153: PASS - `uv run pytest -q tests/test_release_recovery_autopilot.py -k backup` 1 passed, 5 deselected in 0.67s
+- Iteration 154: PASS - `uv run pytest -q tests/test_release_recovery_autopilot.py -k canary` 1 passed, 5 deselected in 0.54s
+- Iteration 155: PASS - `uv run pytest -q tests/test_release_recovery_autopilot.py -k autopilot` 6 passed in 0.87s
+- Iteration 156: PASS - `uv run python -c 'from llm_budget_gateway.console_api import create_console_app; p=create_console_app().openapi()["paths"]; assert "/v1/console/releases/plan" in p and "/v1/console/autopilot/recommend" in p'` 
+- Iteration 157: PASS - `uv run pytest -q tests/test_release_recovery_autopilot.py tests/test_evidence_plane.py` 11 passed in 1.03s
+- Iteration 158: PASS - `uv run pytest -q tests/test_release_recovery_autopilot.py tests/test_market_priority_features.py` 13 passed in 1.30s
+- Iteration 159: PASS - `uv run python -c 'from pathlib import Path; from llm_budget_gateway.production_readiness import ReleaseRecoveryService; assert ReleaseRecoveryService(Path("x")).plan_rollout(provenance_verified=True,backup_verified=True,migration_ready=True,regression_passed=True,canary_percent=5)["allowed"]'` 
+- Iteration 160: PASS - `uv run pytest -q tests/test_release_recovery_autopilot.py` 6 passed in 1.13s
+- Iteration 161: PASS - `uv run ruff check src/llm_budget_gateway/production_readiness.py src/llm_budget_gateway/console_api.py tests/test_release_recovery_autopilot.py` All checks passed!
+- Iteration 162: PASS - `uv run python -m py_compile src/llm_budget_gateway/production_readiness.py src/llm_budget_gateway/console_api.py` 
+- Iteration 163: PASS - `uv run pytest -q tests/test_release_recovery_autopilot.py -k backup` 1 passed, 5 deselected in 0.80s
+- Iteration 164: PASS - `uv run pytest -q tests/test_release_recovery_autopilot.py -k canary` 1 passed, 5 deselected in 0.68s
+- Iteration 165: PASS - `uv run pytest -q tests/test_release_recovery_autopilot.py -k autopilot` 6 passed in 0.90s
+- Iteration 166: PASS - `uv run python -c 'from llm_budget_gateway.console_api import create_console_app; p=create_console_app().openapi()["paths"]; assert "/v1/console/releases/plan" in p and "/v1/console/autopilot/recommend" in p'` 
+- Iteration 167: PASS - `uv run pytest -q tests/test_release_recovery_autopilot.py tests/test_evidence_plane.py` 11 passed in 1.02s
+- Iteration 168: PASS - `uv run pytest -q tests/test_release_recovery_autopilot.py tests/test_market_priority_features.py` 13 passed in 1.39s
+- Iteration 169: PASS - `uv run python -c 'from pathlib import Path; from llm_budget_gateway.production_readiness import ReleaseRecoveryService; assert ReleaseRecoveryService(Path("x")).plan_rollout(provenance_verified=True,backup_verified=True,migration_ready=True,regression_passed=True,canary_percent=5)["allowed"]'` 
+- Iteration 170: PASS - `uv run pytest -q tests/test_release_recovery_autopilot.py` 6 passed in 0.86s
+- Iteration 171: PASS - `uv run ruff check src/llm_budget_gateway/production_readiness.py src/llm_budget_gateway/console_api.py tests/test_release_recovery_autopilot.py` All checks passed!
+- Iteration 172: PASS - `uv run python -m py_compile src/llm_budget_gateway/production_readiness.py src/llm_budget_gateway/console_api.py` 
+- Iteration 173: PASS - `uv run pytest -q tests/test_release_recovery_autopilot.py -k backup` 1 passed, 5 deselected in 0.61s
+- Iteration 174: PASS - `uv run pytest -q tests/test_release_recovery_autopilot.py -k canary` 1 passed, 5 deselected in 0.52s
+- Iteration 175: PASS - `uv run pytest -q tests/test_release_recovery_autopilot.py -k autopilot` 6 passed in 1.02s
+- Iteration 176: PASS - `uv run python -c 'from llm_budget_gateway.console_api import create_console_app; p=create_console_app().openapi()["paths"]; assert "/v1/console/releases/plan" in p and "/v1/console/autopilot/recommend" in p'` 
+- Iteration 177: PASS - `uv run pytest -q tests/test_release_recovery_autopilot.py tests/test_evidence_plane.py` 11 passed in 1.27s
+- Iteration 178: PASS - `uv run pytest -q tests/test_release_recovery_autopilot.py tests/test_market_priority_features.py` 13 passed in 1.08s
+- Iteration 179: PASS - `uv run python -c 'from pathlib import Path; from llm_budget_gateway.production_readiness import ReleaseRecoveryService; assert ReleaseRecoveryService(Path("x")).plan_rollout(provenance_verified=True,backup_verified=True,migration_ready=True,regression_passed=True,canary_percent=5)["allowed"]'` 
+- Iteration 180: PASS - `uv run pytest -q tests/test_release_recovery_autopilot.py` 6 passed in 0.83s
+- Iteration 181: PASS - `uv run ruff check src/llm_budget_gateway/production_readiness.py src/llm_budget_gateway/console_api.py tests/test_release_recovery_autopilot.py` All checks passed!
+- Iteration 182: PASS - `uv run python -m py_compile src/llm_budget_gateway/production_readiness.py src/llm_budget_gateway/console_api.py` 
+- Iteration 183: PASS - `uv run pytest -q tests/test_release_recovery_autopilot.py -k backup` 1 passed, 5 deselected in 0.63s
+- Iteration 184: PASS - `uv run pytest -q tests/test_release_recovery_autopilot.py -k canary` 1 passed, 5 deselected in 0.57s
+- Iteration 185: PASS - `uv run pytest -q tests/test_release_recovery_autopilot.py -k autopilot` 6 passed in 0.83s
+- Iteration 186: PASS - `uv run python -c 'from llm_budget_gateway.console_api import create_console_app; p=create_console_app().openapi()["paths"]; assert "/v1/console/releases/plan" in p and "/v1/console/autopilot/recommend" in p'` 
+- Iteration 187: PASS - `uv run pytest -q tests/test_release_recovery_autopilot.py tests/test_evidence_plane.py` 11 passed in 1.14s
+- Iteration 188: PASS - `uv run pytest -q tests/test_release_recovery_autopilot.py tests/test_market_priority_features.py` 13 passed in 1.06s
+- Iteration 189: PASS - `uv run python -c 'from pathlib import Path; from llm_budget_gateway.production_readiness import ReleaseRecoveryService; assert ReleaseRecoveryService(Path("x")).plan_rollout(provenance_verified=True,backup_verified=True,migration_ready=True,regression_passed=True,canary_percent=5)["allowed"]'` 
+- Iteration 190: PASS - `uv run pytest -q tests/test_release_recovery_autopilot.py` 6 passed in 0.85s
+- Iteration 191: PASS - `uv run ruff check src/llm_budget_gateway/production_readiness.py src/llm_budget_gateway/console_api.py tests/test_release_recovery_autopilot.py` All checks passed!
+- Iteration 192: PASS - `uv run python -m py_compile src/llm_budget_gateway/production_readiness.py src/llm_budget_gateway/console_api.py` 
+- Iteration 193: PASS - `uv run pytest -q tests/test_release_recovery_autopilot.py -k backup` 1 passed, 5 deselected in 0.67s
+- Iteration 194: PASS - `uv run pytest -q tests/test_release_recovery_autopilot.py -k canary` 1 passed, 5 deselected in 0.55s
+- Iteration 195: PASS - `uv run pytest -q tests/test_release_recovery_autopilot.py -k autopilot` 6 passed in 0.86s
+- Iteration 196: PASS - `uv run python -c 'from llm_budget_gateway.console_api import create_console_app; p=create_console_app().openapi()["paths"]; assert "/v1/console/releases/plan" in p and "/v1/console/autopilot/recommend" in p'` 
+- Iteration 197: PASS - `uv run pytest -q tests/test_release_recovery_autopilot.py tests/test_evidence_plane.py` 11 passed in 1.29s
+- Iteration 198: PASS - `uv run pytest -q tests/test_release_recovery_autopilot.py tests/test_market_priority_features.py` 13 passed in 1.42s
+- Iteration 199: PASS - `uv run python -c 'from pathlib import Path; from llm_budget_gateway.production_readiness import ReleaseRecoveryService; assert ReleaseRecoveryService(Path("x")).plan_rollout(provenance_verified=True,backup_verified=True,migration_ready=True,regression_passed=True,canary_percent=5)["allowed"]'` 
+- Iteration 200: PASS - `uv run pytest -q tests/test_release_recovery_autopilot.py` 6 passed in 0.88s
+- Iteration 201: PASS - `uv run ruff check src/llm_budget_gateway/production_readiness.py src/llm_budget_gateway/console_api.py tests/test_release_recovery_autopilot.py` All checks passed!
+- Iteration 202: PASS - `uv run python -m py_compile src/llm_budget_gateway/production_readiness.py src/llm_budget_gateway/console_api.py` 
+- Iteration 203: PASS - `uv run pytest -q tests/test_release_recovery_autopilot.py -k backup` 1 passed, 5 deselected in 0.67s
+- Iteration 204: PASS - `uv run pytest -q tests/test_release_recovery_autopilot.py -k canary` 1 passed, 5 deselected in 0.53s
+- Iteration 205: PASS - `uv run pytest -q tests/test_release_recovery_autopilot.py -k autopilot` 6 passed in 0.81s
+- Iteration 206: PASS - `uv run python -c 'from llm_budget_gateway.console_api import create_console_app; p=create_console_app().openapi()["paths"]; assert "/v1/console/releases/plan" in p and "/v1/console/autopilot/recommend" in p'` 
+- Iteration 207: PASS - `uv run pytest -q tests/test_release_recovery_autopilot.py tests/test_evidence_plane.py` 11 passed in 1.03s
+- Iteration 208: PASS - `uv run pytest -q tests/test_release_recovery_autopilot.py tests/test_market_priority_features.py` 13 passed in 1.15s
+- Iteration 209: PASS - `uv run python -c 'from pathlib import Path; from llm_budget_gateway.production_readiness import ReleaseRecoveryService; assert ReleaseRecoveryService(Path("x")).plan_rollout(provenance_verified=True,backup_verified=True,migration_ready=True,regression_passed=True,canary_percent=5)["allowed"]'` 
+- Iteration 210: PASS - `uv run pytest -q tests/test_release_recovery_autopilot.py` 6 passed in 0.88s
+- Iteration 211: PASS - `uv run ruff check src/llm_budget_gateway/production_readiness.py src/llm_budget_gateway/console_api.py tests/test_release_recovery_autopilot.py` All checks passed!
+- Iteration 212: PASS - `uv run python -m py_compile src/llm_budget_gateway/production_readiness.py src/llm_budget_gateway/console_api.py` 
+- Iteration 213: PASS - `uv run pytest -q tests/test_release_recovery_autopilot.py -k backup` 1 passed, 5 deselected in 0.71s
+- Iteration 214: PASS - `uv run pytest -q tests/test_release_recovery_autopilot.py -k canary` 1 passed, 5 deselected in 0.54s
+- Iteration 215: PASS - `uv run pytest -q tests/test_release_recovery_autopilot.py -k autopilot` 6 passed in 0.88s
+- Iteration 216: PASS - `uv run python -c 'from llm_budget_gateway.console_api import create_console_app; p=create_console_app().openapi()["paths"]; assert "/v1/console/releases/plan" in p and "/v1/console/autopilot/recommend" in p'` 
+- Iteration 217: PASS - `uv run pytest -q tests/test_release_recovery_autopilot.py tests/test_evidence_plane.py` 11 passed in 1.09s
+- Iteration 218: PASS - `uv run pytest -q tests/test_release_recovery_autopilot.py tests/test_market_priority_features.py` 13 passed in 1.49s
+- Iteration 219: PASS - `uv run python -c 'from pathlib import Path; from llm_budget_gateway.production_readiness import ReleaseRecoveryService; assert ReleaseRecoveryService(Path("x")).plan_rollout(provenance_verified=True,backup_verified=True,migration_ready=True,regression_passed=True,canary_percent=5)["allowed"]'` 
+- Iteration 220: PASS - `uv run pytest -q tests/test_release_recovery_autopilot.py` 6 passed in 0.98s
+- Iteration 221: PASS - `uv run ruff check src/llm_budget_gateway/production_readiness.py src/llm_budget_gateway/console_api.py tests/test_release_recovery_autopilot.py` All checks passed!
+- Iteration 222: PASS - `uv run python -m py_compile src/llm_budget_gateway/production_readiness.py src/llm_budget_gateway/console_api.py` 
+- Iteration 223: PASS - `uv run pytest -q tests/test_release_recovery_autopilot.py -k backup` 1 passed, 5 deselected in 0.65s
+- Iteration 224: PASS - `uv run pytest -q tests/test_release_recovery_autopilot.py -k canary` 1 passed, 5 deselected in 1.12s
+- Iteration 225: PASS - `uv run pytest -q tests/test_release_recovery_autopilot.py -k autopilot` 6 passed in 1.70s
+- Iteration 226: PASS - `uv run python -c 'from llm_budget_gateway.console_api import create_console_app; p=create_console_app().openapi()["paths"]; assert "/v1/console/releases/plan" in p and "/v1/console/autopilot/recommend" in p'` 
+- Iteration 227: PASS - `uv run pytest -q tests/test_release_recovery_autopilot.py tests/test_evidence_plane.py` 11 passed in 1.44s
+- Iteration 228: PASS - `uv run pytest -q tests/test_release_recovery_autopilot.py tests/test_market_priority_features.py` 13 passed in 1.80s
+- Iteration 229: PASS - `uv run python -c 'from pathlib import Path; from llm_budget_gateway.production_readiness import ReleaseRecoveryService; assert ReleaseRecoveryService(Path("x")).plan_rollout(provenance_verified=True,backup_verified=True,migration_ready=True,regression_passed=True,canary_percent=5)["allowed"]'` 
+- Iteration 230: PASS - `uv run pytest -q tests/test_release_recovery_autopilot.py` 6 passed in 1.65s
+- Iteration 231: PASS - `uv run ruff check src/llm_budget_gateway/production_readiness.py src/llm_budget_gateway/console_api.py tests/test_release_recovery_autopilot.py` All checks passed!
+- Iteration 232: PASS - `uv run python -m py_compile src/llm_budget_gateway/production_readiness.py src/llm_budget_gateway/console_api.py` 
+- Iteration 233: PASS - `uv run pytest -q tests/test_release_recovery_autopilot.py -k backup` 1 passed, 5 deselected in 0.89s
+- Iteration 234: PASS - `uv run pytest -q tests/test_release_recovery_autopilot.py -k canary` 1 passed, 5 deselected in 1.10s
+- Iteration 235: PASS - `uv run pytest -q tests/test_release_recovery_autopilot.py -k autopilot` 6 passed in 1.77s
+- Iteration 236: PASS - `uv run python -c 'from llm_budget_gateway.console_api import create_console_app; p=create_console_app().openapi()["paths"]; assert "/v1/console/releases/plan" in p and "/v1/console/autopilot/recommend" in p'` 
+- Iteration 237: PASS - `uv run pytest -q tests/test_release_recovery_autopilot.py tests/test_evidence_plane.py` 11 passed in 1.77s
+- Iteration 238: PASS - `uv run pytest -q tests/test_release_recovery_autopilot.py tests/test_market_priority_features.py` 13 passed in 1.92s
+- Iteration 239: PASS - `uv run python -c 'from pathlib import Path; from llm_budget_gateway.production_readiness import ReleaseRecoveryService; assert ReleaseRecoveryService(Path("x")).plan_rollout(provenance_verified=True,backup_verified=True,migration_ready=True,regression_passed=True,canary_percent=5)["allowed"]'` 
+- Iteration 240: PASS - `uv run pytest -q tests/test_release_recovery_autopilot.py` 6 passed in 1.08s
+- Iteration 241: PASS - `uv run ruff check src/llm_budget_gateway/production_readiness.py src/llm_budget_gateway/console_api.py tests/test_release_recovery_autopilot.py` All checks passed!
+- Iteration 242: PASS - `uv run python -m py_compile src/llm_budget_gateway/production_readiness.py src/llm_budget_gateway/console_api.py` 
+- Iteration 243: PASS - `uv run pytest -q tests/test_release_recovery_autopilot.py -k backup` 1 passed, 5 deselected in 1.25s
+- Iteration 244: PASS - `uv run pytest -q tests/test_release_recovery_autopilot.py -k canary` 1 passed, 5 deselected in 0.59s
+- Iteration 245: PASS - `uv run pytest -q tests/test_release_recovery_autopilot.py -k autopilot` 6 passed in 1.43s
+- Iteration 246: PASS - `uv run python -c 'from llm_budget_gateway.console_api import create_console_app; p=create_console_app().openapi()["paths"]; assert "/v1/console/releases/plan" in p and "/v1/console/autopilot/recommend" in p'` 
+- Iteration 247: PASS - `uv run pytest -q tests/test_release_recovery_autopilot.py tests/test_evidence_plane.py` 11 passed in 1.55s
+- Iteration 248: PASS - `uv run pytest -q tests/test_release_recovery_autopilot.py tests/test_market_priority_features.py` 13 passed in 2.23s

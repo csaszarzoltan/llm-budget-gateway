@@ -1,0 +1,33 @@
+# Example budget configuration for llm-budget-gateway.
+# Copy to budgets.yaml and adjust. Scopes are hierarchical:
+# key < user < team < global. All scopes are checked on every request.
+
+scopes:
+  - scope:
+      kind: key
+      key: "sk_live_abc"
+    soft_limit: 25.0        # USD — alert only, never blocks
+    hard_limit: 50.0        # USD — reject with 412 when exceeded
+    window: "30d"           # 30s | 30m | 30h | 30d | daily | monthly
+    tpm_limit: 90000        # tokens per minute (sync ceiling, 429)
+    rpm_limit: 60           # requests per minute (sync ceiling, 429)
+
+  - scope:
+      kind: team
+      key: "eng"
+    soft_limit: 500.0
+    hard_limit: 1000.0
+    window: "monthly"
+
+  - scope:
+      kind: user
+      key: "42"
+    hard_limit: 100.0
+    window: "30d"
+
+  - scope:
+      kind: global
+      key: "default"
+    soft_limit: 5000.0
+    hard_limit: 10000.0
+    window: "monthly"
