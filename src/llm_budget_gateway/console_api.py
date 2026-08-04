@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import sqlite3
 from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
 from pathlib import Path
@@ -20,6 +21,8 @@ from .priority_features import (
     SchemaFormService,
 )
 from .service_manager import ServiceManager
+from .supply_chain import SBOMService, UpgradeRiskService
+from .trace_outcomes import OutcomeAnalytics, OutcomeRecord, TraceSpan, TraceStore
 
 _STYLE = """
 <style>
@@ -68,9 +71,18 @@ def _require_local_action(request: Request, action: str | None) -> None:
         raise HTTPException(403, "X-Console-Action: 1 is required")
 
 
-def create_console_app(manager: ServiceManager | None = None) -> FastAPI:
+def create_console_app(
+    manager: ServiceManager | None = None,
+    *,
+    trace_connection: sqlite3.Connection | None = None,
+    project_root: Path | None = None,
+) -> FastAPI:
     """Create the console with local one-click lifecycle controls."""
     service_manager = manager or ServiceManager()
+    repository_root = project_root or Path(__file__).resolve().parents[2]
+    trace_store = TraceStore(
+        trace_connection or sqlite3.connect(":memory:", check_same_thread=False)
+    )
 
     @asynccontextmanager
     async def lifespan(_: FastAPI) -> AsyncIterator[None]:
@@ -162,6 +174,61 @@ def create_console_app(manager: ServiceManager | None = None) -> FastAPI:
         try:
             return SchemaFormService().generate(
                 str(body.get("form_id", "form")), dict(body.get("schema", {}))
+            )
+        except (TypeError, ValueError) as exc:
+            raise HTTPException(422, str(exc)) from exc
+
+    @app.post("/v1/console/traces", status_code=201)
+    async def create_trace(body: dict[str, object]) -> dict[str, object]:
+        """Append one privacy-safe trace span."""
+        try:
+            span = TraceSpan(**body)
+            trace_store.append(span)
+            return {"span_id": span.span_id, "run_id": span.run_id}
+        except (TypeError, ValueError) as exc:
+            raise HTTPException(422, str(exc)) from exc
+
+    @app.get("/v1/console/traces/{run_id}")
+    async def get_trace(
+        run_id: str, x_tenant_id: str | None = Header(None)
+    ) -> dict[str, object]:
+        """Return one tenant-isolated nested trace."""
+        if not x_tenant_id:
+            raise HTTPException(422, "X-Tenant-Id is required")
+        try:
+            return {"run_id": run_id, "trace": trace_store.trace(x_tenant_id, run_id)}
+        except KeyError as exc:
+            raise HTTPException(404, "unknown trace") from exc
+
+    @app.post("/v1/console/outcomes/summary")
+    async def outcome_summary(body: dict[str, object]) -> dict[str, object]:
+        """Calculate cost-to-outcome unit economics and breakdowns."""
+        try:
+            records = [OutcomeRecord(**item) for item in body.get("records", [])]
+            return OutcomeAnalytics().summarize(records)
+        except (TypeError, ValueError) as exc:
+            raise HTTPException(422, str(exc)) from exc
+
+    @app.get("/v1/console/supply-chain/sbom")
+    async def supply_chain_sbom() -> dict[str, object]:
+        """Return a deterministic SBOM for pinned Python and npm dependencies."""
+        package_lock = repository_root / "ui" / "package-lock.json"
+        try:
+            return SBOMService().generate(
+                pyproject=repository_root / "pyproject.toml",
+                package_lock=package_lock if package_lock.exists() else None,
+            )
+        except (FileNotFoundError, KeyError, TypeError, ValueError) as exc:
+            raise HTTPException(422, str(exc)) from exc
+
+    @app.post("/v1/console/supply-chain/upgrade-risk")
+    async def supply_chain_upgrade_risk(body: dict[str, object]) -> dict[str, object]:
+        """Assess a dependency diff before automated rollout."""
+        try:
+            return UpgradeRiskService().assess(
+                current=dict(body.get("current", {})),
+                proposed=dict(body.get("proposed", {})),
+                security_advisories=dict(body.get("security_advisories", {})),
             )
         except (TypeError, ValueError) as exc:
             raise HTTPException(422, str(exc)) from exc

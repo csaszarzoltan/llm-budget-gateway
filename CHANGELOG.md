@@ -344,3 +344,32 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Docs
 - Updated README, API documentation, and the machine-readable `FEATURES-DONE.md` manifest.
+
+## [9.6.0] - 2026-08-04
+
+### Features
+- Added tenant-isolated nested agent traces with parent-child spans, duration, status, tool/model context, and cost attribution.
+- Added privacy-safe trace ingestion that removes prompt, response, authorization, secret, and API-key metadata.
+- Added cost-to-outcome analytics across feature, project, model, and tool with cost per success and quality-weighted cost.
+- Added `POST /v1/console/traces`, `GET /v1/console/traces/{run_id}`, and `POST /v1/console/outcomes/summary`.
+
+### Tests
+- Added SQLite persistence, tenant isolation, graph integrity, duplicate, missing-parent, validation, analytics, and real HTTP integration tests.
+
+### Docs
+- Updated README, priority API reference, frontend navigation, and `FEATURES-DONE.md` for the completed P1 research priorities.
+
+## [9.7.0] - 2026-08-04
+
+### Features
+- Added deterministic CycloneDX-compatible SBOM generation for exactly pinned Python and npm dependencies.
+- Added SHA-256-bound in-toto/SLSA-style provenance creation and offline artifact verification.
+- Added a dependency upgrade-risk gate for major, minor, patch, removed, unpinned, and security-advisory changes.
+- Added `GET /v1/console/supply-chain/sbom` and `POST /v1/console/supply-chain/upgrade-risk`.
+- Added supply-chain navigation and positioning to the React cockpit.
+
+### Tests
+- Added deterministic SBOM, pin enforcement, artifact tamper, unsafe path, semantic-version boundary, advisory, and real HTTP integration coverage.
+
+### Docs
+- Updated README, API reference, frontend, and the machine-readable feature manifest.

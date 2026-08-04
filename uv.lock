@@ -1016,7 +1016,7 @@ wheels = [
 
 [[package]]
 name = "llm-budget-gateway"
-version = "9.5.0"
+version = "9.7.0"
 source = { editable = "." }
 dependencies = [
     { name = "fastapi" },

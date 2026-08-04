@@ -1,7 +1,7 @@
 # LLM Budget Gateway
 
 [![Python 3.11+](https://img.shields.io/badge/python-3.11%2B-blue.svg)](https://www.python.org/downloads/)
-![Version 9.5.0](https://img.shields.io/badge/version-9.4.0-blue.svg)
+![Version 9.7.0](https://img.shields.io/badge/version-9.4.0-blue.svg)
 ![Tests 800 passing](https://img.shields.io/badge/tests-800%20passing-brightgreen.svg)
 ![New Scale modules 97% coverage](https://img.shields.io/badge/scale%20coverage-97%25-brightgreen.svg)
 [![License MIT](https://img.shields.io/badge/license-MIT-blue.svg)](https://opensource.org/licenses/MIT)
@@ -10,7 +10,7 @@
 
 Applications continue to send OpenAI-shaped requests. The gateway authenticates virtual keys, resolves tenant and budget scopes, enforces limits, selects or falls back between models, forwards through the LiteLLM SDK, and records usage and cost without persisting prompt or response content.
 
-**Current package version:** `9.5.0`
+**Current package version:** `9.7.0`
 
 > [!IMPORTANT]
 > The built-in SQLite repositories are intended for development and single-node deployments. Multi-instance production deployments must use transactional shared repository adapters. Scale Center provides planning and validation decisions, but it does not provision Postgres, Redis, or other infrastructure.
@@ -520,7 +520,7 @@ Migration guides are available from `docs/migration-0.7.md` through [`docs/migra
 
 ## Versioning and release history
 
-The package version is `9.5.0`. Historical center versions in documentation describe the release in which a capability family was introduced. They are all included in the current package.
+The package version is `9.7.0`. Historical center versions in documentation describe the release in which a capability family was introduced. They are all included in the current package.
 
 Major milestones include:
 
@@ -600,9 +600,9 @@ export GATEWAY_MCP_API_KEY='replace-with-a-strong-random-secret'
 
 See [MCP Governance](docs/mcp-governance.md), the [MCP Governance API](docs/api/mcp-governance-api.md), and the runnable [governance example](examples/mcp_governance.py).
 
-## AI Operations Cockpit 9.5
+## AI Operations Cockpit 9.7
 
-Version 9.5 implements the three P0 priorities validated in `research-findings.md`: one live graphical cockpit, a pre-step Agent Runaway Firewall, and schema-generated guided forms. These address fragmented operations, runaway agent spend, and raw-JSON onboarding friction.
+Version 9.7 implements the three P0 priorities validated in `research-findings.md`: one live graphical cockpit, a pre-step Agent Runaway Firewall, and schema-generated guided forms. These address fragmented operations, runaway agent spend, and raw-JSON onboarding friction.
 
 ### Main user flow
 
@@ -626,3 +626,22 @@ Open [http://127.0.0.1:8013/cockpit](http://127.0.0.1:8013/cockpit). The expert 
 - **Schema-generated guided forms:** converts JSON Schema to accessible control metadata while marking secret-like fields as non-persistent.
 
 See `docs/priority-features-api.md` for the implemented endpoint contracts and `FEATURES-DONE.md` for machine-readable delivery status.
+
+## Agent trace and outcome intelligence 9.7
+
+Version 9.7 continues the priority roadmap from `research-findings.md` with the first two P1 differentiators:
+
+- **End-to-end agent trace explorer:** tenant-isolated nested spans connect agent planning, tool calls, duration, status and cost without retaining prompt or response content.
+- **Cost-to-outcome analytics:** reports total cost, cost per successful outcome, quality-weighted cost, and breakdowns by feature, project, model and tool.
+
+Use `POST /v1/console/traces` to append a span, then retrieve a run through `GET /v1/console/traces/{run_id}` with `X-Tenant-Id`. Use `POST /v1/console/outcomes/summary` to calculate privacy-safe unit economics. Exact contracts are documented in `docs/priority-features-api.md`.
+
+## Verified software supply chain 9.7
+
+Version 9.7 implements the remaining high-value research recommendation for signed, reproducible distribution:
+
+- **Deterministic SBOM:** `GET /v1/console/supply-chain/sbom` inventories pinned Python and npm packages in CycloneDX-compatible JSON.
+- **Artifact provenance:** `ProvenanceService` binds release bytes to builder and source identity through SHA-256 in an in-toto/SLSA-style statement and verifies artifacts offline.
+- **Upgrade risk gate:** `POST /v1/console/supply-chain/upgrade-risk` identifies major, removed, unpinned, and advisory-affected changes and requires review before automatic rollout.
+
+The implementation uses only local files and standard-library cryptographic hashing. It does not upload dependencies, source code, or release artifacts.

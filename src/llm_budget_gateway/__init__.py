@@ -2,4 +2,4 @@
 and automatic model fallback.
 """
 
-__version__ = "9.5.0"
+__version__ = "9.7.0"
