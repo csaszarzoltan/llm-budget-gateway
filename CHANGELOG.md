@@ -329,3 +329,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 #### Security
 - Feedback accepts bounded categories only; reports contain aggregate metrics and deterministic hashes; API fails closed without a key.
+
+## [9.5.0] - 2026-08-04
+
+### Features
+- Added a responsive React 19 and TypeScript AI Operations Cockpit that unifies spend, quality, incidents, approvals, policy coverage, and recommended actions.
+- Added an explainable Agent Runaway Firewall with cost, token, tool-call, delegation-depth, elapsed-time, retry, and emergency-stop gates.
+- Added SQLite run reservation and reconciliation for real local persistence.
+- Added JSON-Schema-generated guided form metadata with sensitive-field handling.
+- Added `/v1/console/cockpit/summary`, `/v1/console/runaway/evaluate`, `/v1/console/forms/generate`, and `/cockpit`.
+
+### Tests
+- Added research-priority unit, boundary, error, SQLite I/O integration, HTTP integration, and production UI-serving coverage.
+
+### Docs
+- Updated README, API documentation, and the machine-readable `FEATURES-DONE.md` manifest.

@@ -4,12 +4,21 @@ from __future__ import annotations
 
 from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
+from pathlib import Path
 
 from fastapi import FastAPI, Header, HTTPException, Request
-from fastapi.responses import HTMLResponse
+from fastapi.responses import FileResponse, HTMLResponse
+from fastapi.staticfiles import StaticFiles
 
 from .console_ui import catalog, render_console
 from .console_workflows import get_workflow, search_workflows
+from .priority_features import (
+    CockpitService,
+    RunawayFirewall,
+    RunLimits,
+    RunState,
+    SchemaFormService,
+)
 from .service_manager import ServiceManager
 
 _STYLE = """
@@ -72,6 +81,19 @@ def create_console_app(manager: ServiceManager | None = None) -> FastAPI:
         title="LLM Budget Gateway Console", version="8.0.0", lifespan=lifespan
     )
 
+    cockpit_dist = Path(__file__).resolve().parents[2] / "ui" / "dist"
+    if cockpit_dist.exists():
+        app.mount(
+            "/assets",
+            StaticFiles(directory=cockpit_dist / "assets"),
+            name="cockpit-assets",
+        )
+
+        @app.get("/cockpit", response_class=FileResponse)
+        async def cockpit() -> FileResponse:
+            """Serve the production React AI Operations Cockpit."""
+            return FileResponse(cockpit_dist / "index.html")
+
     @app.get("/health")
     async def health() -> dict[str, str]:
         return {"status": "ok"}
@@ -104,6 +126,45 @@ def create_console_app(manager: ServiceManager | None = None) -> FastAPI:
         if item is None:
             raise HTTPException(404, "unknown workflow")
         return {"version": "1", "workflow": item}
+
+    @app.post("/v1/console/cockpit/summary")
+    async def cockpit_summary(body: dict[str, object]) -> dict[str, object]:
+        """Combine spend, quality, operations and governance into one summary."""
+        try:
+            return CockpitService().summarize(
+                spend=dict(body.get("spend", {})),
+                quality=dict(body.get("quality", {})),
+                operations=dict(body.get("operations", {})),
+                governance=dict(body.get("governance", {})),
+            )
+        except (TypeError, ValueError) as exc:
+            raise HTTPException(422, str(exc)) from exc
+
+    @app.post("/v1/console/runaway/evaluate")
+    async def runaway_evaluate(body: dict[str, object]) -> dict[str, object]:
+        """Explain whether an agent run may execute its next step."""
+        try:
+            state = RunState(**dict(body.get("state", {})))
+            limits = RunLimits(**dict(body.get("limits", {})))
+            decision = RunawayFirewall().evaluate(state, limits)
+            return {
+                "allowed": decision.allowed,
+                "code": decision.code,
+                "explanation": decision.explanation,
+                "next_action": decision.next_action,
+            }
+        except (TypeError, ValueError) as exc:
+            raise HTTPException(422, str(exc)) from exc
+
+    @app.post("/v1/console/forms/generate")
+    async def generate_form(body: dict[str, object]) -> dict[str, object]:
+        """Generate accessible control metadata from a bounded JSON Schema."""
+        try:
+            return SchemaFormService().generate(
+                str(body.get("form_id", "form")), dict(body.get("schema", {}))
+            )
+        except (TypeError, ValueError) as exc:
+            raise HTTPException(422, str(exc)) from exc
 
     @app.get("/v1/console/services")
     async def services(

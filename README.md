@@ -1,7 +1,7 @@
 # LLM Budget Gateway
 
 [![Python 3.11+](https://img.shields.io/badge/python-3.11%2B-blue.svg)](https://www.python.org/downloads/)
-![Version 9.4.0](https://img.shields.io/badge/version-9.4.0-blue.svg)
+![Version 9.5.0](https://img.shields.io/badge/version-9.4.0-blue.svg)
 ![Tests 800 passing](https://img.shields.io/badge/tests-800%20passing-brightgreen.svg)
 ![New Scale modules 97% coverage](https://img.shields.io/badge/scale%20coverage-97%25-brightgreen.svg)
 [![License MIT](https://img.shields.io/badge/license-MIT-blue.svg)](https://opensource.org/licenses/MIT)
@@ -10,7 +10,7 @@
 
 Applications continue to send OpenAI-shaped requests. The gateway authenticates virtual keys, resolves tenant and budget scopes, enforces limits, selects or falls back between models, forwards through the LiteLLM SDK, and records usage and cost without persisting prompt or response content.
 
-**Current package version:** `9.4.0`
+**Current package version:** `9.5.0`
 
 > [!IMPORTANT]
 > The built-in SQLite repositories are intended for development and single-node deployments. Multi-instance production deployments must use transactional shared repository adapters. Scale Center provides planning and validation decisions, but it does not provision Postgres, Redis, or other infrastructure.
@@ -520,7 +520,7 @@ Migration guides are available from `docs/migration-0.7.md` through [`docs/migra
 
 ## Versioning and release history
 
-The package version is `9.4.0`. Historical center versions in documentation describe the release in which a capability family was introduced. They are all included in the current package.
+The package version is `9.5.0`. Historical center versions in documentation describe the release in which a capability family was introduced. They are all included in the current package.
 
 Major milestones include:
 
@@ -599,3 +599,30 @@ export GATEWAY_MCP_API_KEY='replace-with-a-strong-random-secret'
 ```
 
 See [MCP Governance](docs/mcp-governance.md), the [MCP Governance API](docs/api/mcp-governance-api.md), and the runnable [governance example](examples/mcp_governance.py).
+
+## AI Operations Cockpit 9.5
+
+Version 9.5 implements the three P0 priorities validated in `research-findings.md`: one live graphical cockpit, a pre-step Agent Runaway Firewall, and schema-generated guided forms. These address fragmented operations, runaway agent spend, and raw-JSON onboarding friction.
+
+### Main user flow
+
+1. Install and start the console.
+2. Build the React UI once.
+3. Open `/cockpit`, enter a run's current cost, and select **Evaluate next step**.
+4. The firewall returns a clear allow or pause decision, the exact ceiling involved, and a safe next action. Loading, validation, network-error, allowed, and blocked states are all represented.
+
+```bash
+uv sync --extra dev
+cd ui && npm ci && npm run build && cd ..
+uv run uvicorn llm_budget_gateway.console_api:create_console_app --factory --host 127.0.0.1 --port 8013
+```
+
+Open [http://127.0.0.1:8013/cockpit](http://127.0.0.1:8013/cockpit). The expert console remains at `/console`.
+
+### Features built from market research
+
+- **Unified AI Operations Cockpit:** summarizes spend, quality, incidents, approvals, and policy coverage so operators do not hunt across services.
+- **Agent Runaway Firewall:** blocks the next agent step at configured cost, token, tool, depth, duration, retry, or emergency-stop boundaries and explains the decision.
+- **Schema-generated guided forms:** converts JSON Schema to accessible control metadata while marking secret-like fields as non-persistent.
+
+See `docs/priority-features-api.md` for the implemented endpoint contracts and `FEATURES-DONE.md` for machine-readable delivery status.

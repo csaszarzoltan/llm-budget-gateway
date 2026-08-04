@@ -22,3 +22,12 @@ __pycache__/
 .gateway-console/logs/resilience.log
 .gateway-console/logs/scale.log
 .gateway-console/logs/security.log
+node_modules/
+.env
+.env.*
+!.env.example
+ui/.vite/
+ui/coverage/
+*.log
+build/
+dist/
