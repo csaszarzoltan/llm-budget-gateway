@@ -1,7 +1,7 @@
 {
   "name": "llm-budget-gateway-cockpit",
   "private": true,
-  "version": "13.2.3",
+  "version": "13.3.0",
   "type": "module",
   "scripts": {
     "dev": "vite",

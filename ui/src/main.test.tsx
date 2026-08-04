@@ -21,3 +21,13 @@ describe('production cockpit source contracts', () => {
     expect(source).not.toContain('BEGIN PRIVATE KEY')
   })
 })
+
+it('research P0 cockpit exposes a complete safety operations flow', () => {
+  const source = readFileSync(new URL('./main.tsx', import.meta.url), 'utf8')
+  expect(source).toContain('Cost firewall')
+  expect(source).toContain('Provider Compatibility Lab')
+  expect(source).toContain('Explain incident')
+  expect(source).toContain('/v1/console/compatibility/evaluate')
+  expect(source).toContain('/v1/console/incidents/')
+  expect(source).toContain('role="alert"')
+})

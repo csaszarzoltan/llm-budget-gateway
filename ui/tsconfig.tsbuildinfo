@@ -1,1 +1,1 @@
-{"root":["./src/main.tsx"],"version":"5.9.2"}
+{"root":["./src/main.test.tsx","./src/main.tsx"],"version":"5.9.2"}

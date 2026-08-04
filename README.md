@@ -70,6 +70,7 @@ cd ui && npm test && npm run build
 - **Providers:** encrypted named connections and model discovery
 - **Activity:** explainable routing decisions and trace evidence
 - **Usage:** request, cost, latency, and success summaries
+- **Safety:** Runaway Cost Firewall, Provider Compatibility Lab, and Explain-and-Fix Incident Timeline
 - **Advanced:** services, nested traces, governance, security, supply chain, and API access
 
 ## Key documentation
@@ -93,3 +94,14 @@ cd ui && npm test && npm run build
 ## License
 
 Add the intended project license before public distribution if the repository does not already carry one.
+
+
+## Research-ranked safety workflows (13.3)
+
+The validated market research prioritized three workflows because users repeatedly struggle with surprise agent bills, provider configuration failures, and operational ambiguity:
+
+1. **Runaway Cost Firewall:** use `POST /v1/console/runaway/evaluate` to fail closed before an agent exceeds cost, token, tool-call, depth, time, retry, or emergency-stop boundaries.
+2. **Provider Compatibility Lab:** open **Safety** in the React cockpit or call `POST /v1/console/compatibility/evaluate` to score capability probes and receive specific repair instructions.
+3. **Explain-and-Fix Incident Timeline:** append redacted evidence to `POST /v1/console/incidents/events`, then retrieve the ordered explanation and repair plan from `GET /v1/console/incidents/{incident_id}`.
+
+The complete Safety UI flow is responsive, keyboard accessible, includes loading/result/error states, and is built into `ui/dist` by `npm run build`. See [Safety Operations API](docs/api/safety-operations-api.md).

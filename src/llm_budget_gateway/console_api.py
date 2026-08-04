@@ -15,6 +15,12 @@ from fastapi.staticfiles import StaticFiles
 from .completion_features import MigrationPlanner, PolicyRouteSimulator
 from .console_ui import catalog, render_console
 from .console_workflows import get_workflow, search_workflows
+from .p0_workflows import (
+    CompatibilityProbe,
+    IncidentEvidence,
+    IncidentTimelineStore,
+    ProviderCompatibilityLab,
+)
 from .priority_features import (
     CockpitService,
     RunawayFirewall,
@@ -94,6 +100,7 @@ def create_console_app(
     trace_connection: sqlite3.Connection | None = None,
     routing_connection: sqlite3.Connection | None = None,
     priority_routing_connection: sqlite3.Connection | None = None,
+    incident_connection: sqlite3.Connection | None = None,
     project_root: Path | None = None,
     product_connection: sqlite3.Connection | None = None,
     provider_connection: sqlite3.Connection | None = None,
@@ -121,8 +128,16 @@ def create_console_app(
             or Path(tempfile.mkdtemp(prefix="gateway-console-")) / "provider-master.key"
         ),
     )
-    routing = RoutingControlPlane(routing_connection or sqlite3.connect(":memory:", check_same_thread=False))
-    priority_routing = PriorityRouteStore(priority_routing_connection or sqlite3.connect(":memory:", check_same_thread=False))
+    routing = RoutingControlPlane(
+        routing_connection or sqlite3.connect(":memory:", check_same_thread=False)
+    )
+    priority_routing = PriorityRouteStore(
+        priority_routing_connection
+        or sqlite3.connect(":memory:", check_same_thread=False)
+    )
+    incident_store = IncidentTimelineStore(
+        incident_connection or sqlite3.connect(":memory:", check_same_thread=False)
+    )
     provider_discovery = ProviderDiscovery(
         provider_store, transport=provider_discovery_transport
     )  # type: ignore[arg-type]
@@ -249,6 +264,46 @@ def create_console_app(
             )
         except (TypeError, ValueError) as exc:
             raise HTTPException(422, str(exc)) from exc
+
+    @app.post("/v1/console/compatibility/evaluate")
+    async def compatibility_evaluate(body: dict[str, object]) -> dict[str, object]:
+        """Score provider capability probes and return concrete repair actions."""
+        try:
+            probes = [
+                CompatibilityProbe(**dict(item))
+                for item in list(body.get("probes", []))
+            ]
+            result = ProviderCompatibilityLab().evaluate(
+                provider_id=str(body.get("provider_id", "")), probes=probes
+            )
+            return {
+                "provider_id": result.provider_id,
+                "status": result.status,
+                "score": result.score,
+                "passed": result.passed,
+                "total": result.total,
+                "probes": [probe.__dict__ for probe in result.probes],
+                "repairs": [repair.__dict__ for repair in result.repairs],
+            }
+        except (TypeError, ValueError) as exc:
+            raise HTTPException(422, str(exc)) from exc
+
+    @app.post("/v1/console/incidents/events", status_code=201)
+    async def incident_event(body: dict[str, object]) -> dict[str, object]:
+        """Append one privacy-safe event to an incident timeline."""
+        try:
+            evidence = IncidentEvidence(**body)  # type: ignore[arg-type]
+            return incident_store.append(evidence).__dict__
+        except (TypeError, ValueError) as exc:
+            raise HTTPException(422, str(exc)) from exc
+
+    @app.get("/v1/console/incidents/{incident_id}")
+    async def incident_explain(incident_id: str) -> dict[str, object]:
+        """Explain why an incident happened, its impact, and the next fix."""
+        try:
+            return incident_store.explain(incident_id)
+        except KeyError as exc:
+            raise HTTPException(404, "unknown incident") from exc
 
     @app.post("/v1/console/traces", status_code=201)
     async def create_trace(body: dict[str, object]) -> dict[str, object]:
@@ -586,12 +641,13 @@ def create_console_app(
     async def product_audit() -> dict[str, object]:
         return {"audit": extensions.audit()}
 
-
     # Logical routing administration API.
     @app.post("/v1/admin/applications", status_code=201)
     async def admin_create_application(body: dict[str, object]) -> dict[str, object]:
         try:
-            return routing.create_application(str(body.get("name", "")), str(body.get("default_route", "")))
+            return routing.create_application(
+                str(body.get("name", "")), str(body.get("default_route", ""))
+            )
         except ValueError as exc:
             raise HTTPException(422, str(exc)) from exc
 
@@ -618,7 +674,9 @@ def create_console_app(
             raise HTTPException(404, "unknown route") from exc
 
     @app.put("/v1/admin/routes/{route_id}")
-    async def admin_update_route(route_id: str, body: dict[str, object]) -> dict[str, object]:
+    async def admin_update_route(
+        route_id: str, body: dict[str, object]
+    ) -> dict[str, object]:
         try:
             return routing.update_route(route_id, dict(body))
         except KeyError as exc:
@@ -643,8 +701,11 @@ def create_console_app(
             raise HTTPException(422, str(exc)) from exc
 
     @app.post("/v1/admin/routes/{route_id}/simulate")
-    async def admin_simulate_route(route_id: str, body: dict[str, object]) -> dict[str, object]:
+    async def admin_simulate_route(
+        route_id: str, body: dict[str, object]
+    ) -> dict[str, object]:
         from datetime import datetime
+
         try:
             routing.get_route(route_id)
             return routing.simulate(
@@ -674,7 +735,9 @@ def create_console_app(
     @app.post("/v1/admin/priority-routes", status_code=201)
     async def admin_create_priority_route(body: dict[str, object]) -> dict[str, object]:
         try:
-            return priority_routing.create_route(str(body.get("name", "")), list(body.get("targets", [])))
+            return priority_routing.create_route(
+                str(body.get("name", "")), list(body.get("targets", []))
+            )
         except (TypeError, ValueError) as exc:
             raise HTTPException(422, str(exc)) from exc
 
@@ -690,9 +753,13 @@ def create_console_app(
             raise HTTPException(404, "unknown priority route") from exc
 
     @app.put("/v1/admin/priority-routes/{route_id}")
-    async def admin_update_priority_route(route_id: str, body: dict[str, object]) -> dict[str, object]:
+    async def admin_update_priority_route(
+        route_id: str, body: dict[str, object]
+    ) -> dict[str, object]:
         try:
-            return priority_routing.update_route(route_id, str(body.get("name", "")), list(body.get("targets", [])))
+            return priority_routing.update_route(
+                route_id, str(body.get("name", "")), list(body.get("targets", []))
+            )
         except KeyError as exc:
             raise HTTPException(404, "unknown priority route") from exc
         except (TypeError, ValueError) as exc:
@@ -706,8 +773,11 @@ def create_console_app(
             raise HTTPException(404, "unknown priority route") from exc
 
     @app.post("/v1/admin/priority-routes/{route_id}/simulate")
-    async def admin_simulate_priority_route(route_id: str, body: dict[str, object]) -> dict[str, object]:
+    async def admin_simulate_priority_route(
+        route_id: str, body: dict[str, object]
+    ) -> dict[str, object]:
         from datetime import datetime
+
         try:
             route = priority_routing.get_route(route_id)
             return priority_routing.resolve(

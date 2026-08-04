@@ -1,16 +1,9 @@
 ## Features Done (this pass)
-- Scrollable Provider Picker: A fixed-height provider catalog with an always-visible scrollbar keeps every provider reachable on desktop and mobile.
-- Custom Provider Connections: Users can configure arbitrary HTTP model catalogs, authentication headers, extra headers, and response field mappings.
-- Named Provider Accounts: The same provider type can be registered multiple times under unique human-readable names and slugs such as `openai-prod` and `openai-dev`.
-- One Credential per Connection: A named provider connection stores one provider-specific credential set and reuses it for every discovered model.
-- Provider-Adaptive Setup Wizard: OpenAI, Anthropic, Gemini, Azure OpenAI, OpenAI-compatible and Vertex AI connections expose only their relevant fields.
-- Encrypted Provider Secrets: Provider credentials are AES-256-GCM encrypted at rest with a dedicated local master key and are never returned by list or detail APIs.
-- Provider-Native Model Discovery: OpenAI-compatible, OpenAI, Anthropic, Gemini and Azure model-list response formats are normalized into one catalog.
-- Automatic Credential Verification: Saving and model synchronization are separate safe steps with actionable authentication and connection errors.
-- Alias-Prefixed Model IDs: Discovered models are addressed as `@provider-slug/model-id`, so multiple accounts of the same provider remain unambiguous.
-- Persistent Cockpit Provider Store: Cockpit-first startup persists encrypted provider connections, discovered models and the master key under `.gateway-console/`.
-- Route Model Picker Integration: New routes select from models actually discovered from connected provider accounts instead of manually typed or hard-coded models.
-- Provider Catalog UX: Connection cards show alias, provider type, region, health, masked credential state, model count, last sync, errors and expandable model lists.
+- Runaway Cost Firewall Safety workflow: Promotes pre-step cost, token, tool, retry, depth, elapsed-time, and emergency-stop protection as the product's hero safety control.
+- Provider Compatibility Lab: Scores provider capability probes and returns evidence-backed remediation for failed authentication, discovery, streaming, tools, structured output, embeddings, and vision checks.
+- Explain-and-Fix Incident Timeline: Persists redacted incident evidence and returns a chronological why-impact-fix report with outcome-specific recovery guidance.
+- Safety Operations API: Adds compatibility evaluation plus incident evidence creation and explanation endpoints to the unified console OpenAPI surface.
+- React Safety workspace: Adds a responsive, accessible Vite and React user flow with loading, result, empty/error, dark-mode, and mobile states.
 ## Sources
-- research-findings.md items addressed: centralized provider credentials, governed model catalog, low-friction provider onboarding, secure local-first operation, model discovery
-- CHANGELOG.md section this maps to: [13.2.2] - 2026-08-04
+- research-findings.md items addressed: P0 Runaway Cost Firewall, P0 Provider Compatibility Lab and configuration doctor, P0 Explain-and-Fix Incident Timeline
+- CHANGELOG.md section this maps to: [13.3.0] - 2026-08-04

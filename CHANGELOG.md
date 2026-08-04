@@ -502,3 +502,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Ruff: clean.
 - Vite production build: successful.
 - Twenty-three autonomous targeted, regression, build, smoke, and hygiene iterations recorded in `fix-iterations.md`.
+
+## [13.3.0] - 2026-08-04
+
+### Features
+- Added a Provider Compatibility Lab that scores unique capability probes and produces specific repair actions for authentication, discovery, streaming, tools, structured output, embeddings, and vision.
+- Added a privacy-safe Explain-and-Fix Incident Timeline with ordered SQLite evidence, impact, root explanation, and outcome-specific remediation.
+- Promoted the existing Runaway Cost Firewall into a dedicated Safety workflow alongside provider readiness and incident repair.
+- Added three versioned console endpoints for compatibility evaluation and incident event/explanation flows.
+
+### Tests
+- Added TDD unit, boundary, error, secret-redaction, OpenAPI, real SQLite persistence, and ASGI integration coverage.
+- Added a frontend source contract for the complete Safety user journey and rebuilt the production Vite bundle.
+
+### Docs
+- Updated README, API reference, changelog, and the machine-readable feature manifest with the research pain points and implemented differentiators.
