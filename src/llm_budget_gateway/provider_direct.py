@@ -121,6 +121,39 @@ class UpstreamProviderError(Exception):
         self.body = str(body)[:2000]
 
 
+_REASONING_ECHO_MODEL_SUBS = ("deepseek", "kimi", "mimo")
+
+
+def _model_needs_reasoning_echo(model: str) -> bool:
+    """True when the resolved model belongs to a reasoning-echo family.
+
+    DeepSeek v4 thinking, Kimi / Moonshot thinking and Xiaomi MiMo thinking
+    all reject replays of assistant turns that omit ``reasoning_content``
+    (HTTP 400: "The `reasoning_content` in the thinking mode must be passed
+    back to the API"). Clients that talk to a gateway route (e.g. Hermes
+    using a route name like ``hermes-default`` instead of the serving model
+    name) strip the field because they cannot see the model behind the
+    route — so the gateway re-pads assistant turns with a single space,
+    the same convention the Hermes agent uses for this class of providers.
+    """
+    lowered = (model or "").lower()
+    return any(sub in lowered for sub in _REASONING_ECHO_MODEL_SUBS)
+
+
+def _pad_reasoning_content(messages: Any) -> None:
+    """Mutate ``messages`` in place: pad assistant turns lacking the field."""
+    if not isinstance(messages, list):
+        return
+    for msg in messages:
+        if not isinstance(msg, dict):
+            continue
+        if msg.get("role") != "assistant":
+            continue
+        existing = msg.get("reasoning_content")
+        if existing is None:
+            msg["reasoning_content"] = " "
+
+
 @dataclass(frozen=True)
 class ProviderEndpoint:
     """One configured provider connection."""
@@ -327,6 +360,11 @@ class DirectProviderClient:
         # authoritative over anything the client sent.
         if endpoint.extra_body:
             payload.update(endpoint.extra_body)
+        # DeepSeek/Kimi/MiMo thinking mode: assistant turns must carry
+        # reasoning_content or the upstream rejects with HTTP 400. Clients
+        # routing via a route name (not the model name) may strip it.
+        if _model_needs_reasoning_echo(payload.get("model", "")):
+            _pad_reasoning_content(payload.get("messages"))
         try:
             response = await self._client.post(
                 url, json=payload, headers=endpoint.headers()
@@ -375,6 +413,9 @@ class DirectProviderClient:
         # authoritative over anything the client sent.
         if endpoint.extra_body:
             payload.update(endpoint.extra_body)
+        # DeepSeek/Kimi/MiMo thinking mode: pad assistant turns (see forward).
+        if _model_needs_reasoning_echo(payload.get("model", "")):
+            _pad_reasoning_content(payload.get("messages"))
         chunks: list[dict[str, Any]] = []
         served: str = model
         try:

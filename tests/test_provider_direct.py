@@ -360,3 +360,56 @@ class TestForwardStream:
         assert captured["ua"] is not None
         assert captured["ua"].startswith("python-httpx/")
         await client.aclose()
+
+    @pytest.mark.asyncio
+    async def test_reasoning_model_pads_assistant_reasoning_content(self, monkeypatch):
+        """DeepSeek/Kimi/MiMo thinking mode: assistant turns without
+        reasoning_content get a single-space pad so the upstream does not
+        reject the replay with HTTP 400 (clients routing by route name
+        strip the field because they cannot see the serving model)."""
+        monkeypatch.setenv("OPENCODE_GO_API_KEY", "sk-go-123")
+        captured = {}
+
+        def handler(request: httpx.Request) -> httpx.Response:
+            captured["body"] = json.loads(request.content)
+            return _ok_handler(request)
+
+        client = _client(handler)
+        await client.forward(
+            "deepseek-v4-flash",
+            {
+                "model": "deepseek-v4-flash",
+                "messages": [
+                    {"role": "user", "content": "hi"},
+                    {"role": "assistant", "content": "hello"},
+                    {"role": "user", "content": "again"},
+                ],
+            },
+        )
+        msgs = captured["body"]["messages"]
+        assert msgs[1]["reasoning_content"] == " "
+        # user turns untouched
+        assert "reasoning_content" not in msgs[0]
+        await client.aclose()
+
+    @pytest.mark.asyncio
+    async def test_non_reasoning_model_leaves_messages_alone(self, monkeypatch):
+        """Strict providers must not receive a reasoning_content pad."""
+        monkeypatch.setenv("GOOGLE_API_KEY", "sk-google-123")
+        captured = {}
+
+        def handler(request: httpx.Request) -> httpx.Response:
+            captured["body"] = json.loads(request.content)
+            return _ok_handler(request)
+
+        client = _client(handler)
+        await client.forward(
+            "gemini-2.0-flash",
+            {
+                "model": "gemini-2.0-flash",
+                "messages": [{"role": "assistant", "content": "hello"}],
+            },
+        )
+        msgs = captured["body"]["messages"]
+        assert "reasoning_content" not in msgs[0]
+        await client.aclose()
