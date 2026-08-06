@@ -31,6 +31,7 @@ CREATE TABLE IF NOT EXISTS cost_records (
     total_cost REAL NOT NULL,
     latency_ms INTEGER NOT NULL,
     status TEXT NOT NULL,
+    status_code INTEGER,
     timestamp INTEGER NOT NULL,
     tool_name TEXT,
     project TEXT,
@@ -83,6 +84,7 @@ class UsageRecord:
     tool_name: str | None = None  # e.g. "server_id:tool_name" for MCP tool calls
     project: str | None = None  # project scope key when attribution is project-scoped
     route: str | None = None  # logical route name that served this request
+    status_code: int | None = None  # HTTP status when status != "success"
 
 
 def accumulate_usage(chunks: list[dict]) -> TokenUsage:
@@ -175,6 +177,13 @@ class CostStore:
             self._conn.execute(_CREATE_TABLE)
             self._conn.execute(_CREATE_COOLDOWN_TABLE)
             self._migrate_legacy_schema()
+            # Additive migrations for pre-existing databases.
+            try:
+                self._conn.execute(
+                    "ALTER TABLE cost_records ADD COLUMN status_code INTEGER"
+                )
+            except sqlite3.OperationalError:
+                pass  # column already exists
             self._conn.execute(
                 "CREATE INDEX IF NOT EXISTS idx_cost_records_timestamp "
                 "ON cost_records (timestamp)"
@@ -215,8 +224,9 @@ class CostStore:
                     request_id, api_key, user_id, team, model, provider,
                     prompt_tokens, completion_tokens, total_tokens,
                     input_cost, output_cost, total_cost,
-                    latency_ms, status, timestamp, tool_name, project, route
-                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    latency_ms, status, status_code, timestamp,
+                    tool_name, project, route
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 """,
                 (
                     record.request_id,
@@ -233,6 +243,7 @@ class CostStore:
                     record.total_cost,
                     record.latency_ms,
                     record.status,
+                    record.status_code,
                     record.timestamp,
                     record.tool_name,
                     record.project,
@@ -321,7 +332,8 @@ class CostStore:
             call_rows = self._conn.execute(
                 """
                 SELECT request_id, model, route, prompt_tokens, completion_tokens,
-                       total_tokens, total_cost, status, timestamp, latency_ms
+                       total_tokens, total_cost, status, timestamp, latency_ms,
+                       status_code
                 FROM cost_records
                 WHERE timestamp >= ?
                 ORDER BY timestamp DESC
@@ -362,6 +374,7 @@ class CostStore:
                     "status": r[7],
                     "timestamp": int(r[8] or 0),
                     "latency_ms": int(r[9] or 0),
+                    "status_code": int(r[10]) if r[10] is not None else None,
                 }
                 for r in calls
             ],
@@ -480,7 +493,8 @@ class CostStore:
             call_rows = self._conn.execute(
                 """
                 SELECT request_id, model, route, prompt_tokens, completion_tokens,
-                       total_tokens, total_cost, status, timestamp, latency_ms
+                       total_tokens, total_cost, status, timestamp, latency_ms,
+                       status_code
                 FROM cost_records
                 WHERE timestamp >= ?
                 ORDER BY timestamp DESC
@@ -522,6 +536,7 @@ class CostStore:
                     "status": r[7],
                     "timestamp": int(r[8] or 0),
                     "latency_ms": int(r[9] or 0),
+                    "status_code": int(r[10]) if r[10] is not None else None,
                 }
                 for r in calls
             ],
@@ -608,6 +623,7 @@ class CostTracker:
         latency_ms: int,
         status: str,
         route: str | None = None,
+        status_code: int | None = None,
     ) -> UsageRecord:
         """Assemble a UsageRecord, computing costs from usage (zero when None)."""
         if usage is not None:
@@ -635,6 +651,7 @@ class CostTracker:
             total_cost=total_cost,
             latency_ms=latency_ms,
             status=status,
+            status_code=status_code,
             timestamp=int(time.time()),
             route=route,
         )

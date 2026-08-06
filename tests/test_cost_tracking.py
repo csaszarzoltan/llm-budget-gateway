@@ -133,6 +133,7 @@ class TestUsageRecordInterface:
             "tool_name",
             "project",
             "route",
+            "status_code",
         }
 
     def test_constructible(self) -> None:
@@ -256,6 +257,7 @@ class TestCostTrackerInterface:
             "latency_ms",
             "status",
             "route",
+            "status_code",
         ]
         for name in (
             "request_id",

@@ -319,6 +319,7 @@ class GatewayProxy:
                 usage=None,
                 latency_ms=0,
                 status="timeout",
+                status_code=502,
             )
             return self._error_response(502, "upstream provider timed out", model)
         except Exception as exc:
@@ -335,6 +336,7 @@ class GatewayProxy:
                 usage=None,
                 latency_ms=0,
                 status="error",
+                status_code=502,
             )
             return self._error_response(502, "upstream provider error", model)
 
@@ -604,6 +606,7 @@ class GatewayProxy:
                 latency_ms=response.latency_ms,
                 status="success" if response.status_code < 400 else "error",
                 route=route_name,
+                status_code=response.status_code,
             )
             cost = float(getattr(record, "total_cost", 0.0))
             result = self._cost_tracker.record(record)
@@ -1108,6 +1111,7 @@ class GatewayProxy:
         usage: TokenUsage | None,
         latency_ms: int,
         status: str,
+        status_code: int | None = None,
     ) -> None:
         """Best-effort cost record; tolerates non-awaitable tracker doubles.
 
@@ -1126,6 +1130,7 @@ class GatewayProxy:
                 usage=usage,
                 latency_ms=latency_ms,
                 status=status,
+                status_code=status_code,
             )
             result = self._cost_tracker.record(usage_record)
             if inspect.isawaitable(result):
