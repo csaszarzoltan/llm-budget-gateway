@@ -382,10 +382,17 @@ class DirectProviderClient:
                 "POST", url, json=payload, headers=endpoint.headers()
             ) as response:
                 if response.status_code >= 400:
+                    body_text = ""
+                    try:
+                        body_text = (await response.aread()).decode(
+                            "utf-8", errors="replace"
+                        )[:2000]
+                    except Exception:
+                        body_text = ""
                     raise UpstreamProviderError(
                         response.status_code,
                         f"upstream provider error: {endpoint.name} (HTTP {response.status_code})",
-                        body=response.text[:2000],
+                        body=body_text,
                     )
                 async for line in response.aiter_lines():
                     line = line.strip()

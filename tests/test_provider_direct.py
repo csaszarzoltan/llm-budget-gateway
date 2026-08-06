@@ -252,6 +252,8 @@ class TestForwardStream:
                 "deepseek-v4-flash", {"model": "deepseek-v4-flash", "stream": True}
             )
         assert exc_info.value.status_code == 429
+        # the real provider error body survives (was swallowed pre-fix)
+        assert "rate limited" in exc_info.value.body
         await client.aclose()
 
     @pytest.mark.asyncio
