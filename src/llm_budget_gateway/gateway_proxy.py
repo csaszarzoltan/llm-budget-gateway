@@ -12,6 +12,7 @@ import asyncio
 import inspect
 import json
 import logging
+import random
 import time
 from collections.abc import Callable
 from dataclasses import dataclass
@@ -321,7 +322,7 @@ class GatewayProxy:
             except Exception:
                 route = None
         if route is not None:
-            decision = self._resolve_targets(route, capabilities)
+            decision = self._resolve_targets(route, capabilities, body=body)
             if decision is None:
                 return self._error_response(422, "no eligible route target", alias)
             candidates = decision["candidates"]
@@ -466,14 +467,18 @@ class GatewayProxy:
         return response
 
     def _resolve_targets(
-        self, route: dict, capabilities: list[str]
+        self, route: dict, capabilities: list[str], body: dict | None = None
     ) -> dict | None:
         """Pick the first eligible target of a UI route at the current instant.
 
         Mirrors ProductConsoleStore.test_route: a target is eligible when the
-        current time in its timezone falls inside its start/end window and its
-        required capabilities are satisfied. Returns ordered candidates plus
-        the union of the on_status_codes fallback statuses.
+        current time in its timezone falls inside its start/end window, its
+        required capabilities are satisfied, its metadata condition (if any)
+        matches the request, and the estimated request cost stays under its
+        ``max_cost_usd`` ceiling. Targets with ``mode: weighted`` (or an
+        explicit ``weight``) are chosen proportionally to their weight, then
+        ordered by weight for the fallback walk. Returns ordered candidates
+        plus the union of the on_status_codes fallback statuses.
         """
         now = self._routing_now()
         eligible: list[dict] = []
@@ -487,15 +492,34 @@ class GatewayProxy:
                 start <= clock < end if start < end else clock >= start or clock < end
             )
             reason = None if inside else "outside_schedule"
-            if not set(target.get("required_capabilities", [])).issubset(capabilities):
+            if reason is None and not set(
+                target.get("required_capabilities", [])
+            ).issubset(capabilities):
                 reason = "missing_capabilities"
+            if reason is None:
+                reason = self._condition_reason(target, body)
+            if reason is None:
+                reason = self._budget_gate_reason(target, body)
             if reason:
                 excluded.append(f"{target.get('model')} ({reason})")
             else:
                 eligible.append(target)
         if not eligible:
             return None
-        ordered = sorted(eligible, key=lambda t: int(t.get("priority", 100)))
+        has_weighted = any(
+            t.get("mode") == "weighted" or t.get("weight") is not None
+            for t in eligible
+        )
+        if has_weighted:
+            weights = [
+                max(0.0, float(t.get("weight", 10) or 10)) for t in eligible
+            ]
+            chosen = random.choices(eligible, weights=weights, k=1)[0]
+            rest = [t for t in eligible if t is not chosen]
+            rest.sort(key=lambda t: -max(0.0, float(t.get("weight", 10) or 10)))
+            ordered = [chosen] + rest
+        else:
+            ordered = sorted(eligible, key=lambda t: int(t.get("priority", 100)))
         statuses: set[int] = set()
         for target in ordered:
             for code in target.get("on_status_codes", [408, 409, 425, 429, 500, 502, 503, 504]):
@@ -512,6 +536,55 @@ class GatewayProxy:
                 for t in ordered
             },
         }
+
+    @staticmethod
+    def _condition_reason(target: dict, body: dict | None) -> str | None:
+        """Eligibility by request metadata condition.
+
+        The UI stores ``condition: {field, operator, value}`` on a target
+        (field like ``metadata.plan``). A target without a condition is always
+        eligible; with one, it only serves requests whose metadata matches.
+        """
+        cond = target.get("condition")
+        if not cond or not isinstance(cond, dict):
+            return None
+        metadata: dict = {}
+        if body and isinstance(body.get("metadata"), dict):
+            metadata = body["metadata"]
+        field = str(cond.get("field", ""))
+        key = field[len("metadata."):] if field.startswith("metadata.") else field
+        got = metadata.get(key)
+        op = str(cond.get("operator", "equals"))
+        want = cond.get("value")
+        if op == "equals":
+            ok = got == want
+        elif op == "not_equals":
+            ok = got != want
+        elif op == "contains":
+            ok = want is not None and str(want) in str(got or "")
+        else:
+            ok = True
+        return None if ok else "condition_mismatch"
+
+    def _budget_gate_reason(self, target: dict, body: dict | None) -> str | None:
+        """Exclude a target whose estimated request cost exceeds its
+        ``max_cost_usd`` per-request ceiling (budget gate)."""
+        ceiling = target.get("max_cost_usd")
+        if ceiling is None or not body:
+            return None
+        try:
+            max_out = body.get("max_completion_tokens", body.get("max_tokens", 0))
+            if isinstance(max_out, bool) or not isinstance(max_out, int) or max_out < 0:
+                max_out = 0
+            input_tokens = self._fallback_manager.estimate_tokens(body)
+            _, _, total = self._cost_tracker.estimate_cost(
+                str(target.get("model", "")), input_tokens, int(max_out)
+            )
+            if total > float(ceiling):
+                return "budget_gate"
+        except Exception:
+            pass
+        return None
 
     async def _forward_direct(
         self, model: str, body: dict, stream: bool = False

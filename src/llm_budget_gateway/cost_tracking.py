@@ -497,6 +497,13 @@ class CostTracker:
             route=route,
         )
 
+    def estimate_cost(
+        self, model: str, input_tokens: int, max_output_tokens: int
+    ) -> tuple[float, float, float]:
+        """Upper-bound cost estimate (input, output, total) for a model plus a
+        request size. Used by the proxy for per-target budget gates."""
+        return self._calculator.calculate(model, input_tokens, max_output_tokens)
+
     def daily_usage(
         self,
         days: int = 14,

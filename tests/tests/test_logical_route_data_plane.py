@@ -530,3 +530,126 @@ def test_sticky_binding_expires_after_ttl() -> None:
     # fresh binding is kept
     proxy._set_sticky("conv-10", "m2")
     assert proxy._get_sticky("conv-10") == "m2"
+
+
+# --- condition / traffic split / budget gate -----------------------------
+
+
+def _plain_proxy(store: Mock, tracker: Mock) -> GatewayProxy:
+    """Shared proxy scaffold for UI-route flow-feature tests."""
+    enforcer = Mock()
+    enforcer.check_sync.return_value = None
+    enforcer.check_hard = AsyncMock(return_value=None)
+    tracker.model_in_cooldown.return_value = 0
+    tracker.build_record.return_value = SimpleNamespace(total_cost=0.0)
+    tracker.record = AsyncMock(return_value=None)
+    proxy = GatewayProxy(Settings(virtual_keys={}), tracker, enforcer, Mock())
+    proxy.attach_product_console(store)
+    return proxy
+
+
+@pytest.mark.asyncio
+async def test_proxy_condition_target_requires_matching_metadata() -> None:
+    """A target with a metadata condition only serves matching requests."""
+    store = ui_route_store()
+    store.published_route_by_name.return_value["targets"][0]["condition"] = {
+        "field": "metadata.plan",
+        "operator": "equals",
+        "value": "premium",
+    }
+    proxy = _plain_proxy(store, Mock())
+    proxy.forward = AsyncMock(
+        return_value=ProviderResponse(
+            200, {"choices": []}, {}, "@opencode-go/deepseek-flash", None, 9
+        )
+    )
+    # No matching metadata -> conditional target excluded, fallback serves.
+    result = await proxy.handle_chat_completion(
+        {"model": "hermes-default", "messages": [{"role": "user", "content": "hi"}]},
+        "gw_key",
+        {},
+    )
+    assert result.status_code == 200
+    assert proxy.forward.await_args.args[0] == "@opencode-go/deepseek-flash"
+
+    # Matching metadata -> the conditional target is picked first.
+    proxy.forward = AsyncMock(
+        return_value=ProviderResponse(
+            200, {"choices": []}, {}, "@opencode-zen/mimo-free", None, 9
+        )
+    )
+    result = await proxy.handle_chat_completion(
+        {
+            "model": "hermes-default",
+            "messages": [{"role": "user", "content": "hi"}],
+            "metadata": {"plan": "premium"},
+        },
+        "gw_key",
+        {},
+    )
+    assert result.status_code == 200
+    assert proxy.forward.await_args.args[0] == "@opencode-zen/mimo-free"
+
+
+@pytest.mark.asyncio
+async def test_proxy_budget_gate_skips_target_over_cost_ceiling() -> None:
+    """A target whose estimated request cost exceeds max_cost_usd is skipped."""
+    store = ui_route_store()
+    store.published_route_by_name.return_value["targets"][0]["max_cost_usd"] = 0.001
+    tracker = Mock()
+    tracker.estimate_cost.side_effect = (
+        lambda model, it, mo: (0.0, 5.0, 5.0) if "mimo" in model else (0.0, 0.0001, 0.0001)
+    )
+    proxy = _plain_proxy(store, tracker)
+    proxy.forward = AsyncMock(
+        return_value=ProviderResponse(
+            200, {"choices": []}, {}, "@opencode-go/deepseek-flash", None, 9
+        )
+    )
+    result = await proxy.handle_chat_completion(
+        {
+            "model": "hermes-default",
+            "messages": [{"role": "user", "content": "hi"}],
+            "max_tokens": 1000,
+        },
+        "gw_key",
+        {},
+    )
+    assert result.status_code == 200
+    proxy.forward.assert_awaited_once()
+    assert proxy.forward.await_args.args[0] == "@opencode-go/deepseek-flash"
+
+
+@pytest.mark.asyncio
+async def test_proxy_weighted_split_picks_target_proportionally(monkeypatch) -> None:
+    """Weighted targets are chosen via random.choices using their weights."""
+    import llm_budget_gateway.gateway_proxy as gp
+
+    store = ui_route_store()
+    targets = store.published_route_by_name.return_value["targets"]
+    for t in targets:
+        t["mode"] = "weighted"
+    targets[0]["weight"] = 10  # mimo
+    targets[1]["weight"] = 90  # deepseek
+    seen: list[tuple[list[str], list[float]]] = []
+
+    def fake_choices(population, weights, k):
+        seen.append(([str(p["model"]) for p in population], list(weights)))
+        return [population[1]]  # always pick the 90-weight target
+
+    monkeypatch.setattr(gp.random, "choices", fake_choices)
+    proxy = _plain_proxy(store, Mock())
+    proxy.forward = AsyncMock(
+        return_value=ProviderResponse(
+            200, {"choices": []}, {}, "@opencode-go/deepseek-flash", None, 9
+        )
+    )
+    result = await proxy.handle_chat_completion(
+        {"model": "hermes-default", "messages": [{"role": "user", "content": "hi"}]},
+        "gw_key",
+        {},
+    )
+    assert result.status_code == 200
+    assert seen, "random.choices was not consulted for weighted split"
+    assert seen[0][1] == [10.0, 90.0]
+    assert proxy.forward.await_args.args[0] == "@opencode-go/deepseek-flash"
