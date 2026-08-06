@@ -123,6 +123,7 @@ class ProviderEndpoint:
     auth: str = "bearer"
     models: tuple[str, ...] = field(default_factory=tuple)
     api_key_value: str | None = None  # direct key (vault), bypasses env
+    user_agent: str | None = None  # client-emulation User-Agent for upstream
 
     def api_key(self) -> str:
         """Read the API key from the vault value or the environment."""
@@ -139,10 +140,17 @@ class ProviderEndpoint:
         """Auth headers for this endpoint."""
         key = self.api_key()
         if self.auth == "x-api-key":
-            return {"x-api-key": key}
-        if self.auth == "query":
-            return {}
-        return {"Authorization": f"Bearer {key}"}
+            headers = {"x-api-key": key}
+        elif self.auth == "query":
+            headers = {}
+        else:
+            headers = {"Authorization": f"Bearer {key}"}
+        # Client emulation: some gateways (e.g. opencode.ai/zen) serve their
+        # own CLI with a larger context window than generic httpx clients.
+        # Setting the upstream-expected User-Agent unlocks the same limits.
+        if self.user_agent:
+            headers["User-Agent"] = self.user_agent
+        return headers
 
     def url(self, path: str) -> str:
         """Absolute URL for ``path`` (e.g. ``/chat/completions``)."""
@@ -206,6 +214,7 @@ class DirectProviderClient:
                 auth=auth,
                 models=models,
                 api_key_value=raw.get("api_key") or None,
+                user_agent=raw.get("user_agent") or None,
             )
             self._registry[name] = endpoint
             for model in models:

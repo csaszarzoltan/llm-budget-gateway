@@ -161,6 +161,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
                     "base_url": base_url,
                     "api_key_env": f"__vault_{slug}__",  # unused: key passed directly
                     "api_key": str(secret.get("api_key", "")),
+                    "user_agent": str(secret.get("user_agent", "")).strip() or None,
                     "models": models,
                 }
             if registry:

@@ -309,3 +309,52 @@ class TestForwardStream:
         assert captured["body"]["model"] == "deepseek-v4-flash"
         assert captured["body"]["stream"] is True
         await client.aclose()
+
+
+    @pytest.mark.asyncio
+    async def test_user_agent_emulation_header_sent(self, monkeypatch):
+        """Client-emulation User-Agent must reach the upstream request."""
+        monkeypatch.setenv("OPENCODE_ZEN_API_KEY", "sk-zen-123")
+        captured = {}
+
+        def handler(request: httpx.Request) -> httpx.Response:
+            captured["ua"] = request.headers.get("user-agent")
+            return _ok_handler(request)
+
+        registry = {
+            "opencode-go": {
+                "base_url": "https://opencode.ai/zen/go/v1",
+                "api_key_env": "OPENCODE_ZEN_API_KEY",
+                "user_agent": "opencode/1.14.41",
+                "models": ["deepseek-v4-flash"],
+            }
+        }
+        client = _client(handler, registry)
+        status, data, served = await client.forward(
+            "deepseek-v4-flash",
+            {"model": "deepseek-v4-flash", "messages": [{"role": "user", "content": "hi"}]},
+        )
+        assert status == 200
+        assert captured["ua"] == "opencode/1.14.41"
+        await client.aclose()
+
+    @pytest.mark.asyncio
+    async def test_default_user_agent_is_httpx_when_not_configured(self, monkeypatch):
+        """Without a configured user_agent httpx's own UA is sent (the
+        upstream-visible identity that motivated client emulation)."""
+        monkeypatch.setenv("OPENCODE_ZEN_API_KEY", "sk-zen-123")
+        captured = {}
+
+        def handler(request: httpx.Request) -> httpx.Response:
+            captured["ua"] = request.headers.get("user-agent")
+            return _ok_handler(request)
+
+        client = _client(handler)  # REGISTRY has no user_agent
+        status, data, served = await client.forward(
+            "mimo-v2.5-free",
+            {"model": "mimo-v2.5-free", "messages": [{"role": "user", "content": "hi"}]},
+        )
+        assert status == 200
+        assert captured["ua"] is not None
+        assert captured["ua"].startswith("python-httpx/")
+        await client.aclose()

@@ -86,6 +86,12 @@ PROVIDER_TYPES: list[dict[str, Any]] = [
         "fields": [
             {"name": "api_key", "label": "API key", "type": "secret", "required": True},
             {"name": "base_url", "label": "Base URL", "type": "url", "required": True},
+            {
+                "name": "user_agent",
+                "label": "Client user-agent (emulation)",
+                "type": "text",
+                "required": False,
+            },
         ],
     },
     {
@@ -101,6 +107,7 @@ PROVIDER_TYPES: list[dict[str, Any]] = [
             {"name": "auth_header", "label": "Authentication header", "type": "text", "required": False},
             {"name": "auth_prefix", "label": "Authentication prefix", "type": "text", "required": False},
             {"name": "extra_headers_json", "label": "Extra headers JSON", "type": "text", "required": False},
+            {"name": "user_agent", "label": "Client user-agent (emulation)", "type": "text", "required": False},
             {"name": "models_field", "label": "Models array field", "type": "text", "required": True},
             {"name": "model_id_field", "label": "Model ID field", "type": "text", "required": True},
         ],
