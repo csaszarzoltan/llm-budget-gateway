@@ -321,7 +321,7 @@ CREATE TABLE IF NOT EXISTS provider_models(provider_id TEXT NOT NULL,model_id TE
     def models(self, provider_id: str) -> list[dict[str, Any]]:
         provider = self.get(provider_id)
         rows = self.db.execute(
-            "SELECT model_id,display_name,owned_by,capabilities,last_seen FROM provider_models WHERE provider_id=? ORDER BY model_id",
+            "SELECT model_id,display_name,owned_by,capabilities,raw_json,last_seen FROM provider_models WHERE provider_id=? ORDER BY model_id",
             (provider_id,),
         ).fetchall()
         return [
@@ -330,7 +330,8 @@ CREATE TABLE IF NOT EXISTS provider_models(provider_id TEXT NOT NULL,model_id TE
                 "display_name": r[1],
                 "owned_by": r[2],
                 "capabilities": json.loads(r[3]),
-                "last_seen": r[4],
+                "context_length": _extract_context_length(json.loads(r[4])),
+                "last_seen": r[5],
                 "gateway_model": f"@{provider['slug']}/{r[0]}",
             }
             for r in rows
@@ -479,6 +480,37 @@ def _capabilities(model_id: str, raw: dict[str, Any] | None = None) -> list[str]
     if "embed" in text:
         caps = ["embeddings"]
     return sorted(set(caps))
+
+
+def _extract_context_length(raw: dict[str, Any] | None) -> int | None:
+    """Pull a concrete context window from a provider's model entry.
+
+    Provider model-list endpoints use a variety of field names; accept the
+    common ones (context_length, max_context_length, context_window,
+    max_model_len, ctx_len). Returns None when the provider did not publish
+    a window for this model — the client then falls back to its own
+    registry or leaves the target at "auto".
+    """
+    if not isinstance(raw, dict):
+        return None
+    for key in (
+        "context_length",
+        "max_context_length",
+        "context_window",
+        "max_model_len",
+        "ctx_len",
+        "contextSize",
+    ):
+        value = raw.get(key)
+        if value is None:
+            continue
+        try:
+            parsed = int(value)
+        except (TypeError, ValueError):
+            continue
+        if parsed > 0:
+            return parsed
+    return None
 
 
 def _now() -> str:
