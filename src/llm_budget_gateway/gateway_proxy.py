@@ -432,6 +432,13 @@ class GatewayProxy:
         if sticky_model is not None:
             candidates = [sticky_model]
             fallback = "sticky_session"
+        logger.info(
+            "request=%s route=%s candidates=%s sticky=%s",
+            request_id,
+            route_name,
+            ",".join(candidates),
+            sticky_model or "-",
+        )
         for index, candidate in enumerate(candidates):
             is_last = index + 1 >= len(candidates)
             remaining = 0
@@ -547,6 +554,20 @@ class GatewayProxy:
                     response.status_code == 400
                     and _is_context_error(response.body)
                 ):
+                    if response.status_code >= 400:
+                        # Non-fallback provider error returned to the client —
+                        # must be visible in the log or these failures stay
+                        # silent (e.g. 405 Method Not Allowed).
+                        logger.warning(
+                            "route=%s model=%s non-fallback error status=%s "
+                            "request=%s latency=%sms body=%s",
+                            route_name,
+                            candidate,
+                            response.status_code,
+                            request_id,
+                            response.latency_ms,
+                            str(response.body)[:400],
+                        )
                     served = candidate
                     break
                 # Some providers report context-window overflow as 400 with a
@@ -614,6 +635,15 @@ class GatewayProxy:
                 await result
         except Exception:
             logger.exception("product route cost record failed request=%s", request_id)
+        logger.info(
+            "request=%s route=%s served=%s status=%s fallback=%s latency=%sms",
+            request_id,
+            route_name,
+            served or response.model,
+            response.status_code,
+            fallback or "-",
+            response.latency_ms,
+        )
         if response.status_code < 400 and self._product_console is not None:
             try:
                 self._product_console.record_request(

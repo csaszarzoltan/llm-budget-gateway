@@ -31,12 +31,36 @@ from .model_fallback import FallbackConfig, FallbackManager
 from .routing_control_plane import RoutingControlPlane
 
 
+def _setup_gateway_logging() -> None:
+    """Make gateway INFO logs visible in the service-managed log file.
+
+    uvicorn's LOGGING_CONFIG only configures its own loggers: the root logger
+    keeps Python's default WARNING level AND no handler, so every gateway INFO
+    log (request routing, served decisions, fallbacks) would be silently
+    dropped. Attach a stderr handler to the ``llm_budget_gateway`` logger —
+    the service manager redirects that stderr to
+    ``.gateway-console/logs/gateway.log`` — and stop propagation to avoid
+    duplicate lines via the root's WARNING+ last-resort handler.
+    """
+    gw = logging.getLogger("llm_budget_gateway")
+    if gw.handlers:
+        return
+    gw.setLevel(logging.INFO)
+    gw.propagate = False
+    handler = logging.StreamHandler()
+    handler.setFormatter(
+        logging.Formatter("%(asctime)s %(levelname)s %(name)s %(message)s")
+    )
+    gw.addHandler(handler)
+
+
 def create_app(settings: Settings | None = None) -> FastAPI:
     """Wire Settings -> PriceMap -> CostTracker -> BudgetEnforcer ->
     FallbackManager -> GatewayProxy and return the app with the gateway routes
     mounted (POST /v1/chat/completions, /v1/completions, /v1/embeddings,
     GET /v1/models, GET /health).
     """
+    _setup_gateway_logging()
     settings = settings or Settings()
 
     price_map = PriceMap(
