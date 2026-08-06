@@ -208,30 +208,23 @@ def create_app(settings: Settings | None = None) -> FastAPI:
 
     @app.get("/v1/models")
     async def list_models() -> JSONResponse:
-        # The listing mirrors exactly what the request path will serve:
-        # gateway-configured models (pricing overrides + fallback chains),
-        # published UI-managed routes (pc_routes) as first-class model
-        # names ("hermes-default" / "hermes-planner"), and the concrete
-        # provider models each route target points at. The full litellm
-        # catalog is intentionally NOT included: clients like Hermes use
-        # this endpoint for the interactive model picker, and thousands
-        # of catalog entries would drown the handful of actually-servable
-        # models (the request path still accepts any litellm-known model
-        # via _model_known — only the listing is narrowed).
-        models: set[str] = set(settings.pricing_overrides)
-        for cfg in fallback_configs:
-            models.add(cfg.model)
-            models.update(cfg.chain)
+        # Only published UI-managed routes (pc_routes) are exposed as
+        # first-class model names ("hermes-default" / "hermes-planner") —
+        # one route per model. Target provider models are intentionally
+        # NOT listed: they are internal fallback details; the route decides
+        # which target serves a request. The full litellm catalog and the
+        # legacy fallback configs are excluded for the same reason, so the
+        # interactive model picker in clients like Hermes shows exactly the
+        # handful of route names a user can actually select. The request
+        # path is unchanged (_model_known still accepts litellm-known
+        # models — only the listing is narrowed).
+        models: set[str] = set()
         product = getattr(proxy, "_product_console", None)
         if product is not None:
             try:
                 for route in product.routes():
                     if route.get("status") in {"active", "published"}:
                         models.add(str(route.get("name", "")))
-                        for target in route.get("targets", []):
-                            target_model = target.get("model")
-                            if target_model:
-                                models.add(str(target_model))
             except Exception:
                 logger.exception("failed to list UI-managed routes as models")
         return JSONResponse(
