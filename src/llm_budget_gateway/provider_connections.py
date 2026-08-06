@@ -320,14 +320,16 @@ CREATE TABLE IF NOT EXISTS provider_models(provider_id TEXT NOT NULL,model_id TE
                 (provider_id,),
             ).fetchone()[0],
         }
-        # base_url is not secret material — expose it so the UI can prefill
-        # the edit form without ever round-tripping the api_key.
+        # base_url / user_agent are not secret material — expose them so the
+        # UI can show and prefill the edit form without ever round-tripping
+        # the api_key.
         try:
-            result["base_url"] = self.connection_secret(provider_id).get(
-                "base_url", ""
-            )
+            secret = self.connection_secret(provider_id)
+            result["base_url"] = secret.get("base_url", "")
+            result["user_agent"] = secret.get("user_agent", "")
         except Exception:
             result["base_url"] = ""
+            result["user_agent"] = ""
         return result
 
     def list(self) -> list[dict[str, Any]]:

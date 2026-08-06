@@ -395,3 +395,23 @@ def test_update_unknown_provider_raises_key_error(
 ) -> None:
     with pytest.raises(KeyError):
         store.update("provider_does_not_exist", {"name": "X"})
+
+
+def test_get_exposes_user_agent_and_base_url_without_secret(
+    store: ProviderConnectionStore,
+) -> None:
+    created = store.create(
+        {
+            "name": "OpenAI Production",
+            "slug": "openai-prod",
+            "provider_type": "openai_compatible",
+            "api_key": "sk-hidden",
+            "base_url": "https://api.openai.com/v1",
+            "user_agent": "opencode/1.14.41",
+        }
+    )
+    item = store.get(created["id"])
+    assert item["base_url"] == "https://api.openai.com/v1"
+    assert item["user_agent"] == "opencode/1.14.41"
+    assert "api_key" not in item
+    assert "sk-hidden" not in str(item)
