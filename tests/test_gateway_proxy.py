@@ -831,3 +831,128 @@ class TestCreateAppBehavior:
             {},
         )
         assert result.status_code == 502
+
+    @pytest.mark.asyncio
+    async def test_product_route_400_context_error_falls_back(
+        self, settings: Settings, mocker
+    ) -> None:
+        """A 400 whose body says 'maximum context length' must walk to the
+        next target (some providers report overflow as 400, not 413/422),
+        and the timed-out target must NOT be cooled down."""
+        store = Mock()
+        store.published_route_by_name.return_value = {
+            "name": "hermes-default",
+            "targets": [
+                {
+                    "model": "@a/small",
+                    "priority": 10,
+                    "timeout_seconds": 15,
+                    "on_status_codes": [429, 500],
+                },
+                {
+                    "model": "@b/big",
+                    "priority": 20,
+                    "timeout_seconds": 30,
+                    "on_status_codes": [429, 500],
+                },
+            ],
+        }
+        tracker = Mock()
+        tracker.model_in_cooldown.return_value = 0
+        tracker.build_record.return_value = SimpleNamespace(total_cost=0.0)
+        proxy = GatewayProxy(
+            settings=settings,
+            cost_tracker=tracker,
+            budget_enforcer=Mock(),
+            fallback_manager=FallbackManager([]),
+        )
+        proxy.attach_product_console(store)
+
+        async def _forward(
+            model: str,
+            body: dict,
+            stream: bool = False,
+            timeout: float | None = None,
+        ):
+            if model == "@a/small":
+                return ProviderResponse(
+                    400,
+                    {"error": {"message": "maximum context length exceeded"}},
+                    {},
+                    model,
+                    None,
+                    5,
+                )
+            return ProviderResponse(200, {}, {}, model, None, 5)
+
+        proxy.forward = AsyncMock(side_effect=_forward)  # type: ignore[method-assign]
+        result = await proxy.handle_chat_completion(
+            {
+                "model": "hermes-default",
+                "messages": [{"role": "user", "content": "hi"}],
+            },
+            "sk_test_abc",
+            {},
+        )
+        assert result.status_code == 200
+        assert result.model == "@b/big"
+        # overflow is NOT a provider outage -> no cooldown for the 400 target
+        assert not tracker.set_model_cooldown.called
+
+    @pytest.mark.asyncio
+    async def test_product_route_400_plain_error_does_not_fallback(
+        self, settings: Settings, mocker
+    ) -> None:
+        """A plain 400 (no context error) is a client error: surface it,
+        do not walk the chain."""
+        store = Mock()
+        store.published_route_by_name.return_value = {
+            "name": "hermes-default",
+            "targets": [
+                {
+                    "model": "@a/small",
+                    "priority": 10,
+                    "timeout_seconds": 15,
+                    "on_status_codes": [429, 500],
+                },
+                {
+                    "model": "@b/big",
+                    "priority": 20,
+                    "timeout_seconds": 30,
+                    "on_status_codes": [429, 500],
+                },
+            ],
+        }
+        tracker = Mock()
+        tracker.model_in_cooldown.return_value = 0
+        tracker.build_record.return_value = SimpleNamespace(total_cost=0.0)
+        proxy = GatewayProxy(
+            settings=settings,
+            cost_tracker=tracker,
+            budget_enforcer=Mock(),
+            fallback_manager=FallbackManager([]),
+        )
+        proxy.attach_product_console(store)
+
+        async def _forward(
+            model: str,
+            body: dict,
+            stream: bool = False,
+            timeout: float | None = None,
+        ):
+            return ProviderResponse(
+                400, {"error": {"message": "invalid prompt format"}}, {}, model, None, 5
+            )
+
+        proxy.forward = AsyncMock(side_effect=_forward)  # type: ignore[method-assign]
+        result = await proxy.handle_chat_completion(
+            {
+                "model": "hermes-default",
+                "messages": [{"role": "user", "content": "hi"}],
+            },
+            "sk_test_abc",
+            {},
+        )
+        assert result.status_code == 400
+        # the fallback was never attempted for a plain client error
+        assert [c.args[0] for c in proxy.forward.call_args_list] == ["@a/small"]

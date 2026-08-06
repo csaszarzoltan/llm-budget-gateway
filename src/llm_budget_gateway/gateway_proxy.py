@@ -98,6 +98,42 @@ class ProviderTimeoutError(TimeoutError):
     """
 
 
+def _is_context_error(body: dict | str | list) -> bool:
+    """True when a 400 error body signals context-window overflow.
+
+    OpenAI-compatible providers usually answer "maximum context length"
+    / "too many tokens" as a 400 with an ``error.message`` body (instead
+    of 413/422), so the route loop treats those as fallback-eligible.
+    """
+    text = ""
+    if isinstance(body, dict):
+        err = body.get("error")
+        if isinstance(err, dict):
+            text = str(err.get("message", ""))
+        elif isinstance(err, str):
+            text = err
+        if not text:
+            text = str(body)
+    elif isinstance(body, str):
+        text = body
+    text = text.lower()
+    return any(
+        key in text
+        for key in (
+            "context length",
+            "context_length",
+            "maximum context",
+            "max context",
+            "too many tokens",
+            "token limit",
+            "exceeds the maximum",
+            "input is too long",
+            "requested context",
+            "context window",
+        )
+    )
+
+
 @dataclass
 class ProviderResponse:
     status_code: int
@@ -505,8 +541,26 @@ class GatewayProxy:
                 )
                 continue
             if response.status_code not in set(fallback_statuses):
-                served = candidate
-                break
+                if not (
+                    response.status_code == 400
+                    and _is_context_error(response.body)
+                ):
+                    served = candidate
+                    break
+                # Some providers report context-window overflow as 400 with a
+                # context-length error body instead of 413/422. Walk to the
+                # next target WITHOUT cooldown (the request is simply too
+                # large for this model — not a provider outage).
+                logger.warning(
+                    "route=%s model=%s context overflow (400) request=%s body=%s",
+                    route_name,
+                    candidate,
+                    request_id,
+                    str(response.body)[:300],
+                )
+                if index + 1 < len(candidates):
+                    fallback = "context_window_400"
+                continue
             cooldown_seconds = 3600
             if target_cooldowns:
                 cooldown_seconds = int(target_cooldowns.get(candidate, 3600))
