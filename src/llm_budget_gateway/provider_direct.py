@@ -220,6 +220,10 @@ class DirectProviderClient:
         self._owns_client = client is None
         self._model_index: dict[str, ProviderEndpoint] = {}
         self._thought_signatures: dict[str, str] = {}
+        # fallback index: (fn_name, arguments) -> signature for clients that
+        # rewrite tool_call ids (Hermes deterministic/codex ids) and cannot
+        # be matched by the provider-assigned id.
+        self._thought_signatures_by_fn: dict[tuple[str, str], str] = {}
         self._load_registry(registry or {})
 
     def _load_registry(self, registry: dict[str, dict[str, Any]]) -> None:
@@ -338,15 +342,25 @@ class DirectProviderClient:
                 tc_id = tc.get("id")
                 if sig and isinstance(tc_id, str):
                     self._thought_signatures[tc_id] = sig
-        if len(self._thought_signatures) > 512:
+                if sig:
+                    fn = (tc.get("function") or {}).get("name")
+                    args = (tc.get("function") or {}).get("arguments")
+                    if isinstance(fn, str) and isinstance(args, str):
+                        self._thought_signatures_by_fn[(fn, args)] = sig
+        if len(self._thought_signatures) > 512 or len(self._thought_signatures_by_fn) > 512:
             # bound memory: keep the most recent half
             self._thought_signatures = dict(
                 list(self._thought_signatures.items())[-256:]
             )
+            self._thought_signatures_by_fn = dict(
+                list(self._thought_signatures_by_fn.items())[-256:]
+            )
 
     def _restore_thought_signatures(self, messages: Any) -> None:
         """Re-attach stored Gemini thought_signatures to assistant turns."""
-        if not isinstance(messages, list) or not self._thought_signatures:
+        if not isinstance(messages, list) or (
+            not self._thought_signatures and not self._thought_signatures_by_fn
+        ):
             return
         for msg in messages:
             if not isinstance(msg, dict) or msg.get("role") != "assistant":
@@ -355,6 +369,14 @@ class DirectProviderClient:
                 if not isinstance(tc, dict):
                     continue
                 sig = self._thought_signatures.get(tc.get("id"))
+                if sig is None:
+                    # Clients (Hermes) rewrite provider call ids; fall back
+                    # to (fn_name, arguments) so the signature still reaches
+                    # the upstream.
+                    fn = (tc.get("function") or {}).get("name")
+                    args = (tc.get("function") or {}).get("arguments")
+                    if isinstance(fn, str) and isinstance(args, str):
+                        sig = self._thought_signatures_by_fn.get((fn, args))
                 if not sig:
                     continue
                 extra = tc.setdefault("extra_content", {})

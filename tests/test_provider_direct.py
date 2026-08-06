@@ -510,3 +510,60 @@ class TestForwardStream:
         msgs = captured["body"]["messages"]
         assert "reasoning_content" not in msgs[0]
         await client.aclose()
+
+    @pytest.mark.asyncio
+    async def test_gemini_thought_signature_fallback_by_fn_args(self, monkeypatch):
+        """Clients that rewrite provider call ids (Hermes) still get the
+        signature matched via (fn_name, arguments)."""
+        monkeypatch.setenv("GOOGLE_API_KEY", "sk-google-123")
+        captured = {}
+        calls = {"n": 0}
+
+        def handler(request: httpx.Request) -> httpx.Response:
+            calls["n"] += 1
+            if calls["n"] == 1:
+                return httpx.Response(200, json={
+                    "model": "gemini-2.0-flash",
+                    "choices": [{
+                        "finish_reason": "tool_calls",
+                        "message": {
+                            "role": "assistant",
+                            "tool_calls": [{
+                                "id": "gemini-id-abc",
+                                "type": "function",
+                                "function": {"name": "skill_view", "arguments": "{}"},
+                                "extra_content": {"google": {"thought_signature": "SIGFN"}},
+                            }],
+                        },
+                    }],
+                })
+            captured["body"] = json.loads(request.content)
+            return _ok_handler(request)
+
+        client = _client(handler)
+        await client.forward(
+            "gemini-2.0-flash",
+            {"model": "gemini-2.0-flash", "messages": [{"role": "user", "content": "go"}]},
+        )
+        # Hermes rewrites the id but keeps fn name + arguments
+        await client.forward(
+            "gemini-2.0-flash",
+            {
+                "model": "gemini-2.0-flash",
+                "messages": [
+                    {"role": "user", "content": "go"},
+                    {
+                        "role": "assistant",
+                        "content": None,
+                        "tool_calls": [{
+                            "id": "call_51366e98f2354ce2bc66f224",
+                            "type": "function",
+                            "function": {"name": "skill_view", "arguments": "{}"},
+                        }],
+                    },
+                ],
+            },
+        )
+        tc = captured["body"]["messages"][1]["tool_calls"][0]
+        assert tc["extra_content"]["google"]["thought_signature"] == "SIGFN"
+        await client.aclose()
