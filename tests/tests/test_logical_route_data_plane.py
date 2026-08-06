@@ -201,3 +201,117 @@ def test_route_usage_reports_model_budget_headroom() -> None:
     assert usage["total_spend"] == pytest.approx(0.25)
     assert usage["models"][0]["model"] == "gpt-mini"
     assert usage["models"][0]["remaining"] == pytest.approx(0.75)
+
+
+def test_model_window_skips_outside_service_hours() -> None:
+    plane, _ = seeded()
+    plane.update_route(
+        plane.list_routes()[0]["id"],
+        {
+            **config(),
+            "default_model": "gpt-mini",
+            "fallback_models": ["gemini-flash", "claude-sonnet"],
+            "model_windows": {
+                # gemini-flash only 09:00-17:00 Zurich weekdays
+                "gemini-flash": {"weekdays": [0, 1, 2, 3, 4], "start": "09:00", "end": "17:00"},
+            },
+        },
+    )
+    route_id = plane.list_routes()[0]["id"]
+    plane.publish_route(route_id)
+
+    # gpt-mini budget exhausted -> gemini-flash is OUTSIDE window -> claude-sonnet
+    plane.record_model_spend(
+        "support-balanced", "gpt-mini", 1.0,
+        at=datetime(2026, 8, 4, 20, 0, tzinfo=ZoneInfo("Europe/Zurich")),
+    )
+    decision = plane.resolve_alias(
+        "support-balanced",
+        now=datetime(2026, 8, 4, 20, 30, tzinfo=ZoneInfo("Europe/Zurich")),
+        quality_tier="balanced",
+        estimated_cost=0.05,
+        region="eu",
+        capabilities=[],
+    )
+    assert decision["selected_model"] == "claude-sonnet"
+    # the first failed gate (gpt-mini budget) sets the top-level reason; the
+    # window gate is visible in the decision path
+    assert decision["fallback_reason"] == "budget"
+    assert any(gate["gate"] == "window" and not gate["passed"] for gate in decision["decision_path"])
+
+    # inside the window -> gemini-flash is selected
+    inside = plane.resolve_alias(
+        "support-balanced",
+        now=datetime(2026, 8, 4, 12, 0, tzinfo=ZoneInfo("Europe/Zurich")),
+        quality_tier="balanced",
+        estimated_cost=0.05,
+        region="eu",
+        capabilities=[],
+    )
+    assert inside["selected_model"] == "gemini-flash"
+
+
+def test_model_window_weekend_gate() -> None:
+    plane, _ = seeded()
+    plane.update_route(
+        plane.list_routes()[0]["id"],
+        {
+            **config(),
+            "default_model": "gpt-mini",
+            "fallback_models": ["gemini-flash"],
+            "model_windows": {
+                # only weekdays 0-4, Saturday (5) excluded
+                "gemini-flash": {"weekdays": [0, 1, 2, 3, 4], "start": "00:00", "end": "23:59"},
+            },
+        },
+    )
+    route_id = plane.list_routes()[0]["id"]
+    plane.publish_route(route_id)
+    plane.record_model_spend(
+        "support-balanced", "gpt-mini", 1.0,
+        at=datetime(2026, 8, 8, 12, 0, tzinfo=ZoneInfo("Europe/Zurich")),
+    )
+    with pytest.raises(RuntimeError, match="eligible"):
+        plane.resolve_alias(
+            "support-balanced",
+            now=datetime(2026, 8, 8, 12, 0, tzinfo=ZoneInfo("Europe/Zurich")),  # Saturday
+            quality_tier="balanced",
+            estimated_cost=0.05,
+            region="eu",
+            capabilities=[],
+        )
+
+
+def test_model_windows_validation_rejects_bad_shape() -> None:
+    plane, _ = seeded()
+    route_id = plane.list_routes()[0]["id"]
+    with pytest.raises(ValueError, match="model_windows"):
+        plane.update_route(
+            route_id,
+            {
+                **config(),
+                "model_windows": {
+                    "gemini-flash": {"start": "09:00"},  # missing weekdays/end
+                },
+            },
+        )
+    with pytest.raises(ValueError, match="weekdays"):
+        plane.update_route(
+            route_id,
+            {
+                **config(),
+                "model_windows": {
+                    "gemini-flash": {"weekdays": [7], "start": "09:00", "end": "17:00"},
+                },
+            },
+        )
+    with pytest.raises(ValueError, match="HH:MM"):
+        plane.update_route(
+            route_id,
+            {
+                **config(),
+                "model_windows": {
+                    "gemini-flash": {"weekdays": [0], "start": "9am", "end": "17:00"},
+                },
+            },
+        )

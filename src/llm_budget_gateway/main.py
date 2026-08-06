@@ -8,9 +8,14 @@ analysis brief §4 P0-1.
 from __future__ import annotations
 
 import json
+import logging
+import sqlite3
+from pathlib import Path
 
 from fastapi import FastAPI, Request
 from fastapi.responses import JSONResponse, Response, StreamingResponse
+
+logger = logging.getLogger(__name__)
 
 from .budget_enforcement import (
     BudgetEnforcer,
@@ -23,6 +28,7 @@ from .cost_tracking import CostCalculator, CostStore, CostTracker, ModelPrice, P
 from .gateway_home import install_gateway_home
 from .gateway_proxy import GatewayProxy, ProviderResponse
 from .model_fallback import FallbackConfig, FallbackManager
+from .routing_control_plane import RoutingControlPlane
 
 
 def create_app(settings: Settings | None = None) -> FastAPI:
@@ -66,6 +72,62 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         budget_enforcer=enforcer,
         fallback_manager=manager,
     )
+
+    # Attach the logical routing plane when a persisted routing DB exists
+    # (created by the cockpit-first launcher under .gateway-console/). This
+    # lets application keys (gw_...) resolve published logical LLM routes;
+    # without it the proxy only serves Settings.virtual_keys.
+    data_dir = Path(__file__).resolve().parents[2] / ".gateway-console"
+    routing_db = data_dir / "routing.db"
+    if routing_db.exists():
+        try:
+            plane = RoutingControlPlane(
+                sqlite3.connect(str(routing_db), check_same_thread=False)
+            )
+            proxy.attach_routing_control_plane(plane)
+        except sqlite3.Error:
+            logger.exception("failed to attach routing control plane")
+
+    # Attach the direct provider transport built from the persisted provider
+    # connections (providers.db + vault key). This replaces litellm for all
+    # gateway-configured providers (flat model names litellm cannot resolve).
+    providers_db = data_dir / "providers.db"
+    master_key = data_dir / "provider-master.key"
+    if providers_db.exists() and master_key.exists():
+        try:
+            from .provider_connections import CredentialVault, ProviderConnectionStore
+            from .provider_direct import DirectProviderClient
+
+            store = ProviderConnectionStore(
+                sqlite3.connect(str(providers_db), check_same_thread=False),
+                CredentialVault(master_key),
+            )
+            # Provider priority for duplicate models: first provider wins.
+            # Mirrors the Hermes provider mapping — opencode-go serves the
+            # deepseek-* family, opencode-zen the mimo-* family. deepinfra,
+            # xiaomi, google and openrouter follow as generic catalogs.
+            priority = ["opencode-go", "opencode-zen", "deepinfra", "xiaomi", "google", "openrouter"]
+            connections = sorted(store.list(), key=lambda c: priority.index(c["slug"]) if c["slug"] in priority else 99)
+            registry: dict[str, dict] = {}
+            for connection in connections:
+                slug = str(connection["slug"])
+                secret = store.connection_secret(str(connection["id"]))
+                models = [str(m["id"]) for m in store.models(str(connection["id"]))]
+                base_url = str(secret.get("base_url", "")).rstrip("/")
+                if not base_url or not models:
+                    continue
+                registry[slug] = {
+                    "base_url": base_url,
+                    "api_key_env": f"__vault_{slug}__",  # unused: key passed directly
+                    "api_key": str(secret.get("api_key", "")),
+                    "models": models,
+                }
+            if registry:
+                direct = DirectProviderClient(registry, timeout=settings.provider_timeout)
+                proxy.attach_direct_client(direct)
+                logger.info("attached direct provider transport: %s", sorted(registry))
+        except Exception:
+            logger.exception("failed to attach direct provider transport")
 
     app = FastAPI(title="LLM Budget Gateway", version="0.1.0")
 

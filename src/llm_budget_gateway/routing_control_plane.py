@@ -226,7 +226,19 @@ class RoutingControlPlane:
         candidates = [primary, *config["fallback_models"]]
         selected = None
         fallback_reason = None
+        windows = config.get("model_windows") or {}
         for index, model in enumerate(dict.fromkeys(candidates)):
+            window = windows.get(model)
+            if window is not None and not _within_window(local, window):
+                path.append(
+                    {
+                        "gate": "window",
+                        "passed": False,
+                        "detail": f"{model} is outside its service window",
+                    }
+                )
+                fallback_reason = fallback_reason or "window"
+                continue
             exhausted = spend_by_model.get(model, 0.0) >= float(
                 config["monthly_budget"]
             )
@@ -455,6 +467,22 @@ def _validate_config(config: dict[str, Any]) -> dict[str, Any]:
         raise ValueError("schedule is incomplete")
     if not set(clean["quality_models"]).issubset(_TIERS):
         raise ValueError("unknown quality tier")
+    windows = clean.get("model_windows") or {}
+    if not isinstance(windows, dict):
+        raise ValueError("model_windows must be an object")
+    for model, window in windows.items():
+        if not isinstance(window, dict) or not all(
+            key in window for key in ("weekdays", "start", "end")
+        ):
+            raise ValueError(
+                f"model_windows[{model}] needs weekdays/start/end"
+            )
+        if not set(window["weekdays"]).issubset(range(7)):
+            raise ValueError(f"model_windows[{model}] weekdays must be 0-6")
+        for key in ("start", "end"):
+            value = str(window[key])
+            if len(value) != 5 or value[2] != ":" or not value[:2].isdigit() or not value[3:].isdigit():
+                raise ValueError(f"model_windows[{model}] {key} must be HH:MM")
     clean["fallback_statuses"] = sorted(statuses)
     clean["fallback_models"] = list(dict.fromkeys(clean["fallback_models"]))
     clean["required_capabilities"] = sorted(set(clean["required_capabilities"]))
@@ -463,6 +491,25 @@ def _validate_config(config: dict[str, Any]) -> dict[str, Any]:
 
 def _canonical(value: dict[str, Any]) -> str:
     return json.dumps(value, sort_keys=True, separators=(",", ":"))
+
+
+def _within_window(local: datetime, window: dict[str, Any]) -> bool:
+    """True when ``local`` (timezone-aware) falls inside a service window.
+
+    ``window`` shape: ``{"weekdays": [0..6], "start": "HH:MM", "end": "HH:MM"}``.
+    The window is evaluated in the route's own timezone, so the caller must
+    pass a ``local`` datetime already converted to that timezone. A missing
+    window key means "always allowed".
+    """
+    if not isinstance(window, dict):
+        return True
+    weekdays = window.get("weekdays", list(range(7)))
+    start = str(window.get("start", "00:00"))
+    end = str(window.get("end", "23:59"))
+    return (
+        local.weekday() in weekdays
+        and start <= local.strftime("%H:%M") < end
+    )
 
 
 def _utcnow() -> str:

@@ -115,6 +115,7 @@ class GatewayProxy:
         self._budget_enforcer = budget_enforcer
         self._fallback_manager = fallback_manager
         self._routing_control_plane = None
+        self._direct_client = None
         self._routing_now: Callable[[], datetime] = lambda: datetime.now(UTC)
 
     def attach_routing_control_plane(self, plane: object, *, now: Callable[[], datetime] | None = None) -> None:
@@ -122,6 +123,15 @@ class GatewayProxy:
         self._routing_control_plane = plane
         if now is not None:
             self._routing_now = now
+
+    def attach_direct_client(self, client: object) -> None:
+        """Attach the direct provider transport (replaces litellm forwarding).
+
+        When attached, models resolved by the direct client are forwarded as
+        plain HTTP calls to the configured provider endpoint; models the
+        client does not know fall back to the legacy litellm path.
+        """
+        self._direct_client = client
 
     async def handle_chat_completion(
         self, body: dict, api_key: str, headers: dict
@@ -294,6 +304,87 @@ class GatewayProxy:
             plane.record_model_spend(alias, response.model, cost, at=self._routing_now())
         return response
 
+    async def _forward_direct(
+        self, model: str, body: dict, stream: bool = False
+    ) -> ProviderResponse:
+        """Forward via the direct provider transport (no litellm).
+
+        The direct client resolves the model to a configured provider
+        endpoint and issues a plain HTTP call. Stream=true requests are
+        drained into SSE lines; usage is extracted from the final chunk.
+        """
+        start = time.perf_counter()
+        is_embedding = (
+            "input" in body and "messages" not in body and "prompt" not in body
+        )
+        is_stream = (not is_embedding) and (stream or bool(body.get("stream")))
+        kind = "embedding" if is_embedding else "chat"
+        status = 502
+        chunks: list = []
+        data: dict = {}
+        served = model
+        try:
+            if is_stream:
+                status, chunks, served = await asyncio.wait_for(
+                    self._direct_client.forward_stream(model, body, kind=kind),  # type: ignore[attr-defined]
+                    timeout=self._settings.provider_timeout,
+                )
+            else:
+                status, data, served = await asyncio.wait_for(
+                    self._direct_client.forward(model, body, kind=kind),  # type: ignore[attr-defined]
+                    timeout=self._settings.provider_timeout,
+                )
+        except TimeoutError as exc:
+            raise ProviderTimeoutError(
+                f"upstream provider timed out after {self._settings.provider_timeout}s"
+            ) from exc
+        except Exception as exc:
+            status_code = int(getattr(exc, "status_code", 502))
+            message = str(exc) or "upstream provider error"
+            return ProviderResponse(
+                status_code=status_code,
+                body={"error": {"message": message, "type": "provider_error"}},
+                headers={},
+                model=model,
+                usage=None,
+                latency_ms=int((time.perf_counter() - start) * 1000),
+            )
+
+        usage: TokenUsage | None = None
+        if is_stream:
+            # Aggregate usage across chunks like the litellm streaming path.
+            chunks_usage = [c for c in chunks if isinstance(c, dict) and c.get("usage")]
+            if chunks_usage:
+                last = chunks_usage[-1]["usage"]
+                usage = TokenUsage(
+                    prompt_tokens=int(last.get("prompt_tokens", 0) or 0),
+                    completion_tokens=int(last.get("completion_tokens", 0) or 0),
+                    total_tokens=int(last.get("total_tokens", 0) or 0),
+                )
+            body_out: dict | str | list = self._sse_lines(chunks)
+        else:
+            resp_usage = data.get("usage")
+            if isinstance(resp_usage, dict):
+                usage = TokenUsage(
+                    prompt_tokens=int(resp_usage.get("prompt_tokens", 0) or 0),
+                    completion_tokens=int(resp_usage.get("completion_tokens", 0) or 0),
+                    total_tokens=int(
+                        resp_usage.get("total_tokens", 0)
+                        or 0
+                        or int(resp_usage.get("prompt_tokens", 0) or 0)
+                        + int(resp_usage.get("completion_tokens", 0) or 0)
+                    ),
+                )
+            body_out = data
+        return ProviderResponse(
+            status_code=status,
+            body=body_out,
+            headers={},
+            model=served or model,
+            usage=usage,
+            latency_ms=int((time.perf_counter() - start) * 1000),
+        )
+
     async def _forward_with_fallback(
         self, model: str, body: dict, api_key: str, headers: dict
     ) -> ProviderResponse:
@@ -323,6 +414,20 @@ class GatewayProxy:
         stream=true).
         """
         start = time.perf_counter()
+        # Direct provider transport first: when a direct client is attached
+        # and knows this model, forward as plain HTTP (no litellm). This is
+        # the path for gateway-configured providers (flat model names like
+        # ``mimo-v2.5-free`` that litellm cannot resolve).
+        if self._direct_client is not None:
+            resolved = getattr(self._direct_client, "resolve", None)
+            if resolved is not None:
+                try:
+                    resolved(model)
+                except Exception:
+                    resolved = None
+                if resolved is not None:
+                    return await self._forward_direct(model, body, stream)
+
         # Whitelist only — never forward api_key/base_url/headers from the
         # client body (provider auth/endpoint come from gateway settings/env).
         kwargs = {k: v for k, v in body.items() if k in _FORWARD_ALLOWLIST}

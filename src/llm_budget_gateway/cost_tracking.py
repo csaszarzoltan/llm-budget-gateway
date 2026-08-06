@@ -156,6 +156,7 @@ class CostStore:
         with self._lock:
             self._conn.execute("PRAGMA journal_mode=WAL")
             self._conn.execute(_CREATE_TABLE)
+            self._migrate_legacy_schema()
             self._conn.execute(
                 "CREATE INDEX IF NOT EXISTS idx_cost_records_timestamp "
                 "ON cost_records (timestamp)"
@@ -165,6 +166,23 @@ class CostStore:
                 "ON cost_records (api_key, timestamp)"
             )
             self._conn.commit()
+
+    def _migrate_legacy_schema(self) -> None:
+        """Add columns introduced after the original table was created.
+
+        ``CREATE TABLE IF NOT EXISTS`` never alters an existing table, so a
+        DB created by an older build is missing ``tool_name``/``project``.
+        Adding the column is idempotent and safe: the insert statement is
+        column-explicit, so old rows keep NULL defaults.
+        """
+        existing = {
+            row[1] for row in self._conn.execute("PRAGMA table_info(cost_records)")
+        }
+        for column, definition in (("tool_name", "TEXT"), ("project", "TEXT")):
+            if column not in existing:
+                self._conn.execute(
+                    f"ALTER TABLE cost_records ADD COLUMN {column} {definition}"
+                )
 
     def insert(self, record: UsageRecord) -> None:
         """Persist one usage record (upsert on request_id)."""
