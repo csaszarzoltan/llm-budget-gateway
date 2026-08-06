@@ -257,6 +257,103 @@ class TestForwardStream:
         await client.aclose()
 
     @pytest.mark.asyncio
+    async def test_gemini_thought_signature_roundtrip(self, monkeypatch):
+        """Gemini: tool-call thought_signature from the response is captured
+        and re-attached to the matching assistant tool_call on the next
+        outbound request (clients routing by route name drop the field)."""
+        monkeypatch.setenv("GOOGLE_API_KEY", "sk-google-123")
+        captured = {}
+        calls = {"n": 0}
+
+        def handler(request: httpx.Request) -> httpx.Response:
+            calls["n"] += 1
+            if calls["n"] == 1:
+                # First call: the model answers with a tool call carrying
+                # extra_content.google.thought_signature.
+                return httpx.Response(200, json={
+                    "model": "gemini-2.0-flash",
+                    "choices": [{
+                        "finish_reason": "tool_calls",
+                        "message": {
+                            "role": "assistant",
+                            "tool_calls": [{
+                                "id": "tc-gemini-1",
+                                "type": "function",
+                                "function": {"name": "kanban_show", "arguments": "{}"},
+                                "extra_content": {"google": {"thought_signature": "SIG123"}},
+                            }],
+                        },
+                    }],
+                })
+            # Second call: replay with the assistant tool_call — the gateway
+            # must have re-attached the signature.
+            captured["body"] = json.loads(request.content)
+            return _ok_handler(request)
+
+        client = _client(handler)
+        # turn 1: model returns a tool call
+        status, data, served = await client.forward(
+            "gemini-2.0-flash",
+            {"model": "gemini-2.0-flash", "messages": [{"role": "user", "content": "go"}]},
+        )
+        assert status == 200
+        # turn 2: the client replays the assistant tool call without the field
+        await client.forward(
+            "gemini-2.0-flash",
+            {
+                "model": "gemini-2.0-flash",
+                "messages": [
+                    {"role": "user", "content": "go"},
+                    {
+                        "role": "assistant",
+                        "content": None,
+                        "tool_calls": [{
+                            "id": "tc-gemini-1",
+                            "type": "function",
+                            "function": {"name": "kanban_show", "arguments": "{}"},
+                        }],
+                    },
+                ],
+            },
+        )
+        msgs = captured["body"]["messages"]
+        tc = msgs[1]["tool_calls"][0]
+        assert tc["extra_content"]["google"]["thought_signature"] == "SIG123"
+        await client.aclose()
+
+    @pytest.mark.asyncio
+    async def test_gemini_thought_signature_unknown_id_not_touched(self, monkeypatch):
+        """Unknown tool_call ids must not get a fabricated signature."""
+        monkeypatch.setenv("GOOGLE_API_KEY", "sk-google-123")
+        captured = {}
+
+        def handler(request: httpx.Request) -> httpx.Response:
+            captured["body"] = json.loads(request.content)
+            return _ok_handler(request)
+
+        client = _client(handler)
+        await client.forward(
+            "gemini-2.0-flash",
+            {
+                "model": "gemini-2.0-flash",
+                "messages": [
+                    {
+                        "role": "assistant",
+                        "content": None,
+                        "tool_calls": [{
+                            "id": "tc-unknown",
+                            "type": "function",
+                            "function": {"name": "x", "arguments": "{}"},
+                        }],
+                    },
+                ],
+            },
+        )
+        tc = captured["body"]["messages"][0]["tool_calls"][0]
+        assert "extra_content" not in tc
+        await client.aclose()
+
+    @pytest.mark.asyncio
     async def test_slug_qualified_alias_routes_to_provider(self, monkeypatch):
         """@slug/model pins a model to one provider and strips the prefix."""
         monkeypatch.setenv("OPENCODE_GO_API_KEY", "sk-go-123")

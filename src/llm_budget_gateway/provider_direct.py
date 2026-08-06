@@ -219,6 +219,7 @@ class DirectProviderClient:
         self._client = client or httpx.AsyncClient(timeout=timeout)
         self._owns_client = client is None
         self._model_index: dict[str, ProviderEndpoint] = {}
+        self._thought_signatures: dict[str, str] = {}
         self._load_registry(registry or {})
 
     def _load_registry(self, registry: dict[str, dict[str, Any]]) -> None:
@@ -309,6 +310,63 @@ class DirectProviderClient:
             raise UnknownModelError(f"unknown model: {model}")
         return endpoint
 
+    def _capture_thought_signatures(self, data: Any) -> None:
+        """Persist Gemini tool-call thought_signatures by tool_call id.
+
+        Gemini (OpenAI-compat endpoint) returns ``extra_content.google.
+        thought_signature`` on each tool_call; the replay of that assistant
+        turn must carry the signature back or the API rejects it with HTTP
+        400 ("Function call is missing a thought_signature in functionCall
+        parts"). Clients routing through a route name strip the field, so
+        the gateway stores id -> signature and re-attaches it on the next
+        outbound call. Entries are bounded and time-boxed.
+        """
+        if not isinstance(data, dict):
+            return
+        for choice in data.get("choices", []):
+            if not isinstance(choice, dict):
+                continue
+            msg = choice.get("message") or choice.get("delta") or {}
+            if not isinstance(msg, dict):
+                continue
+            for tc in msg.get("tool_calls") or []:
+                if not isinstance(tc, dict):
+                    continue
+                extra = tc.get("extra_content") or {}
+                google = extra.get("google") or {} if isinstance(extra, dict) else {}
+                sig = google.get("thought_signature") if isinstance(google, dict) else None
+                tc_id = tc.get("id")
+                if sig and isinstance(tc_id, str):
+                    self._thought_signatures[tc_id] = sig
+        if len(self._thought_signatures) > 512:
+            # bound memory: keep the most recent half
+            self._thought_signatures = dict(
+                list(self._thought_signatures.items())[-256:]
+            )
+
+    def _restore_thought_signatures(self, messages: Any) -> None:
+        """Re-attach stored Gemini thought_signatures to assistant turns."""
+        if not isinstance(messages, list) or not self._thought_signatures:
+            return
+        for msg in messages:
+            if not isinstance(msg, dict) or msg.get("role") != "assistant":
+                continue
+            for tc in msg.get("tool_calls") or []:
+                if not isinstance(tc, dict):
+                    continue
+                sig = self._thought_signatures.get(tc.get("id"))
+                if not sig:
+                    continue
+                extra = tc.setdefault("extra_content", {})
+                if not isinstance(extra, dict):
+                    extra = {}
+                    tc["extra_content"] = extra
+                google = extra.setdefault("google", {})
+                if not isinstance(google, dict):
+                    google = {}
+                    extra["google"] = google
+                google["thought_signature"] = sig
+
     @property
     def models(self) -> list[str]:
         """Every model name configured across all providers."""
@@ -365,6 +423,9 @@ class DirectProviderClient:
         # routing via a route name (not the model name) may strip it.
         if _model_needs_reasoning_echo(payload.get("model", "")):
             _pad_reasoning_content(payload.get("messages"))
+        # Gemini thought_signature: re-attach stored signatures so replayed
+        # function calls are not rejected with HTTP 400.
+        self._restore_thought_signatures(payload.get("messages"))
         try:
             response = await self._client.post(
                 url, json=payload, headers=endpoint.headers()
@@ -385,6 +446,8 @@ class DirectProviderClient:
             raise UpstreamProviderError(
                 502, f"upstream provider returned invalid JSON: {endpoint.name}"
             ) from exc
+        # Gemini: persist thought_signatures from this turn's tool calls.
+        self._capture_thought_signatures(data)
         served = data.get("model") if isinstance(data, dict) else None
         return response.status_code, data, served or model
 
@@ -416,6 +479,8 @@ class DirectProviderClient:
         # DeepSeek/Kimi/MiMo thinking mode: pad assistant turns (see forward).
         if _model_needs_reasoning_echo(payload.get("model", "")):
             _pad_reasoning_content(payload.get("messages"))
+        # Gemini thought_signature: re-attach stored signatures (see forward).
+        self._restore_thought_signatures(payload.get("messages"))
         chunks: list[dict[str, Any]] = []
         served: str = model
         try:
@@ -450,6 +515,9 @@ class DirectProviderClient:
                         chunks.append(chunk)
                         if chunk.get("model"):
                             served = chunk["model"]
+                        # Gemini streaming: tool_calls arrive in deltas; the
+                        # final tool_calls chunk carries the signature.
+                        self._capture_thought_signatures(chunk)
         except httpx.TimeoutException as exc:
             raise UpstreamProviderError(502, f"upstream provider timed out: {endpoint.name}") from exc
         except httpx.HTTPError as exc:
