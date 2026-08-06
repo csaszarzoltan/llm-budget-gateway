@@ -37,6 +37,10 @@ except ImportError:  # pragma: no cover
 
 logger = logging.getLogger(__name__)
 
+#: How long a sticky-session model binding stays valid before it expires
+#: and the conversation may re-resolve through the whole route chain.
+_STICKY_TTL_SECONDS = 3600
+
 #: Client body fields allowed through to litellm. Everything else is dropped —
 #: provider credentials (api_key/api_base/base_url/headers) and endpoint
 #: overrides must come from gateway settings/env only, never from the client
@@ -123,6 +127,9 @@ class GatewayProxy:
         self._product_console = None
         self._direct_client = None
         self._routing_now: Callable[[], datetime] = lambda: datetime.now(UTC)
+        # session_id -> (serving model, monotonic ts) for sticky sessions:
+        # an agentic conversation keeps its model while it stays healthy.
+        self._sticky_sessions: dict[str, tuple[str, float]] = {}
 
     def attach_product_console(self, store: object) -> None:
         """Attach the UI-managed route store (pc_routes/targets model).
@@ -147,6 +154,32 @@ class GatewayProxy:
         client does not know fall back to the legacy litellm path.
         """
         self._direct_client = client
+
+    # -- sticky session helpers -------------------------------------------
+
+    @staticmethod
+    def _extract_session_id(body: dict) -> str | None:
+        """Pull a conversation identifier the client can echo per request."""
+        sid = body.get("session_id") or body.get("conversation_id")
+        if not sid:
+            metadata = body.get("metadata")
+            if isinstance(metadata, dict):
+                sid = metadata.get("session_id") or metadata.get("conversation_id")
+        return str(sid) if sid else None
+
+    def _set_sticky(self, session_id: str, model: str) -> None:
+        self._sticky_sessions[session_id] = (model, time.monotonic())
+
+    def _get_sticky(self, session_id: str) -> str | None:
+        """Return the bound model, expiring stale bindings (TTL 1h)."""
+        entry = self._sticky_sessions.get(session_id)
+        if entry is None:
+            return None
+        model, ts = entry
+        if time.monotonic() - ts > _STICKY_TTL_SECONDS:
+            self._sticky_sessions.pop(session_id, None)
+            return None
+        return model
 
     async def handle_chat_completion(
         self, body: dict, api_key: str, headers: dict
@@ -320,7 +353,22 @@ class GatewayProxy:
             target_cooldowns = {}
             route_name = alias
         response = None
+        served: str | None = None
         outbound = {k: v for k, v in body.items() if k != "metadata"}
+        # Sticky session: while a conversation's model stays healthy (not in
+        # cooldown), keep serving it instead of re-walking the whole chain.
+        session_id = self._extract_session_id(body)
+        sticky_model = None
+        if session_id:
+            sticky_model = self._get_sticky(session_id)
+            if sticky_model is not None and (
+                sticky_model not in candidates
+                or self._cost_tracker.model_in_cooldown(route_name, sticky_model)
+            ):
+                sticky_model = None
+        if sticky_model is not None:
+            candidates = [sticky_model]
+            fallback = "sticky_session"
         for index, candidate in enumerate(candidates):
             is_last = index + 1 >= len(candidates)
             remaining = 0
@@ -346,6 +394,7 @@ class GatewayProxy:
                 continue
             response = await self.forward(candidate, outbound)
             if response.status_code not in set(fallback_statuses):
+                served = candidate
                 break
             cooldown_seconds = 3600
             if target_cooldowns:
@@ -368,6 +417,12 @@ class GatewayProxy:
         response.headers["X-Gateway-Route"] = route_name
         response.headers["X-Gateway-Serving-Model"] = response.model
         response.headers["X-Gateway-Fallback"] = str(fallback)
+        if sticky_model is not None:
+            response.headers["X-Gateway-Sticky-Session"] = "1"
+        if session_id and response.status_code < 400:
+            # Bind to the gateway candidate name — providers may echo a
+            # shortened model name, which would not match the route chain.
+            self._set_sticky(session_id, served or response.model)
 
         scope = BudgetScope(kind="key", key=str(api_key))
         cost = 0.0

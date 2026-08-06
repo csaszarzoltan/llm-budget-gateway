@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import sqlite3
+import time
 from datetime import datetime
 from types import SimpleNamespace
 from unittest.mock import AsyncMock, Mock
@@ -442,3 +443,90 @@ async def test_proxy_uses_target_cooldown_seconds_override() -> None:
     first_call = tracker.set_model_cooldown.call_args_list[0]
     assert first_call.args[1] == "@opencode-zen/mimo-free"
     assert first_call.args[2] == 120
+
+
+@pytest.mark.asyncio
+async def test_sticky_session_reuses_bound_model() -> None:
+    """A session bound to a model keeps it — the chain is short-circuited."""
+    store = ui_route_store()
+    enforcer = Mock()
+    enforcer.check_sync.return_value = None
+    enforcer.check_hard = AsyncMock(return_value=None)
+    tracker = Mock()
+    tracker.model_in_cooldown.return_value = 0
+    tracker.build_record.return_value = SimpleNamespace(total_cost=0.0)
+    tracker.record = AsyncMock(return_value=None)
+    proxy = GatewayProxy(Settings(virtual_keys={}), tracker, enforcer, Mock())
+    proxy.attach_product_console(store)
+    proxy.forward = AsyncMock(
+        side_effect=[
+            ProviderResponse(429, {"error": {"message": "quota"}}, {}, "mimo-free", None, 5),
+            ProviderResponse(200, {"choices": []}, {}, "deepseek-flash", None, 9),
+        ]
+    )
+    body = {"model": "hermes-default", "session_id": "conv-1", "messages": []}
+
+    r1 = await proxy.handle_chat_completion(body, "gw_key", {})
+    assert r1.status_code == 200
+    # binding uses the gateway candidate name, not the provider's short name
+    assert proxy._sticky_sessions["conv-1"][0] == "@opencode-go/deepseek-flash"
+
+    # Second call: only the bound model is tried — mimo is never forwarded.
+    proxy.forward.reset_mock()
+    proxy.forward.side_effect = None
+    proxy.forward.return_value = ProviderResponse(200, {"choices": []}, {}, "deepseek-flash", None, 9)
+    r2 = await proxy.handle_chat_completion(body, "gw_key", {})
+    assert r2.status_code == 200
+    proxy.forward.assert_awaited_once()
+    assert proxy.forward.await_args.args[0] == "@opencode-go/deepseek-flash"
+    assert r2.headers["X-Gateway-Sticky-Session"] == "1"
+
+
+@pytest.mark.asyncio
+async def test_sticky_session_rebinds_after_bound_model_failure() -> None:
+    """When the bound model goes into cooldown, the chain re-resolves."""
+    store = ui_route_store()
+    enforcer = Mock()
+    enforcer.check_sync.return_value = None
+    enforcer.check_hard = AsyncMock(return_value=None)
+    tracker = Mock()
+    tracker.model_in_cooldown.return_value = 0
+    tracker.build_record.return_value = SimpleNamespace(total_cost=0.0)
+    tracker.record = AsyncMock(return_value=None)
+    proxy = GatewayProxy(Settings(virtual_keys={}), tracker, enforcer, Mock())
+    proxy.attach_product_console(store)
+    proxy.forward = AsyncMock(
+        side_effect=[
+            ProviderResponse(429, {"error": {"message": "quota"}}, {}, "mimo-free", None, 5),
+            ProviderResponse(200, {"choices": []}, {}, "deepseek-flash", None, 9),
+        ]
+    )
+    body = {"model": "hermes-default", "session_id": "conv-1", "messages": []}
+    await proxy.handle_chat_completion(body, "gw_key", {})
+    assert proxy._sticky_sessions["conv-1"][0] == "@opencode-go/deepseek-flash"
+
+    # Bound model is now cooling down -> full chain walk, starting at mimo.
+    proxy.forward = AsyncMock(
+        return_value=ProviderResponse(200, {"choices": []}, {}, "@opencode-zen/mimo-free", None, 9)
+    )
+    tracker.model_in_cooldown.side_effect = (
+        lambda route, model: 3600 if "deepseek" in model else 0
+    )
+    r = await proxy.handle_chat_completion(body, "gw_key", {})
+    assert r.status_code == 200
+    proxy.forward.assert_awaited_once()
+    assert proxy.forward.await_args.args[0] == "@opencode-zen/mimo-free"
+    assert proxy._sticky_sessions["conv-1"][0] == "@opencode-zen/mimo-free"
+    assert "X-Gateway-Sticky-Session" not in r.headers
+
+
+def test_sticky_binding_expires_after_ttl() -> None:
+    enforcer = Mock()
+    enforcer.check_sync.return_value = None
+    proxy = GatewayProxy(Settings(virtual_keys={}), Mock(), enforcer, Mock())
+    proxy._sticky_sessions["conv-9"] = ("m", time.monotonic() - 7200)
+    assert proxy._get_sticky("conv-9") is None
+    assert "conv-9" not in proxy._sticky_sessions
+    # fresh binding is kept
+    proxy._set_sticky("conv-10", "m2")
+    assert proxy._get_sticky("conv-10") == "m2"
