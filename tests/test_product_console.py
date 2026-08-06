@@ -224,3 +224,63 @@ async def test_complete_product_api_flow_real_http() -> None:
         assert (await client.get("/v1/product/templates")).status_code == 200
         assert (await client.get("/v1/product/usage")).status_code == 200
         assert (await client.get("/v1/product/activity")).status_code == 200
+
+
+def test_target_context_length_validation_and_persistence(
+    store: ProductConsoleStore,
+) -> None:
+    """context_length is optional, validated as positive int, and survives
+    the route round-trip so the proxy can expose it via /v1/models."""
+    route = store.create_route(
+        "ctx-test",
+        [
+            {
+                "model": "@openrouter/nvidia/nemotron-3-ultra-550b-a55b:free",
+                "priority": 10,
+                "timezone": "UTC",
+                "start": "00:00",
+                "end": "23:59",
+                "context_length": 128000,
+            },
+            {
+                "model": "@opencode-go/deepseek-v4-flash",
+                "priority": 20,
+                "timezone": "UTC",
+                "context_length": 64000,
+            },
+        ],
+    )
+    targets = store.route(route["id"])["targets"]
+    assert targets[0]["context_length"] == 128000
+    assert targets[1]["context_length"] == 64000
+
+    # omitting context_length stays None (auto)
+    route2 = store.create_route(
+        "ctx-auto",
+        [
+            {
+                "model": "plain-model",
+                "priority": 10,
+                "timezone": "UTC",
+            }
+        ],
+    )
+    assert store.route(route2["id"])["targets"][0]["context_length"] is None
+
+    # invalid values are rejected
+    for bad in ("-5", "abc", "0"):
+        try:
+            store.create_route(
+                "ctx-bad",
+                [
+                    {
+                        "model": "bad-model",
+                        "priority": 10,
+                        "timezone": "UTC",
+                        "context_length": bad,
+                    }
+                ],
+            )
+            raise AssertionError(f"expected ValueError for context_length={bad!r}")
+        except ValueError:
+            pass

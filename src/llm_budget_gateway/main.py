@@ -218,19 +218,32 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         # handful of route names a user can actually select. The request
         # path is unchanged (_model_known still accepts litellm-known
         # models — only the listing is narrowed).
-        models: set[str] = set()
+        # Include context_length: the minimum across all targets of the route
+        # (since any target may serve the request via fallback).
+        models: list[dict] = []
         product = getattr(proxy, "_product_console", None)
         if product is not None:
             try:
                 for route in product.routes():
                     if route.get("status") in {"active", "published"}:
-                        models.add(str(route.get("name", "")))
+                        route_name = str(route.get("name", ""))
+                        # compute min context_length across targets
+                        ctx_lengths = [
+                            t.get("context_length")
+                            for t in route.get("targets", [])
+                            if t.get("context_length") is not None
+                        ]
+                        min_ctx = min(ctx_lengths) if ctx_lengths else None
+                        model_entry = {"id": route_name, "object": "model"}
+                        if min_ctx is not None:
+                            model_entry["context_length"] = min_ctx
+                        models.append(model_entry)
             except Exception:
                 logger.exception("failed to list UI-managed routes as models")
         return JSONResponse(
             {
                 "object": "list",
-                "data": [{"id": m, "object": "model"} for m in sorted(models)],
+                "data": sorted(models, key=lambda x: x["id"]),
             }
         )
 

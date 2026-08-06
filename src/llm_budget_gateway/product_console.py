@@ -567,8 +567,19 @@ def _targets(items: list[dict[str, Any]]) -> list[dict[str, Any]]:
             "start": raw.get("start", "00:00"),
             "end": raw.get("end", "23:59"),
             "required_capabilities": raw.get("required_capabilities", []),
+            "context_length": raw.get("context_length"),
         }
         ZoneInfo(item["timezone"])
+        # validate context_length if provided
+        ctx_len = item["context_length"]
+        if ctx_len is not None:
+            try:
+                ctx_len_int = int(ctx_len)
+                if ctx_len_int <= 0:
+                    raise ValueError
+                item["context_length"] = ctx_len_int
+            except (ValueError, TypeError):
+                raise ValueError("context_length must be a positive integer")
         clean.append(item)
     return sorted(clean, key=lambda x: x["priority"])
 
