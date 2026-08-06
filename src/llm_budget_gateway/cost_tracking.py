@@ -433,6 +433,148 @@ class CostStore:
             for r in rows
         ]
 
+    def clear_cooldown(self, route: str, model: str) -> None:
+        """Manually reset a route-scoped model cooldown."""
+        with self._lock:
+            self._conn.execute(
+                "DELETE FROM model_cooldowns WHERE route = ? AND model = ?",
+                (route, model),
+            )
+            self._conn.commit()
+
+    def usage_by_period(
+        self,
+        period: str = "day",
+        days: int = 14,
+        route: str | None = None,
+    ) -> dict[str, object]:
+        """Aggregate token usage per bucket per serving model.
+
+        ``period`` selects the SQLite strftime bucket: ``hour`` (last
+        ``days`` hours), ``day`` (last ``days`` days) or ``month`` (last
+        ``days`` months of calendar buckets). Mirrors the daily_usage
+        output shape so the UI can switch views with one renderer.
+        """
+        if period == "hour":
+            fmt = "%Y-%m-%d %H:00"
+            since = int(time.time()) - days * 3600
+        elif period == "month":
+            fmt = "%Y-%m"
+            since = int(time.time()) - days * 30 * 86400
+        else:
+            fmt = "%Y-%m-%d"
+            since = int(time.time()) - days * 86400
+        with self._lock:
+            bucket_rows = self._conn.execute(
+                f"""
+                SELECT strftime('{fmt}', timestamp, 'unixepoch') AS bucket, model,
+                       SUM(prompt_tokens), SUM(completion_tokens),
+                       SUM(total_tokens), COUNT(*), SUM(total_cost)
+                FROM cost_records
+                WHERE timestamp >= ?
+                GROUP BY bucket, model
+                ORDER BY bucket ASC
+                """,
+                (since,),
+            ).fetchall()
+            call_rows = self._conn.execute(
+                """
+                SELECT request_id, model, route, prompt_tokens, completion_tokens,
+                       total_tokens, total_cost, status, timestamp, latency_ms
+                FROM cost_records
+                WHERE timestamp >= ?
+                ORDER BY timestamp DESC
+                LIMIT 200
+                """,
+                (since,),
+            ).fetchall()
+        by_bucket: dict[str, list[dict[str, object]]] = {}
+        for bucket, model, pt, ct, tt, reqs, cost in bucket_rows:
+            by_bucket.setdefault(bucket, []).append(
+                {
+                    "model": model,
+                    "prompt_tokens": int(pt or 0),
+                    "completion_tokens": int(ct or 0),
+                    "total_tokens": int(tt or 0),
+                    "requests": int(reqs or 0),
+                    "cost_usd": round(float(cost or 0.0), 6),
+                }
+            )
+        buckets_out = [
+            {"date": bucket, "models": by_bucket[bucket]}
+            for bucket in sorted(by_bucket)
+        ]
+        if route:
+            calls = [c for c in call_rows if c[2] == route]
+        else:
+            calls = list(call_rows)
+        return {
+            "days": buckets_out,
+            "calls": [
+                {
+                    "request_id": r[0],
+                    "model": r[1],
+                    "route": r[2],
+                    "prompt_tokens": int(r[3] or 0),
+                    "completion_tokens": int(r[4] or 0),
+                    "total_tokens": int(r[5] or 0),
+                    "total_cost": round(float(r[6] or 0.0), 6),
+                    "status": r[7],
+                    "timestamp": int(r[8] or 0),
+                    "latency_ms": int(r[9] or 0),
+                }
+                for r in calls
+            ],
+        }
+
+    def route_status(
+        self, route: str, models: list[str]
+    ) -> dict[str, object]:
+        """Per-target last-call + cooldown status for a route's model list.
+
+        Returns ``{"models": {model: {...}}, "last_served": {...}}`` where
+        each model entry carries ``last_called_at`` (epoch), ``last_status``
+        and ``cooldown_remaining`` (seconds; 0 = live) plus the cooldown
+        reason while active.
+        """
+        now = int(time.time())
+        per_model: dict[str, object] = {}
+        with self._lock:
+            for model in models:
+                last = self._conn.execute(
+                    "SELECT timestamp, status FROM cost_records "
+                    "WHERE route = ? AND model = ? "
+                    "ORDER BY timestamp DESC LIMIT 1",
+                    (route, model),
+                ).fetchone()
+                cd = self._conn.execute(
+                    "SELECT until_ts, reason FROM model_cooldowns "
+                    "WHERE route = ? AND model = ?",
+                    (route, model),
+                ).fetchone()
+                remaining = (
+                    max(0, int(cd[0]) - now) if cd and int(cd[0]) > now else 0
+                )
+                per_model[model] = {
+                    "last_called_at": int(last[0]) if last else None,
+                    "last_status": last[1] if last else None,
+                    "cooldown_remaining": remaining,
+                    "cooldown_reason": (
+                        cd[1] if cd and int(cd[0]) > now else None
+                    ),
+                }
+            served = self._conn.execute(
+                "SELECT model, timestamp FROM cost_records "
+                "WHERE route = ? ORDER BY timestamp DESC LIMIT 1",
+                (route,),
+            ).fetchone()
+        return {
+            "models": per_model,
+            "last_served": (
+                {"model": served[0], "at": int(served[1])} if served else None
+            ),
+        }
+
 
 class CostTracker:
     """Async facade over CostStore + CostCalculator."""
@@ -513,6 +655,25 @@ class CostTracker:
         request list for the same window (OpenRouter-style usage page).
         """
         return self._store.daily_usage(days=days, route=route)
+
+    def usage_by_period(
+        self,
+        period: str = "day",
+        days: int = 14,
+        route: str | None = None,
+    ) -> dict[str, object]:
+        """Aggregate usage bucketed by hour / day / month."""
+        return self._store.usage_by_period(period=period, days=days, route=route)
+
+    def clear_cooldown(self, route: str, model: str) -> None:
+        """Manually reset a route-scoped model cooldown."""
+        self._store.clear_cooldown(route, model)
+
+    def route_status(
+        self, route: str, models: list[str]
+    ) -> dict[str, object]:
+        """Per-target last-call + cooldown status for a route's model list."""
+        return self._store.route_status(route, models)
 
     def set_model_cooldown(
         self, route: str, model: str, seconds: int = 3600, reason: str = ""

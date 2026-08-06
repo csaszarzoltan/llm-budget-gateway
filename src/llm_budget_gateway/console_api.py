@@ -641,6 +641,21 @@ def create_console_app(
             payload["activation"]["steps"][0]["done"] = True  # type: ignore[index]
             complete = sum(step["done"] for step in payload["activation"]["steps"])  # type: ignore[index]
             payload["activation"]["complete"] = complete  # type: ignore[index]
+        # Token totals for the "Last 24 hours" metric strip (cost_store owns
+        # token data; pc_activity only carries cost/latency).
+        try:
+            day = cost_store.usage_by_period(period="day", days=1, route=None)
+            tokens = {"tokens": 0, "prompt_tokens": 0, "completion_tokens": 0}
+            for bucket in day.get("days", []):
+                for m in bucket.get("models", []):
+                    tokens["tokens"] += int(m.get("total_tokens", 0))
+                    tokens["prompt_tokens"] += int(m.get("prompt_tokens", 0))
+                    tokens["completion_tokens"] += int(
+                        m.get("completion_tokens", 0)
+                    )
+            payload["metrics"].update(tokens)  # type: ignore[index]
+        except Exception:
+            pass
         return payload
 
     @app.get("/v1/product/templates")
@@ -838,13 +853,41 @@ def create_console_app(
 
     @app.get("/v1/product/usage")
     async def product_usage(
-        days: int = 14, route: str = ""
+        days: int = 14, route: str = "", period: str = "day"
     ) -> dict[str, object]:
         base = product.usage()
-        base["daily"] = cost_store.daily_usage(
-            days=max(1, min(days, 90)), route=route or None
+        bucket_key = {"hour": "hourly", "day": "daily", "month": "monthly"}.get(
+            period, "daily"
+        )
+        base[bucket_key] = cost_store.usage_by_period(
+            period=period,
+            days=max(1, min(days, 90)),
+            route=route or None,
         )
         return base
+
+    @app.get("/v1/product/routes/{route_id}/status")
+    async def product_route_status(route_id: str) -> dict[str, object]:
+        try:
+            route = product.route(route_id)
+        except KeyError as exc:
+            raise HTTPException(404, "unknown route") from exc
+        models = [str(t.get("model", "")) for t in route.get("targets", [])]
+        return {
+            "route": route["name"],
+            "status": cost_store.route_status(route["name"], models),
+        }
+
+    @app.delete("/v1/product/routes/{route_id}/cooldowns")
+    async def clear_product_cooldown(
+        route_id: str, model: str
+    ) -> dict[str, object]:
+        try:
+            route = product.route(route_id)
+        except KeyError as exc:
+            raise HTTPException(404, "unknown route") from exc
+        cost_store.clear_cooldown(route["name"], model)
+        return {"cleared": True, "route": route["name"], "model": model}
 
     @app.post("/v1/product/applications/{app_id}/keys/rotate")
     async def rotate_product_key(app_id: str) -> dict[str, object]:

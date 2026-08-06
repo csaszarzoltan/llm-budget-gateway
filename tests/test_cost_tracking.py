@@ -632,3 +632,66 @@ class TestAccumulateUsageBehavior:
         assert usage.prompt_tokens == 0
         assert usage.completion_tokens == 0
         assert usage.total_tokens == 0
+
+
+def test_usage_by_period_buckets(store: CostStore) -> None:
+    """usage_by_period buckets by hour / day / month with token sums."""
+    import time as _t
+
+    now = int(_t.time())
+    base = {
+        "request_id": "r1", "api_key": "k", "user_id": None, "team": None,
+        "model": "nemotron", "provider": "p", "prompt_tokens": 100,
+        "completion_tokens": 50, "total_tokens": 150, "input_cost": 0.0,
+        "output_cost": 0.0, "total_cost": 0.001, "latency_ms": 10,
+        "status": "success", "timestamp": now, "route": "hermes-default",
+    }
+    for i in range(3):
+        store.insert(UsageRecord(**{**base, "request_id": f"r{i}", "timestamp": now - i * 3600}))
+    day = store.usage_by_period(period="day", days=1)
+    assert day["days"], "expected at least one day bucket"
+    total = sum(
+        m["total_tokens"] for b in day["days"] for m in b["models"]
+    )
+    assert total == 450
+    hourly = store.usage_by_period(period="hour", days=24)
+    assert len(hourly["days"]) >= 1
+    monthly = store.usage_by_period(period="month", days=30)
+    assert monthly["days"]
+    # route filter narrows the call list
+    filtered = store.usage_by_period(period="day", days=1, route="other-route")
+    assert filtered["calls"] == []
+
+
+def test_route_status_and_cooldown_reset(store: CostStore) -> None:
+    """route_status reports last call + cooldown; clear_cooldown resets."""
+    import time as _t
+
+    now = int(_t.time())
+    store.insert(
+        UsageRecord(
+            request_id="r1", api_key="k", user_id=None, team=None,
+            model="@openrouter/nvidia/nemotron-3-ultra-550b-a55b:free",
+            provider="p", prompt_tokens=1, completion_tokens=1,
+            total_tokens=2, input_cost=0.0, output_cost=0.0,
+            total_cost=0.0, latency_ms=5, status="success",
+            timestamp=now, route="hermes-default",
+        )
+    )
+    st = store.route_status("hermes-default", ["@openrouter/nvidia/nemotron-3-ultra-550b-a55b:free", "other-model"])
+    info = st["models"]["@openrouter/nvidia/nemotron-3-ultra-550b-a55b:free"]
+    assert info["last_status"] == "success"
+    assert info["last_called_at"] == now
+    assert info["cooldown_remaining"] == 0
+    assert st["last_served"]["model"] == "@openrouter/nvidia/nemotron-3-ultra-550b-a55b:free"
+    # never-called model has no status
+    assert st["models"]["other-model"]["last_called_at"] is None
+
+    store.set_model_cooldown("hermes-default", "other-model", seconds=120, reason="quota")
+    st2 = store.route_status("hermes-default", ["other-model"])
+    assert st2["models"]["other-model"]["cooldown_remaining"] > 0
+    assert st2["models"]["other-model"]["cooldown_reason"] == "quota"
+    store.clear_cooldown("hermes-default", "other-model")
+    st3 = store.route_status("hermes-default", ["other-model"])
+    assert st3["models"]["other-model"]["cooldown_remaining"] == 0
+    assert st3["models"]["other-model"]["cooldown_reason"] is None
