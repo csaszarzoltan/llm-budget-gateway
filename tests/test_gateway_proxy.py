@@ -32,7 +32,12 @@ from llm_budget_gateway.cost_tracking import (
     ModelPrice,
     PriceMap,
 )
-from llm_budget_gateway.gateway_proxy import ApiKeyError, GatewayProxy, ProviderResponse
+from llm_budget_gateway.gateway_proxy import (
+    ApiKeyError,
+    GatewayProxy,
+    ProviderResponse,
+    ProviderTimeoutError,
+)
 from llm_budget_gateway.main import create_app
 from llm_budget_gateway.model_fallback import FallbackConfig, FallbackManager
 
@@ -143,10 +148,11 @@ class TestGatewayProxyInterface:
     def test_forward_signature(self) -> None:
         sig = inspect.signature(GatewayProxy.forward)
         params = list(sig.parameters)
-        assert params == ["self", "model", "body", "stream"]
+        assert params == ["self", "model", "body", "stream", "timeout"]
         assert str(sig.parameters["model"].annotation) == "str"
         assert str(sig.parameters["body"].annotation) == "dict"
         assert sig.parameters["stream"].default is False
+        assert sig.parameters["timeout"].default is None
 
     def test_resolve_scopes_signature(self) -> None:
         sig = inspect.signature(GatewayProxy.resolve_scopes)
@@ -710,3 +716,118 @@ class TestCreateAppBehavior:
     def test_create_app_accepts_settings(self, settings: Settings) -> None:
         app = create_app(settings=settings)
         assert app is not None
+
+    @pytest.mark.asyncio
+    async def test_product_route_timeout_falls_back_to_next_target(
+        self, settings: Settings, mocker
+    ) -> None:
+        """A provider timeout on the primary target must fall back to the
+        next target instead of failing the request (route-loop exception
+        handling), and the timed-out target gets a cooldown."""
+        store = Mock()
+        store.published_route_by_name.return_value = {
+            "name": "hermes-default",
+            "targets": [
+                {
+                    "model": "@a/primary",
+                    "priority": 10,
+                    "timeout_seconds": 15,
+                    "on_status_codes": [429, 500],
+                },
+                {
+                    "model": "@b/fallback",
+                    "priority": 20,
+                    "timeout_seconds": 30,
+                    "on_status_codes": [429, 500],
+                },
+            ],
+        }
+        tracker = Mock()
+        tracker.model_in_cooldown.return_value = 0
+        tracker.build_record.return_value = SimpleNamespace(total_cost=0.0)
+        proxy = GatewayProxy(
+            settings=settings,
+            cost_tracker=tracker,
+            budget_enforcer=Mock(),
+            fallback_manager=FallbackManager([]),
+        )
+        proxy.attach_product_console(store)
+
+        async def _forward(
+            model: str,
+            body: dict,
+            stream: bool = False,
+            timeout: float | None = None,
+        ):
+            if model == "@a/primary":
+                raise ProviderTimeoutError(
+                    "upstream provider timed out after 15s"
+                )
+            return ProviderResponse(200, {}, {}, model, None, 5)
+
+        proxy.forward = AsyncMock(side_effect=_forward)  # type: ignore[method-assign]
+        result = await proxy.handle_chat_completion(
+            {
+                "model": "hermes-default",
+                "messages": [{"role": "user", "content": "hi"}],
+            },
+            "sk_test_abc",
+            {},
+        )
+        assert result.status_code == 200
+        assert result.model == "@b/fallback"
+        # primary attempted first, then the fallback served it
+        assert [c.args[0] for c in proxy.forward.call_args_list] == [
+            "@a/primary",
+            "@b/fallback",
+        ]
+        # the timed-out primary was marked for cooldown
+        assert tracker.set_model_cooldown.called
+
+    @pytest.mark.asyncio
+    async def test_product_route_timeout_on_last_target_maps_to_502(
+        self, settings: Settings, mocker
+    ) -> None:
+        """When the last target times out there is nowhere to fall back —
+        the request surfaces as a 502 provider error."""
+        store = Mock()
+        store.published_route_by_name.return_value = {
+            "name": "hermes-default",
+            "targets": [
+                {
+                    "model": "@a/only",
+                    "priority": 10,
+                    "timeout_seconds": 15,
+                    "on_status_codes": [429, 500],
+                },
+            ],
+        }
+        tracker2 = Mock()
+        tracker2.model_in_cooldown.return_value = 0
+        tracker2.build_record.return_value = SimpleNamespace(total_cost=0.0)
+        proxy = GatewayProxy(
+            settings=settings,
+            cost_tracker=tracker2,
+            budget_enforcer=Mock(),
+            fallback_manager=FallbackManager([]),
+        )
+        proxy.attach_product_console(store)
+
+        async def _forward(
+            model: str,
+            body: dict,
+            stream: bool = False,
+            timeout: float | None = None,
+        ):
+            raise ProviderTimeoutError("upstream provider timed out after 15s")
+
+        proxy.forward = AsyncMock(side_effect=_forward)  # type: ignore[method-assign]
+        result = await proxy.handle_chat_completion(
+            {
+                "model": "hermes-default",
+                "messages": [{"role": "user", "content": "hi"}],
+            },
+            "sk_test_abc",
+            {},
+        )
+        assert result.status_code == 502

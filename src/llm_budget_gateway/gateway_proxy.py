@@ -214,14 +214,38 @@ class GatewayProxy:
             except PermissionError:
                 pass
             else:
-                return await self._handle_logical_route(body, api_key, headers, request_id)
+                try:
+                    return await self._handle_logical_route(body, api_key, headers, request_id)
+                except ProviderTimeoutError:
+                    return self._error_response(
+                        502, "upstream provider timed out", model
+                    )
+                except Exception:
+                    logger.exception(
+                        "logical route failed request=%s model=%s", request_id, model
+                    )
+                    return self._error_response(
+                        502, "upstream provider error", model
+                    )
         if self._product_console is not None:
             try:
                 self._product_console.authenticate_application(api_key)
             except PermissionError:
                 pass
             else:
-                return await self._handle_logical_route(body, api_key, headers, request_id)
+                try:
+                    return await self._handle_logical_route(body, api_key, headers, request_id)
+                except ProviderTimeoutError:
+                    return self._error_response(
+                        502, "upstream provider timed out", model
+                    )
+                except Exception:
+                    logger.exception(
+                        "logical route failed request=%s model=%s", request_id, model
+                    )
+                    return self._error_response(
+                        502, "upstream provider error", model
+                    )
         try:
             scopes = self.resolve_scopes(api_key, headers)
         except ApiKeyError:
@@ -393,7 +417,93 @@ class GatewayProxy:
                     request_id,
                 )
                 continue
-            response = await self.forward(candidate, outbound)
+            # Per-target timeout: a target's timeout_seconds is enforced here
+            # (capped by the global provider timeout). Only applies to
+            # UI-managed routes; plane routes keep the global timeout.
+            target_timeout: float | None = None
+            if not from_plane:
+                try:
+                    to = int(
+                        next(
+                            (
+                                t.get("timeout_seconds")
+                                for t in route.get("targets", [])
+                                if str(t.get("model", "")) == candidate
+                            ),
+                            0,
+                        )
+                        or 0
+                    )
+                    if to > 0:
+                        target_timeout = min(
+                            to, int(self._settings.provider_timeout)
+                        )
+                except (TypeError, ValueError):
+                    target_timeout = None
+            try:
+                response = await self.forward(
+                    candidate, outbound, timeout=target_timeout
+                )
+            except ProviderTimeoutError:
+                if is_last:
+                    raise
+                cooldown_seconds = (
+                    int(target_cooldowns.get(candidate, 3600))
+                    if target_cooldowns
+                    else 3600
+                )
+                try:
+                    self._cost_tracker.set_model_cooldown(
+                        route_name,
+                        candidate,
+                        cooldown_seconds,
+                        reason=f"timeout_{int(target_timeout or 0)}s",
+                    )
+                except Exception:
+                    logger.exception(
+                        "cooldown record failed route=%s model=%s",
+                        route_name,
+                        candidate,
+                    )
+                fallback = f"provider_timeout_{int(target_timeout or 0)}s"
+                logger.info(
+                    "route=%s model=%s timed out after %ss request=%s",
+                    route_name,
+                    candidate,
+                    target_timeout or self._settings.provider_timeout,
+                    request_id,
+                )
+                continue
+            except Exception as exc:
+                if is_last:
+                    raise
+                cooldown_seconds = (
+                    int(target_cooldowns.get(candidate, 3600))
+                    if target_cooldowns
+                    else 3600
+                )
+                try:
+                    self._cost_tracker.set_model_cooldown(
+                        route_name,
+                        candidate,
+                        cooldown_seconds,
+                        reason="provider_error",
+                    )
+                except Exception:
+                    logger.exception(
+                        "cooldown record failed route=%s model=%s",
+                        route_name,
+                        candidate,
+                    )
+                fallback = "provider_error"
+                logger.warning(
+                    "route=%s model=%s failed request=%s error=%s",
+                    route_name,
+                    candidate,
+                    request_id,
+                    exc,
+                )
+                continue
             if response.status_code not in set(fallback_statuses):
                 served = candidate
                 break
@@ -431,7 +541,10 @@ class GatewayProxy:
             record = self._cost_tracker.build_record(
                 request_id=request_id,
                 scope=scope,
-                model=response.model,
+                # Use the gateway target name (served) — providers may echo a
+                # shortened/prefix-less model name, which would fragment the
+                # usage stats and break per-target status lookups.
+                model=served or response.model,
                 provider="direct",
                 usage=response.usage,
                 latency_ms=response.latency_ms,
@@ -587,15 +700,19 @@ class GatewayProxy:
         return None
 
     async def _forward_direct(
-        self, model: str, body: dict, stream: bool = False
+        self, model: str, body: dict, stream: bool = False, timeout: float | None = None
     ) -> ProviderResponse:
         """Forward via the direct provider transport (no litellm).
 
         The direct client resolves the model to a configured provider
         endpoint and issues a plain HTTP call. Stream=true requests are
         drained into SSE lines; usage is extracted from the final chunk.
+        ``timeout`` overrides the global provider timeout per target.
         """
         start = time.perf_counter()
+        effective_timeout = (
+            timeout if timeout is not None else self._settings.provider_timeout
+        )
         is_embedding = (
             "input" in body and "messages" not in body and "prompt" not in body
         )
@@ -609,16 +726,16 @@ class GatewayProxy:
             if is_stream:
                 status, chunks, served = await asyncio.wait_for(
                     self._direct_client.forward_stream(model, body, kind=kind),  # type: ignore[attr-defined]
-                    timeout=self._settings.provider_timeout,
+                    timeout=effective_timeout,
                 )
             else:
                 status, data, served = await asyncio.wait_for(
                     self._direct_client.forward(model, body, kind=kind),  # type: ignore[attr-defined]
-                    timeout=self._settings.provider_timeout,
+                    timeout=effective_timeout,
                 )
         except TimeoutError as exc:
             raise ProviderTimeoutError(
-                f"upstream provider timed out after {self._settings.provider_timeout}s"
+                f"upstream provider timed out after {effective_timeout}s"
             ) from exc
         except Exception as exc:
             status_code = int(getattr(exc, "status_code", 502))
@@ -680,7 +797,7 @@ class GatewayProxy:
         return await self.forward(model, body)
 
     async def forward(
-        self, model: str, body: dict, stream: bool = False
+        self, model: str, body: dict, stream: bool = False, timeout: float | None = None
     ) -> ProviderResponse:
         """Forward to the provider via litellm (stream-aware, timeout-bounded).
 
@@ -691,11 +808,18 @@ class GatewayProxy:
         framing + terminal ``data: [DONE]``) so the HTTP layer can stream
         them instead of crashing on raw chunk objects.
 
+        ``timeout`` overrides the global provider timeout per target (used
+        by the UI-managed route loop so a target's ``timeout_seconds`` is
+        actually enforced).
+
         Returns a ProviderResponse carrying usage, latency and the
         provider-shaped body (dict for non-stream, SSE line list for
         stream=true).
         """
         start = time.perf_counter()
+        effective_timeout = (
+            timeout if timeout is not None else self._settings.provider_timeout
+        )
         # Direct provider transport first: when a direct client is attached
         # and knows this model, forward as plain HTTP (no litellm). This is
         # the path for gateway-configured providers (flat model names like
@@ -708,7 +832,9 @@ class GatewayProxy:
                 except Exception:
                     resolved = None
                 if resolved is not None:
-                    return await self._forward_direct(model, body, stream)
+                    return await self._forward_direct(
+                        model, body, stream, timeout=effective_timeout
+                    )
 
         # Whitelist only — never forward api_key/base_url/headers from the
         # client body (provider auth/endpoint come from gateway settings/env).
@@ -733,16 +859,16 @@ class GatewayProxy:
             if is_embedding:
                 response = await asyncio.wait_for(
                     litellm.aembedding(**kwargs),
-                    timeout=self._settings.provider_timeout,
+                    timeout=effective_timeout,
                 )
             else:
                 response = await asyncio.wait_for(
                     litellm.acompletion(**kwargs),
-                    timeout=self._settings.provider_timeout,
+                    timeout=effective_timeout,
                 )
         except TimeoutError as exc:
             raise ProviderTimeoutError(
-                f"upstream provider timed out after {self._settings.provider_timeout}s"
+                f"upstream provider timed out after {effective_timeout}s"
             ) from exc
 
         usage: TokenUsage | None = None
