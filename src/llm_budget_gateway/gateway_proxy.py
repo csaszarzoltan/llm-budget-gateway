@@ -640,6 +640,10 @@ class GatewayProxy:
                     statuses.add(int(code))
                 except (TypeError, ValueError):
                     continue
+        # Context-window overflow (413/422) is always fallback-eligible:
+        # a request too large for one target's window may fit the next
+        # target's — independent of the UI's on_status_codes list.
+        statuses.update({413, 422})
         return {
             "candidates": [str(t["model"]) for t in ordered],
             "fallback_statuses": sorted(statuses),
