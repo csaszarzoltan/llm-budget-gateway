@@ -415,3 +415,64 @@ def test_get_exposes_user_agent_and_base_url_without_secret(
     assert item["user_agent"] == "opencode/1.14.41"
     assert "api_key" not in item
     assert "sk-hidden" not in str(item)
+
+
+def test_context_length_falls_back_to_openrouter_catalog(
+    store: ProviderConnectionStore,
+) -> None:
+    """Providers without a context window in /models get it from OpenRouter."""
+    openrouter = store.create(
+        {
+            "name": "OpenRouter",
+            "slug": "openrouter",
+            "provider_type": "openai_compatible",
+            "api_key": "sk-or",
+            "base_url": "https://openrouter.ai/api/v1",
+        }
+    )
+    store.save_models(
+        openrouter["id"],
+        [
+            {
+                "id": "deepseek/deepseek-v4-flash",
+                "raw": {"id": "deepseek/deepseek-v4-flash", "context_length": 1048576},
+            }
+        ],
+    )
+    og = store.create(
+        {
+            "name": "OpenCode Go",
+            "slug": "opencode-go",
+            "provider_type": "openai_compatible",
+            "api_key": "sk-go",
+            "base_url": "https://opencode.ai/zen/go/v1",
+        }
+    )
+    store.save_models(
+        og["id"],
+        [{"id": "deepseek-v4-flash", "raw": {"id": "deepseek-v4-flash"}}],
+    )
+    models = store.models(og["id"])
+    assert models[0]["context_length"] == 1048576
+
+
+def test_context_length_accepts_google_input_token_limit() -> None:
+    from llm_budget_gateway.provider_connections import _extract_context_length
+
+    assert (
+        _extract_context_length(
+            {"name": "models/gemini-2.0-flash", "inputTokenLimit": 1048576}
+        )
+        == 1048576
+    )
+
+
+def test_context_length_reads_nested_metadata_block() -> None:
+    from llm_budget_gateway.provider_connections import _extract_context_length
+
+    assert (
+        _extract_context_length(
+            {"id": "x", "metadata": {"context_length": 131072, "other": 1}}
+        )
+        == 131072
+    )

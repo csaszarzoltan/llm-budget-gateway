@@ -392,13 +392,29 @@ CREATE TABLE IF NOT EXISTS provider_models(provider_id TEXT NOT NULL,model_id TE
             "SELECT model_id,display_name,owned_by,capabilities,raw_json,last_seen FROM provider_models WHERE provider_id=? ORDER BY model_id",
             (provider_id,),
         ).fetchall()
+        # Catalog fallback: providers whose /models endpoint does not publish
+        # a context window (opencode-go, opencode-zen, xiaomi) get the value
+        # from the OpenRouter catalog by flat model name (deepseek-v4-flash,
+        # mimo-v2.5, ...) — OpenRouter publishes windows for nearly every model.
+        fallback_ctx: dict[str, int] = {}
+        try:
+            for row in self.db.execute(
+                "SELECT model_id, raw_json FROM provider_models "
+                "WHERE provider_id IN (SELECT id FROM provider_connections WHERE slug='openrouter')"
+            ):
+                ctx = _extract_context_length(json.loads(row[1]))
+                if ctx:
+                    fallback_ctx.setdefault(str(row[0]).split("/")[-1], ctx)
+        except Exception:
+            pass  # catalog missing -> no fallback, context stays None
         return [
             {
                 "id": r[0],
                 "display_name": r[1],
                 "owned_by": r[2],
                 "capabilities": json.loads(r[3]),
-                "context_length": _extract_context_length(json.loads(r[4])),
+                "context_length": _extract_context_length(json.loads(r[4]))
+                or fallback_ctx.get(str(r[0])),
                 "last_seen": r[5],
                 "gateway_model": f"@{provider['slug']}/{r[0]}",
             }
@@ -568,6 +584,8 @@ def _extract_context_length(raw: dict[str, Any] | None) -> int | None:
         "max_model_len",
         "ctx_len",
         "contextSize",
+        "inputTokenLimit",  # Google Generative Language API
+        "max_input_tokens",
     ):
         value = raw.get(key)
         if value is None:
@@ -578,6 +596,27 @@ def _extract_context_length(raw: dict[str, Any] | None) -> int | None:
             continue
         if parsed > 0:
             return parsed
+    # Nested metadata block (deepinfra publishes context_length under
+    # ``metadata.context_length``).
+    meta = raw.get("metadata")
+    if isinstance(meta, dict):
+        for key in (
+            "context_length",
+            "max_context_length",
+            "context_window",
+            "max_model_len",
+            "ctx_len",
+            "max_tokens",
+        ):
+            value = meta.get(key)
+            if value is None:
+                continue
+            try:
+                parsed = int(value)
+            except (TypeError, ValueError):
+                continue
+            if parsed > 0:
+                return parsed
     return None
 
 
