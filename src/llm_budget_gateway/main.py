@@ -243,16 +243,21 @@ def create_app(settings: Settings | None = None) -> FastAPI:
 
     @app.get("/v1/models")
     async def list_models() -> JSONResponse:
-        # Only published UI-managed routes (pc_routes) are exposed as
-        # first-class model names ("hermes-default" / "hermes-planner") —
-        # one route per model. Target provider models are intentionally
-        # NOT listed: they are internal fallback details; the route decides
-        # which target serves a request. The full litellm catalog and the
-        # legacy fallback configs are excluded for the same reason, so the
-        # interactive model picker in clients like Hermes shows exactly the
-        # handful of route names a user can actually select. The request
-        # path is unchanged (_model_known still accepts litellm-known
-        # models — only the listing is narrowed).
+        # Only UI-managed routes that the proxy actually serves are exposed
+        # as first-class model names ("hermes-default" / "hermes-planner") —
+        # one route per model. The proxy resolves routes by their latest
+        # draft even before publish (Save draft makes the change live), so
+        # draft routes are listed too — otherwise clients like Hermes lose
+        # the route's context_length the moment an editor saves a draft and
+        # fall back to stale defaults. Only archived routes are excluded.
+        # Target provider models are intentionally NOT listed: they are
+        # internal fallback details; the route decides which target serves a
+        # request. The full litellm catalog and the legacy fallback configs
+        # are excluded for the same reason, so the interactive model picker
+        # in clients like Hermes shows exactly the handful of route names a
+        # user can actually select. The request path is unchanged
+        # (_model_known still accepts litellm-known models — only the
+        # listing is narrowed).
         # Include context_length: the minimum across all targets of the route
         # (since any target may serve the request via fallback).
         models: list[dict] = []
@@ -260,7 +265,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         if product is not None:
             try:
                 for route in product.routes():
-                    if route.get("status") in {"active", "published"}:
+                    if route.get("status") != "archived":
                         route_name = str(route.get("name", ""))
                         # compute min context_length across targets
                         ctx_lengths = [
