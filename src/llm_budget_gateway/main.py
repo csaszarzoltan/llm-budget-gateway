@@ -211,7 +211,10 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         # Aligned with the M1 decision (_model_known): the gateway accepts
         # gateway-configured models (overrides + fallback chains) AND any
         # litellm-known model (forwarded via litellm anyway), so the listing
-        # mirrors exactly what the request path will serve.
+        # mirrors exactly what the request path will serve. Published
+        # UI-managed routes (pc_routes) are exposed as first-class model
+        # names so clients like Hermes see "hermes-default" / "hermes-planner"
+        # as selectable models — one route per model.
         models: set[str] = set(settings.pricing_overrides)
         for cfg in fallback_configs:
             models.add(cfg.model)
@@ -222,6 +225,14 @@ def create_app(settings: Settings | None = None) -> FastAPI:
             models.update(litellm.model_cost)
         except Exception:  # pragma: no cover - litellm is a hard dep
             pass
+        product = getattr(proxy, "_product_console", None)
+        if product is not None:
+            try:
+                for route in product.routes():
+                    if route.get("status") in {"active", "published"}:
+                        models.add(str(route.get("name", "")))
+            except Exception:
+                logger.exception("failed to list UI-managed routes as models")
         return JSONResponse(
             {
                 "object": "list",

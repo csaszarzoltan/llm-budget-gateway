@@ -41,6 +41,7 @@ from .priority_features import (
     SchemaFormService,
 )
 from .priority_routes import PriorityRouteStore
+from .cost_tracking import CostStore
 from .product_console import ProductConsoleStore
 from .product_extensions import ProductExtensions
 from .production_readiness import (
@@ -132,6 +133,7 @@ def create_console_app(
     project_root: Path | None = None,
     product_connection: sqlite3.Connection | None = None,
     provider_connection: sqlite3.Connection | None = None,
+    cost_connection: sqlite3.Connection | None = None,
     credential_key_path: Path | None = None,
     provider_discovery_transport: object | None = None,
     auto_start_services: bool = False,
@@ -145,6 +147,10 @@ def create_console_app(
     )
     product = ProductConsoleStore(
         product_connection or sqlite3.connect(":memory:", check_same_thread=False)
+    )
+    cost_store = CostStore(
+        connection=cost_connection
+        or sqlite3.connect(":memory:", check_same_thread=False)
     )
     trace_store = TraceStore(
         trace_connection or sqlite3.connect(":memory:", check_same_thread=False)
@@ -831,8 +837,14 @@ def create_console_app(
         return {"activity": product.activity()}
 
     @app.get("/v1/product/usage")
-    async def product_usage() -> dict[str, object]:
-        return product.usage()
+    async def product_usage(
+        days: int = 14, route: str = ""
+    ) -> dict[str, object]:
+        base = product.usage()
+        base["daily"] = cost_store.daily_usage(
+            days=max(1, min(days, 90)), route=route or None
+        )
+        return base
 
     @app.post("/v1/product/applications/{app_id}/keys/rotate")
     async def rotate_product_key(app_id: str) -> dict[str, object]:

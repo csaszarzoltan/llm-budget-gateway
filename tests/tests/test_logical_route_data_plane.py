@@ -315,3 +315,130 @@ def test_model_windows_validation_rejects_bad_shape() -> None:
                 },
             },
         )
+
+
+def ui_route_store() -> Mock:
+    """Mock ProductConsoleStore serving one published UI route."""
+    store = Mock()
+    store.authenticate_application.return_value = None
+    store.published_route_by_name.return_value = {
+        "name": "hermes-default",
+        "targets": [
+            {
+                "model": "@opencode-zen/mimo-free",
+                "priority": 10,
+                "timezone": "Europe/Zurich",
+                "start": "00:00",
+                "end": "23:59",
+                "required_capabilities": [],
+                "on_status_codes": [429, 500],
+            },
+            {
+                "model": "@opencode-go/deepseek-flash",
+                "priority": 20,
+                "timezone": "Europe/Zurich",
+                "start": "00:00",
+                "end": "23:59",
+                "required_capabilities": [],
+                "on_status_codes": [429, 500],
+            },
+        ],
+    }
+    return store
+
+
+@pytest.mark.asyncio
+async def test_proxy_skips_target_in_cooldown() -> None:
+    """A cooling-down model is skipped; the chain starts at the next target."""
+    store = ui_route_store()
+    enforcer = Mock()
+    enforcer.check_sync.return_value = None
+    enforcer.check_hard = AsyncMock(return_value=None)
+    tracker = Mock()
+    tracker.model_in_cooldown.side_effect = (
+        lambda route, model: 3600 if "mimo" in model else 0
+    )
+    tracker.build_record.return_value = SimpleNamespace(total_cost=0.0)
+    tracker.record = AsyncMock(return_value=None)
+    proxy = GatewayProxy(Settings(virtual_keys={}), tracker, enforcer, Mock())
+    proxy.attach_product_console(store)
+    proxy.forward = AsyncMock(
+        return_value=ProviderResponse(200, {"choices": []}, {}, "@opencode-go/deepseek-flash", None, 9)
+    )
+    result = await proxy.handle_chat_completion(
+        {"model": "hermes-default", "messages": [{"role": "user", "content": "hi"}]},
+        "gw_key",
+        {},
+    )
+    assert result.status_code == 200
+    proxy.forward.assert_awaited_once()
+    assert proxy.forward.await_args.args[0] == "@opencode-go/deepseek-flash"
+    assert result.headers["X-Gateway-Fallback"].startswith("model_cooldown_")
+    tracker.set_model_cooldown.assert_not_called()
+
+
+@pytest.mark.asyncio
+async def test_proxy_sets_cooldown_on_fallback_status() -> None:
+    """A 429 from a target puts it into cooldown (default 3600s)."""
+    store = ui_route_store()
+    enforcer = Mock()
+    enforcer.check_sync.return_value = None
+    enforcer.check_hard = AsyncMock(return_value=None)
+    tracker = Mock()
+    tracker.model_in_cooldown.return_value = 0
+    tracker.build_record.return_value = SimpleNamespace(total_cost=0.0)
+    tracker.record = AsyncMock(return_value=None)
+    proxy = GatewayProxy(Settings(virtual_keys={}), tracker, enforcer, Mock())
+    proxy.attach_product_console(store)
+    proxy.forward = AsyncMock(
+        side_effect=[
+            ProviderResponse(429, {"error": {"message": "quota"}}, {}, "@opencode-zen/mimo-free", None, 5),
+            ProviderResponse(200, {"choices": []}, {}, "@opencode-go/deepseek-flash", None, 9),
+        ]
+    )
+    result = await proxy.handle_chat_completion(
+        {"model": "hermes-default", "messages": []},
+        "gw_key",
+        {},
+    )
+    assert result.status_code == 200
+    tracker.set_model_cooldown.assert_called_once()
+    args = tracker.set_model_cooldown.call_args.args
+    assert args[0] == "hermes-default"
+    assert args[1] == "@opencode-zen/mimo-free"
+    assert args[2] == 3600
+    assert (
+        tracker.set_model_cooldown.call_args.kwargs.get("reason") == "http_429"
+    )
+    assert [c.args[0] for c in proxy.forward.await_args_list] == [
+        "@opencode-zen/mimo-free",
+        "@opencode-go/deepseek-flash",
+    ]
+
+
+@pytest.mark.asyncio
+async def test_proxy_uses_target_cooldown_seconds_override() -> None:
+    """Per-target cooldown_seconds wins over the 3600 default."""
+    store = ui_route_store()
+    store.published_route_by_name.return_value["targets"][0]["cooldown_seconds"] = 120
+    enforcer = Mock()
+    enforcer.check_sync.return_value = None
+    enforcer.check_hard = AsyncMock(return_value=None)
+    tracker = Mock()
+    tracker.model_in_cooldown.return_value = 0
+    tracker.build_record.return_value = SimpleNamespace(total_cost=0.0)
+    tracker.record = AsyncMock(return_value=None)
+    proxy = GatewayProxy(Settings(virtual_keys={}), tracker, enforcer, Mock())
+    proxy.attach_product_console(store)
+    proxy.forward = AsyncMock(
+        return_value=ProviderResponse(429, {"error": {"message": "quota"}}, {}, "@opencode-zen/mimo-free", None, 5)
+    )
+    result = await proxy.handle_chat_completion(
+        {"model": "hermes-default", "messages": []},
+        "gw_key",
+        {},
+    )
+    assert result.status_code == 429
+    first_call = tracker.set_model_cooldown.call_args_list[0]
+    assert first_call.args[1] == "@opencode-zen/mimo-free"
+    assert first_call.args[2] == 120

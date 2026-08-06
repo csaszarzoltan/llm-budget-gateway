@@ -33,7 +33,19 @@ CREATE TABLE IF NOT EXISTS cost_records (
     status TEXT NOT NULL,
     timestamp INTEGER NOT NULL,
     tool_name TEXT,
-    project TEXT
+    project TEXT,
+    route TEXT
+)
+"""
+
+
+_CREATE_COOLDOWN_TABLE = """
+CREATE TABLE IF NOT EXISTS model_cooldowns (
+    route TEXT NOT NULL,
+    model TEXT NOT NULL,
+    until_ts INTEGER NOT NULL,
+    reason TEXT,
+    PRIMARY KEY (route, model)
 )
 """
 
@@ -70,6 +82,7 @@ class UsageRecord:
     timestamp: int  # epoch seconds
     tool_name: str | None = None  # e.g. "server_id:tool_name" for MCP tool calls
     project: str | None = None  # project scope key when attribution is project-scoped
+    route: str | None = None  # logical route name that served this request
 
 
 def accumulate_usage(chunks: list[dict]) -> TokenUsage:
@@ -148,14 +161,19 @@ class CostStore:
     off the event loop).
     """
 
-    def __init__(self, db_path: str) -> None:
-        self._db_path = db_path
+    def __init__(
+        self, db_path: str | None = None, connection: sqlite3.Connection | None = None
+    ) -> None:
+        self._db_path = db_path or ""
         self._lock = threading.Lock()
-        self._conn = sqlite3.connect(db_path, check_same_thread=False)
+        self._conn = connection or sqlite3.connect(
+            db_path or ":memory:", check_same_thread=False
+        )
         self._conn.row_factory = sqlite3.Row
         with self._lock:
             self._conn.execute("PRAGMA journal_mode=WAL")
             self._conn.execute(_CREATE_TABLE)
+            self._conn.execute(_CREATE_COOLDOWN_TABLE)
             self._migrate_legacy_schema()
             self._conn.execute(
                 "CREATE INDEX IF NOT EXISTS idx_cost_records_timestamp "
@@ -178,7 +196,11 @@ class CostStore:
         existing = {
             row[1] for row in self._conn.execute("PRAGMA table_info(cost_records)")
         }
-        for column, definition in (("tool_name", "TEXT"), ("project", "TEXT")):
+        for column, definition in (
+            ("tool_name", "TEXT"),
+            ("project", "TEXT"),
+            ("route", "TEXT"),
+        ):
             if column not in existing:
                 self._conn.execute(
                     f"ALTER TABLE cost_records ADD COLUMN {column} {definition}"
@@ -193,8 +215,8 @@ class CostStore:
                     request_id, api_key, user_id, team, model, provider,
                     prompt_tokens, completion_tokens, total_tokens,
                     input_cost, output_cost, total_cost,
-                    latency_ms, status, timestamp, tool_name, project
-                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    latency_ms, status, timestamp, tool_name, project, route
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 """,
                 (
                     record.request_id,
@@ -214,6 +236,7 @@ class CostStore:
                     record.timestamp,
                     record.tool_name,
                     record.project,
+                    record.route,
                 ),
             )
             self._conn.commit()
@@ -262,6 +285,154 @@ class CostStore:
         with self._lock:
             self._conn.close()
 
+    def daily_usage(
+        self,
+        days: int = 14,
+        route: str | None = None,
+    ) -> dict[str, object]:
+        """Aggregate token usage per day per serving model, plus the raw
+        request list for the same window (OpenRouter-style usage page).
+
+        Returns:
+            {
+              "days": [{"date": "YYYY-MM-DD", "models": [
+                  {"model": str, "prompt_tokens": int, "completion_tokens": int,
+                   "total_tokens": int, "requests": int, "cost_usd": float}, ...
+              ]}],
+              "calls": [{"request_id", "model", "route", "prompt_tokens",
+                         "completion_tokens", "total_tokens", "total_cost",
+                         "status", "timestamp", "latency_ms"}],
+            }
+        """
+        since = int(time.time()) - days * 86400
+        with self._lock:
+            day_rows = self._conn.execute(
+                """
+                SELECT date(timestamp, 'unixepoch') AS day, model,
+                       SUM(prompt_tokens), SUM(completion_tokens),
+                       SUM(total_tokens), COUNT(*), SUM(total_cost)
+                FROM cost_records
+                WHERE timestamp >= ?
+                GROUP BY day, model
+                ORDER BY day ASC
+                """,
+                (since,),
+            ).fetchall()
+            call_rows = self._conn.execute(
+                """
+                SELECT request_id, model, route, prompt_tokens, completion_tokens,
+                       total_tokens, total_cost, status, timestamp, latency_ms
+                FROM cost_records
+                WHERE timestamp >= ?
+                ORDER BY timestamp DESC
+                LIMIT 200
+                """,
+                (since,),
+            ).fetchall()
+        by_day: dict[str, list[dict[str, object]]] = {}
+        for day, model, pt, ct, tt, reqs, cost in day_rows:
+            by_day.setdefault(day, []).append(
+                {
+                    "model": model,
+                    "prompt_tokens": int(pt or 0),
+                    "completion_tokens": int(ct or 0),
+                    "total_tokens": int(tt or 0),
+                    "requests": int(reqs or 0),
+                    "cost_usd": round(float(cost or 0.0), 6),
+                }
+            )
+        days_out = [
+            {"date": day, "models": by_day[day]} for day in sorted(by_day)
+        ]
+        if route:
+            calls = [c for c in call_rows if c[2] == route]
+        else:
+            calls = list(call_rows)
+        return {
+            "days": days_out,
+            "calls": [
+                {
+                    "request_id": r[0],
+                    "model": r[1],
+                    "route": r[2],
+                    "prompt_tokens": int(r[3] or 0),
+                    "completion_tokens": int(r[4] or 0),
+                    "total_tokens": int(r[5] or 0),
+                    "total_cost": round(float(r[6] or 0.0), 6),
+                    "status": r[7],
+                    "timestamp": int(r[8] or 0),
+                    "latency_ms": int(r[9] or 0),
+                }
+                for r in calls
+            ],
+        }
+
+    def set_model_cooldown(
+        self,
+        route: str,
+        model: str,
+        seconds: int = 3600,
+        reason: str = "",
+    ) -> None:
+        """Mark ``model`` as unavailable inside ``route`` for ``seconds``.
+
+        The route-scoped key means one route failing over from a model does
+        not penalise another route that relies on the same model. Used by the
+        proxy after a fallback-triggering response (429/5xx) so the whole
+        fallback chain is not walked again for every request while a model's
+        daily quota is exhausted.
+        """
+        until = int(time.time()) + max(1, int(seconds))
+        with self._lock:
+            self._conn.execute(
+                "INSERT OR REPLACE INTO model_cooldowns "
+                "(route, model, until_ts, reason) VALUES (?, ?, ?, ?)",
+                (route, model, until, reason),
+            )
+            self._conn.commit()
+
+    def model_in_cooldown(self, route: str, model: str) -> int:
+        """Return remaining cooldown seconds for (route, model); 0 = live."""
+        now = int(time.time())
+        with self._lock:
+            row = self._conn.execute(
+                "SELECT until_ts FROM model_cooldowns "
+                "WHERE route = ? AND model = ?",
+                (route, model),
+            ).fetchone()
+        if row is None:
+            return 0
+        remaining = int(row[0]) - now
+        if remaining <= 0:
+            with self._lock:
+                self._conn.execute(
+                    "DELETE FROM model_cooldowns WHERE route = ? AND model = ?",
+                    (route, model),
+                )
+                self._conn.commit()
+            return 0
+        return remaining
+
+    def active_cooldowns(self) -> list[dict[str, object]]:
+        """List not-yet-expired cooldowns (for the UI Routes tab)."""
+        now = int(time.time())
+        with self._lock:
+            rows = self._conn.execute(
+                "SELECT route, model, until_ts, reason FROM model_cooldowns "
+                "WHERE until_ts > ? ORDER BY until_ts ASC",
+                (now,),
+            ).fetchall()
+        return [
+            {
+                "route": r[0],
+                "model": r[1],
+                "until": int(r[2]),
+                "remaining_seconds": int(r[2]) - now,
+                "reason": r[3],
+            }
+            for r in rows
+        ]
+
 
 class CostTracker:
     """Async facade over CostStore + CostCalculator."""
@@ -294,6 +465,7 @@ class CostTracker:
         usage: TokenUsage | None,
         latency_ms: int,
         status: str,
+        route: str | None = None,
     ) -> UsageRecord:
         """Assemble a UsageRecord, computing costs from usage (zero when None)."""
         if usage is not None:
@@ -322,4 +494,29 @@ class CostTracker:
             latency_ms=latency_ms,
             status=status,
             timestamp=int(time.time()),
+            route=route,
         )
+
+    def daily_usage(
+        self,
+        days: int = 14,
+        route: str | None = None,
+    ) -> dict[str, object]:
+        """Aggregate token usage per day per serving model, plus the raw
+        request list for the same window (OpenRouter-style usage page).
+        """
+        return self._store.daily_usage(days=days, route=route)
+
+    def set_model_cooldown(
+        self, route: str, model: str, seconds: int = 3600, reason: str = ""
+    ) -> None:
+        """Mark ``model`` unavailable inside ``route`` (route-scoped)."""
+        self._store.set_model_cooldown(route, model, seconds, reason)
+
+    def model_in_cooldown(self, route: str, model: str) -> int:
+        """Remaining cooldown seconds for (route, model); 0 = live."""
+        return self._store.model_in_cooldown(route, model)
+
+    def active_cooldowns(self) -> list[dict[str, object]]:
+        """Not-yet-expired cooldowns for the UI."""
+        return self._store.active_cooldowns()

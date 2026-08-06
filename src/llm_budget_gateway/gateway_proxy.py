@@ -294,6 +294,7 @@ class GatewayProxy:
             candidates = decision["candidates"]
             fallback_statuses = decision["fallback_statuses"]
             fallback = decision.get("fallback_reason") or "none"
+            target_cooldowns = decision.get("target_cooldowns", {})
             route_name = route["name"]
         else:
             # 2) Logical routing plane (admin-created routes).
@@ -316,13 +317,50 @@ class GatewayProxy:
             candidates.insert(0, selected)
             fallback = decision.get("fallback_reason") or "none"
             fallback_statuses = decision.get("fallback_statuses", [])
+            target_cooldowns = {}
             route_name = alias
         response = None
         outbound = {k: v for k, v in body.items() if k != "metadata"}
         for index, candidate in enumerate(candidates):
+            is_last = index + 1 >= len(candidates)
+            remaining = 0
+            if not from_plane:
+                try:
+                    remaining = self._cost_tracker.model_in_cooldown(
+                        route_name, candidate
+                    )
+                except Exception:
+                    remaining = 0
+            if remaining and not is_last:
+                # Model is cooling down after a recent failure (e.g. daily
+                # quota exhausted) — skip it instead of walking the whole
+                # chain again on every request.
+                fallback = f"model_cooldown_{remaining}s"
+                logger.info(
+                    "route=%s model=%s skipped (cooldown %ss) request=%s",
+                    route_name,
+                    candidate,
+                    remaining,
+                    request_id,
+                )
+                continue
             response = await self.forward(candidate, outbound)
             if response.status_code not in set(fallback_statuses):
                 break
+            cooldown_seconds = 3600
+            if target_cooldowns:
+                cooldown_seconds = int(target_cooldowns.get(candidate, 3600))
+            try:
+                self._cost_tracker.set_model_cooldown(
+                    route_name,
+                    candidate,
+                    cooldown_seconds,
+                    reason=f"http_{response.status_code}",
+                )
+            except Exception:
+                logger.exception(
+                    "cooldown record failed route=%s model=%s", route_name, candidate
+                )
             if index + 1 < len(candidates):
                 fallback = f"provider_status_{response.status_code}"
         assert response is not None
@@ -342,6 +380,7 @@ class GatewayProxy:
                 usage=response.usage,
                 latency_ms=response.latency_ms,
                 status="success" if response.status_code < 400 else "error",
+                route=route_name,
             )
             cost = float(getattr(record, "total_cost", 0.0))
             result = self._cost_tracker.record(record)
@@ -413,6 +452,10 @@ class GatewayProxy:
             "candidates": [str(t["model"]) for t in ordered],
             "fallback_statuses": sorted(statuses),
             "fallback_reason": None if not excluded else "outside_schedule",
+            "target_cooldowns": {
+                str(t["model"]): int(t.get("cooldown_seconds", 3600))
+                for t in ordered
+            },
         }
 
     async def _forward_direct(

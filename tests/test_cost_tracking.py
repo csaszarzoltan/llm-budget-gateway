@@ -13,6 +13,7 @@ from __future__ import annotations
 
 import inspect
 import sqlite3
+import time
 from dataclasses import fields, is_dataclass
 
 import pytest
@@ -131,6 +132,7 @@ class TestUsageRecordInterface:
             "timestamp",
             "tool_name",
             "project",
+            "route",
         }
 
     def test_constructible(self) -> None:
@@ -191,7 +193,7 @@ class TestCostCalculatorInterface:
 class TestCostStoreInterface:
     def test_init_signature(self) -> None:
         sig = inspect.signature(CostStore.__init__)
-        assert list(sig.parameters) == ["self", "db_path"]
+        assert list(sig.parameters) == ["self", "db_path", "connection"]
 
     def test_insert_signature(self) -> None:
         sig = inspect.signature(CostStore.insert)
@@ -207,6 +209,17 @@ class TestCostStoreInterface:
     def test_close_signature(self) -> None:
         sig = inspect.signature(CostStore.close)
         assert list(sig.parameters) == ["self"]
+
+    def test_set_model_cooldown_signature(self) -> None:
+        sig = inspect.signature(CostStore.set_model_cooldown)
+        params = list(sig.parameters)
+        assert params == ["self", "route", "model", "seconds", "reason"]
+        assert sig.parameters["seconds"].default == 3600
+
+    def test_model_in_cooldown_signature(self) -> None:
+        sig = inspect.signature(CostStore.model_in_cooldown)
+        assert list(sig.parameters) == ["self", "route", "model"]
+        assert str(sig.return_annotation) == "int"
 
 
 class TestCostTrackerInterface:
@@ -242,6 +255,7 @@ class TestCostTrackerInterface:
             "usage",
             "latency_ms",
             "status",
+            "route",
         ]
         for name in (
             "request_id",
@@ -251,6 +265,7 @@ class TestCostTrackerInterface:
             "usage",
             "latency_ms",
             "status",
+            "route",
         ):
             assert sig.parameters[name].kind == inspect.Parameter.KEYWORD_ONLY
         assert "UsageRecord" in str(sig.return_annotation)
@@ -352,6 +367,87 @@ class TestCostStoreBehavior:
             "key:sk_abc", 0, tool_name="nope"
         ) == pytest.approx(0.0, abs=1e-9)
 
+    def test_daily_usage_groups_by_day_and_model(self, store: CostStore) -> None:
+        import time
+
+        now = int(time.time())
+        today = now - (now % 86400)
+        yesterday = today - 86400
+        store.insert(
+            _sample_record(
+                request_id="r1",
+                model="gpt-4o",
+                total_tokens=1500,
+                total_cost=0.0125,
+                timestamp=today,
+                route="hermes-default",
+            )
+        )
+        store.insert(
+            _sample_record(
+                request_id="r2",
+                model="gpt-4o",
+                total_tokens=500,
+                total_cost=0.004,
+                timestamp=yesterday,
+                route="hermes-default",
+            )
+        )
+        store.insert(
+            _sample_record(
+                request_id="r3",
+                model="mimo-v2.5",
+                total_tokens=300,
+                total_cost=0.001,
+                timestamp=yesterday,
+                route="hermes-planner",
+            )
+        )
+        result = store.daily_usage(days=3)
+        days = {d["date"]: d["models"] for d in result["days"]}
+        today_key = __import__("datetime").datetime.fromtimestamp(
+            today, __import__("datetime").timezone.utc
+        ).strftime("%Y-%m-%d")
+        yesterday_key = __import__("datetime").datetime.fromtimestamp(
+            yesterday, __import__("datetime").timezone.utc
+        ).strftime("%Y-%m-%d")
+        assert today_key in days
+        assert yesterday_key in days
+        today_models = {m["model"]: m for m in days[today_key]}
+        assert today_models["gpt-4o"]["total_tokens"] == 1500
+        y_models = {m["model"]: m for m in days[yesterday_key]}
+        assert y_models["gpt-4o"]["total_tokens"] == 500
+        assert y_models["mimo-v2.5"]["total_tokens"] == 300
+        # raw call list, newest first
+        assert result["calls"][0]["request_id"] == "r1"
+        assert {c["request_id"] for c in result["calls"]} == {"r1", "r2", "r3"}
+        assert all(c["route"] in {"hermes-default", "hermes-planner"} for c in result["calls"])
+
+    def test_daily_usage_filters_calls_by_route(self, store: CostStore) -> None:
+        import time
+
+        now = int(time.time())
+        store.insert(
+            _sample_record(
+                request_id="a1",
+                total_tokens=100,
+                timestamp=now,
+                route="hermes-default",
+            )
+        )
+        store.insert(
+            _sample_record(
+                request_id="a2",
+                total_tokens=200,
+                timestamp=now,
+                route="hermes-planner",
+            )
+        )
+        result = store.daily_usage(days=1, route="hermes-planner")
+        assert [c["request_id"] for c in result["calls"]] == ["a2"]
+        # day buckets are not route-filtered: both models still appear
+        assert len(result["days"]) >= 1
+
     def test_spend_since_project_scope(self, store: CostStore) -> None:
         """M7: project is a valid scope kind and filters on the project column."""
         store.insert(_sample_record(total_cost=1.0, project="projA"))
@@ -403,6 +499,37 @@ class TestCostStoreBehavior:
             assert total == pytest.approx(4.0, abs=1e-9)
         finally:
             reopened.close()
+
+    def test_cooldown_blocks_until_expiry(self, store: CostStore) -> None:
+        store.set_model_cooldown("hermes-default", "@openai/gpt-4o", 60, reason="http_429")
+        assert store.model_in_cooldown("hermes-default", "@openai/gpt-4o") > 0
+        # route-scoped: other routes are unaffected
+        assert store.model_in_cooldown("hermes-planner", "@openai/gpt-4o") == 0
+        # other models on the same route are unaffected
+        assert store.model_in_cooldown("hermes-default", "@openai/gpt-4o-mini") == 0
+
+    def test_cooldown_expires_and_is_cleaned(self, store: CostStore) -> None:
+        store.set_model_cooldown("hermes-default", "@openai/gpt-4o", 1, reason="http_429")
+        assert store.model_in_cooldown("hermes-default", "@openai/gpt-4o") >= 0
+        # force expiry by writing an until_ts in the past
+        store._conn.execute(
+            "UPDATE model_cooldowns SET until_ts = ? "
+            "WHERE route='hermes-default' AND model='@openai/gpt-4o'",
+            (int(time.time()) - 5,),
+        )
+        store._conn.commit()
+        assert store.model_in_cooldown("hermes-default", "@openai/gpt-4o") == 0
+        assert store.active_cooldowns() == []
+
+    def test_active_cooldowns_lists_only_live_entries(
+        self, store: CostStore
+    ) -> None:
+        store.set_model_cooldown("r1", "m1", 3600)
+        store.set_model_cooldown("r1", "m2", 3600)
+        entries = store.active_cooldowns()
+        assert {e["model"] for e in entries} == {"m1", "m2"}
+        assert all(e["remaining_seconds"] > 0 for e in entries)
+        assert all(e["route"] == "r1" for e in entries)
 
 
 class TestCostTrackerBehavior:

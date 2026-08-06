@@ -61,6 +61,9 @@ def create_system_app(
         routing_connection=sqlite3.connect(
             data_dir / "routing.db", check_same_thread=False
         ),
+        cost_connection=sqlite3.connect(
+            root / "gateway.db", check_same_thread=False
+        ),
         credential_key_path=data_dir / "provider-master.key",
         auto_start_services=True,
         cockpit_first=True,
