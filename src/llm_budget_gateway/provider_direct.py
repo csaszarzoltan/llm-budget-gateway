@@ -154,6 +154,86 @@ def _pad_reasoning_content(messages: Any) -> None:
             msg["reasoning_content"] = " "
 
 
+def _normalize_tool_name(name: Any) -> str:
+    """Replace characters forbidden by strict upstream tool-name patterns.
+
+    Console Go (opencode.ai zen/go) rejects tool/function names that do not
+    match ``^[a-zA-Z0-9_-]+$``; Hermes ships MCP-style names such as
+    ``default_api:kanban_show`` (colon is not in the pattern). The gateway
+    rewrites the payload with ``_`` and restores the original name on the
+    response so clients keep working with their native names.
+    """
+    if not isinstance(name, str) or ":" not in name:
+        return name
+    return name.replace(":", "_")
+
+
+def _collect_tool_name_map(payload: dict[str, Any] | None) -> dict[str, str]:
+    """Normalize tool/function names in the payload; return rewritten -> original.
+
+    Touches ``tools[].function.name``, ``messages[].tool_calls[].function.name``
+    and ``function_call.name`` (legacy). Names without a colon are left alone.
+    """
+    mapping: dict[str, str] = {}
+    if not isinstance(payload, dict):
+        return mapping
+
+    def _rewrite(name: Any) -> str | None:
+        if not isinstance(name, str) or ":" not in name:
+            return None
+        new = name.replace(":", "_")
+        mapping.setdefault(new, name)
+        return new
+
+    for tool in payload.get("tools") or []:
+        if not isinstance(tool, dict):
+            continue
+        fn = tool.get("function")
+        if isinstance(fn, dict) and isinstance(fn.get("name"), str):
+            new = _rewrite(fn["name"])
+            if new is not None:
+                fn["name"] = new
+
+    fc = payload.get("function_call")
+    if isinstance(fc, dict) and isinstance(fc.get("name"), str):
+        new = _rewrite(fc["name"])
+        if new is not None:
+            fc["name"] = new
+
+    for msg in payload.get("messages") or []:
+        if not isinstance(msg, dict):
+            continue
+        for tc in msg.get("tool_calls") or []:
+            if not isinstance(tc, dict):
+                continue
+            fn = tc.get("function")
+            if isinstance(fn, dict) and isinstance(fn.get("name"), str):
+                new = _rewrite(fn["name"])
+                if new is not None:
+                    fn["name"] = new
+    return mapping
+
+
+def _restore_tool_names(data: Any, mapping: dict[str, str]) -> None:
+    """Restore original tool/function names on a response body or stream chunk."""
+    if not isinstance(data, dict) or not mapping:
+        return
+    for choice in data.get("choices", []):
+        if not isinstance(choice, dict):
+            continue
+        msg = choice.get("message") or choice.get("delta") or {}
+        if not isinstance(msg, dict):
+            continue
+        for tc in msg.get("tool_calls") or []:
+            if not isinstance(tc, dict):
+                continue
+            fn = tc.get("function")
+            if isinstance(fn, dict) and isinstance(fn.get("name"), str):
+                original = mapping.get(fn["name"])
+                if original is not None:
+                    fn["name"] = original
+
+
 @dataclass(frozen=True)
 class ProviderEndpoint:
     """One configured provider connection."""
@@ -448,6 +528,9 @@ class DirectProviderClient:
         # Gemini thought_signature: re-attach stored signatures so replayed
         # function calls are not rejected with HTTP 400.
         self._restore_thought_signatures(payload.get("messages"))
+        # Strict upstreams (Console Go) reject ':' in tool names — rewrite
+        # and restore on the response.
+        tool_name_map = _collect_tool_name_map(payload)
         try:
             response = await self._client.post(
                 url, json=payload, headers=endpoint.headers()
@@ -470,6 +553,8 @@ class DirectProviderClient:
             ) from exc
         # Gemini: persist thought_signatures from this turn's tool calls.
         self._capture_thought_signatures(data)
+        # Restore original (colon-qualified) tool names for the client.
+        _restore_tool_names(data, tool_name_map)
         served = data.get("model") if isinstance(data, dict) else None
         return response.status_code, data, served or model
 
@@ -503,6 +588,9 @@ class DirectProviderClient:
             _pad_reasoning_content(payload.get("messages"))
         # Gemini thought_signature: re-attach stored signatures (see forward).
         self._restore_thought_signatures(payload.get("messages"))
+        # Strict upstreams (Console Go) reject ':' in tool names — rewrite
+        # and restore on each stream chunk.
+        tool_name_map = _collect_tool_name_map(payload)
         chunks: list[dict[str, Any]] = []
         served: str = model
         try:
@@ -540,6 +628,8 @@ class DirectProviderClient:
                         # Gemini streaming: tool_calls arrive in deltas; the
                         # final tool_calls chunk carries the signature.
                         self._capture_thought_signatures(chunk)
+                        # Restore original (colon-qualified) tool names.
+                        _restore_tool_names(chunk, tool_name_map)
         except httpx.TimeoutException as exc:
             raise UpstreamProviderError(502, f"upstream provider timed out: {endpoint.name}") from exc
         except httpx.HTTPError as exc:

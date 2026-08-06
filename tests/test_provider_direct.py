@@ -512,6 +512,75 @@ class TestForwardStream:
         await client.aclose()
 
     @pytest.mark.asyncio
+    async def test_tool_name_colon_rewritten_and_restored(self, monkeypatch):
+        """Colon-qualified tool names (Hermes default_api:x) are rewritten for
+        strict upstreams (Console Go regex) and restored on the response."""
+        monkeypatch.setenv("OPENCODE_GO_API_KEY", "sk-go-123")
+        captured = {}
+
+        def handler(request: httpx.Request) -> httpx.Response:
+            captured["body"] = json.loads(request.content)
+            return httpx.Response(200, json={
+                "model": "deepseek-v4-flash",
+                "choices": [{
+                    "finish_reason": "tool_calls",
+                    "message": {
+                        "role": "assistant",
+                        "tool_calls": [{
+                            "id": "tc1",
+                            "type": "function",
+                            "function": {"name": "default_api_kanban_show", "arguments": "{}"},
+                        }],
+                    },
+                }],
+            })
+
+        client = _client(handler)
+        status, data, served = await client.forward(
+            "deepseek-v4-flash",
+            {
+                "model": "deepseek-v4-flash",
+                "messages": [{"role": "user", "content": "go"}],
+                "tools": [{"type": "function", "function": {
+                    "name": "default_api:kanban_show",
+                    "description": "show",
+                    "parameters": {"type": "object", "properties": {}}}}],
+            },
+        )
+        assert status == 200
+        # upstream saw the rewritten name
+        assert captured["body"]["tools"][0]["function"]["name"] == "default_api_kanban_show"
+        # client sees the original name back
+        tc = data["choices"][0]["message"]["tool_calls"][0]
+        assert tc["function"]["name"] == "default_api:kanban_show"
+        await client.aclose()
+
+    @pytest.mark.asyncio
+    async def test_tool_name_without_colon_untouched(self, monkeypatch):
+        """Plain tool names must pass through unchanged."""
+        monkeypatch.setenv("OPENCODE_GO_API_KEY", "sk-go-123")
+        captured = {}
+
+        def handler(request: httpx.Request) -> httpx.Response:
+            captured["body"] = json.loads(request.content)
+            return _ok_handler(request)
+
+        client = _client(handler)
+        await client.forward(
+            "deepseek-v4-flash",
+            {
+                "model": "deepseek-v4-flash",
+                "messages": [{"role": "user", "content": "go"}],
+                "tools": [{"type": "function", "function": {
+                    "name": "kanban_show",
+                    "description": "show",
+                    "parameters": {"type": "object", "properties": {}}}}],
+            },
+        )
+        assert captured["body"]["tools"][0]["function"]["name"] == "kanban_show"
+        await client.aclose()
+
+    @pytest.mark.asyncio
     async def test_gemini_thought_signature_fallback_by_fn_args(self, monkeypatch):
         """Clients that rewrite provider call ids (Hermes) still get the
         signature matched via (fn_name, arguments)."""
