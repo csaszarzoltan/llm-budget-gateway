@@ -4,11 +4,48 @@ from __future__ import annotations
 
 import hashlib
 import json
+import re
 import secrets
 import sqlite3
 from datetime import UTC, datetime
+from pathlib import Path
 from typing import Any
 from zoneinfo import ZoneInfo
+
+
+
+_HERMES_CONFIG = Path.home() / ".hermes" / "config.yaml"
+
+
+def _sync_hermes_context_lengths(db: sqlite3.Connection) -> None:
+    """Strip stale context_length from ~/.hermes/config.yaml.
+
+    Hermes resolves context_length live from the gateway /v1/models
+    endpoint (product.db route targets).  Any ``context_length:`` line
+    under ``providers.llm-gw.models.<route>`` in config.yaml acts as a
+    custom_providers override that SHORT-CIRCUITS the live probe,
+    locking Hermes to a stale value.  This removes those entries after
+    every route mutation so the live value always wins.
+    """
+    if not _HERMES_CONFIG.is_file():
+        return
+    try:
+        text = _HERMES_CONFIG.read_text(encoding="utf-8")
+    except OSError:
+        return
+    cleaned = re.sub(
+        r"^(      \w[\w\-]*:\n)(        context_length: \d+\n)",
+        r"\1",
+        text,
+        flags=re.MULTILINE,
+    )
+    if cleaned == text:
+        return
+    try:
+        _HERMES_CONFIG.write_text(cleaned, encoding="utf-8")
+        _log.info("hermes config sync: stripped stale context_length entries")
+    except OSError as exc:
+        _log.warning("hermes config sync failed: %s", exc)
 
 
 class ProductConsoleStore:
@@ -162,6 +199,7 @@ CREATE TABLE IF NOT EXISTS pc_activity(id TEXT PRIMARY KEY,app_id TEXT,route TEX
             "INSERT INTO pc_route_versions VALUES(?,?,?,?)", (rid, v, payload, _now())
         )
         self.db.commit()
+        _sync_hermes_context_lengths(self.db)
         return self.route(rid)
 
     def route(self, rid: str) -> dict[str, Any]:
@@ -211,6 +249,7 @@ CREATE TABLE IF NOT EXISTS pc_activity(id TEXT PRIMARY KEY,app_id TEXT,route TEX
             (rid,),
         )
         self.db.commit()
+        _sync_hermes_context_lengths(self.db)
         return self.route(rid)
 
     def test_route(self, rid: str, at: str, capabilities: list[str]) -> dict[str, Any]:
@@ -264,6 +303,7 @@ CREATE TABLE IF NOT EXISTS pc_activity(id TEXT PRIMARY KEY,app_id TEXT,route TEX
             raise ValueError("route has blocking dependencies")
         self.db.execute("UPDATE pc_routes SET status='archived' WHERE id=?", (rid,))
         self.db.commit()
+        _sync_hermes_context_lengths(self.db)
         return self.route(rid)
 
     def restore_route(self, rid: str) -> dict[str, Any]:
@@ -273,6 +313,7 @@ CREATE TABLE IF NOT EXISTS pc_activity(id TEXT PRIMARY KEY,app_id TEXT,route TEX
             raise ValueError("only archived routes can be restored")
         self.db.execute("UPDATE pc_routes SET status='draft' WHERE id=?", (rid,))
         self.db.commit()
+        _sync_hermes_context_lengths(self.db)
         return self.route(rid)
 
     def delete_route(self, rid: str, *, confirmation: str) -> None:
@@ -285,6 +326,7 @@ CREATE TABLE IF NOT EXISTS pc_activity(id TEXT PRIMARY KEY,app_id TEXT,route TEX
         with self.db:
             self.db.execute("DELETE FROM pc_route_versions WHERE route_id=?", (rid,))
             self.db.execute("DELETE FROM pc_routes WHERE id=?", (rid,))
+            _sync_hermes_context_lengths(self.db)
 
     def duplicate_route(self, rid: str, name: str) -> dict[str, Any]:
         """Create an independent draft from the current route definition."""
