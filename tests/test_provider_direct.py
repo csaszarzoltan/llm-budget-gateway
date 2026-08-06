@@ -36,12 +36,13 @@ REGISTRY = {
 }
 
 
-def _client(handler, registry=None):
+def _client(handler, registry=None, signature_db_path=None):
     """Build a DirectProviderClient with a mocked httpx transport."""
     transport = httpx.MockTransport(handler)
     client = httpx.AsyncClient(transport=transport)
     return DirectProviderClient(
-        registry or REGISTRY, timeout=5.0, client=client
+        registry or REGISTRY, timeout=5.0, client=client,
+        signature_db_path=signature_db_path,
     )
 
 
@@ -579,6 +580,53 @@ class TestForwardStream:
         )
         assert captured["body"]["tools"][0]["function"]["name"] == "kanban_show"
         await client.aclose()
+
+    @pytest.mark.asyncio
+    async def test_thought_signature_survives_restart(self, monkeypatch, tmp_path):
+        """Signatures persist to the gateway DB so a restart does not lose
+        them (Hermes replays tool_calls without extra_content)."""
+        monkeypatch.setenv("GOOGLE_API_KEY", "sk-google-123")
+        db_path = str(tmp_path / "gw.db")
+        calls = {"n": 0}
+
+        def handler(request: httpx.Request) -> httpx.Response:
+            calls["n"] += 1
+            if calls["n"] == 1:
+                return httpx.Response(200, json={
+                    "model": "gemini-2.0-flash",
+                    "choices": [{
+                        "finish_reason": "tool_calls",
+                        "message": {"role": "assistant", "tool_calls": [{
+                            "id": "gid-1",
+                            "type": "function",
+                            "function": {"name": "skill_view", "arguments": "{}"},
+                            "extra_content": {"google": {"thought_signature": "SIGPERSIST"}},
+                        }]},
+                    }],
+                })
+            captured["body"] = json.loads(request.content)
+            return _ok_handler(request)
+
+        captured = {}
+        client = _client(handler, signature_db_path=db_path)
+        await client.forward("gemini-2.0-flash", {"model": "gemini-2.0-flash", "messages": [{"role": "user", "content": "go"}]})
+        await client.aclose()
+
+        # simulate a gateway restart: brand new client instance, same DB
+        client2 = _client(handler, signature_db_path=db_path)
+        await client2.forward("gemini-2.0-flash", {
+            "model": "gemini-2.0-flash",
+            "messages": [
+                {"role": "user", "content": "go"},
+                {"role": "assistant", "content": None, "tool_calls": [{
+                    "id": "call_rewritten_id", "type": "function",
+                    "function": {"name": "skill_view", "arguments": "{}"},
+                }]},
+            ],
+        })
+        tc = captured["body"]["messages"][1]["tool_calls"][0]
+        assert tc["extra_content"]["google"]["thought_signature"] == "SIGPERSIST"
+        await client2.aclose()
 
     @pytest.mark.asyncio
     async def test_gemini_thought_signature_fallback_by_fn_args(self, monkeypatch):

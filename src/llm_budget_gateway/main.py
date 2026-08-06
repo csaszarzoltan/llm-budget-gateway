@@ -175,7 +175,11 @@ def create_app(settings: Settings | None = None) -> FastAPI:
                             "provider=%s invalid extra_body_json, ignored", slug
                         )
             if registry:
-                direct = DirectProviderClient(registry, timeout=settings.provider_timeout)
+                direct = DirectProviderClient(
+                    registry,
+                    timeout=settings.provider_timeout,
+                    signature_db_path=_sqlite_path(settings.database_url),
+                )
                 proxy.attach_direct_client(direct)
                 logger.info("attached direct provider transport: %s", sorted(registry))
         except Exception:

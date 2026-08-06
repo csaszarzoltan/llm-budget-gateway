@@ -43,6 +43,9 @@ from __future__ import annotations
 import json
 import logging
 import os
+import sqlite3
+import threading
+import time
 from dataclasses import dataclass, field
 from typing import Any
 
@@ -293,6 +296,7 @@ class DirectProviderClient:
         *,
         timeout: float = 60.0,
         client: httpx.AsyncClient | None = None,
+        signature_db_path: str | None = None,
     ) -> None:
         self._registry: dict[str, ProviderEndpoint] = {}
         self._timeout = timeout
@@ -304,6 +308,24 @@ class DirectProviderClient:
         # rewrite tool_call ids (Hermes deterministic/codex ids) and cannot
         # be matched by the provider-assigned id.
         self._thought_signatures_by_fn: dict[tuple[str, str], str] = {}
+        # Gemini thought_signatures must survive a gateway restart — Hermes
+        # persists tool_calls without extra_content, so the signature is the
+        # only thing that keeps the replay valid. Persist to the gateway DB.
+        self._sig_lock = threading.Lock()
+        self._sig_db: sqlite3.Connection | None = None
+        if signature_db_path:
+            try:
+                db = sqlite3.connect(signature_db_path, check_same_thread=False)
+                db.execute(
+                    "CREATE TABLE IF NOT EXISTS thought_signatures("
+                    "id TEXT, fn_name TEXT, arguments TEXT, signature TEXT NOT NULL,"
+                    "created_at REAL NOT NULL,"
+                    "PRIMARY KEY(id, fn_name, arguments))"
+                )
+                db.commit()
+                self._sig_db = db
+            except sqlite3.Error:
+                logger.exception("failed to open thought_signature db")
         self._load_registry(registry or {})
 
     def _load_registry(self, registry: dict[str, dict[str, Any]]) -> None:
@@ -427,6 +449,7 @@ class DirectProviderClient:
                     args = (tc.get("function") or {}).get("arguments")
                     if isinstance(fn, str) and isinstance(args, str):
                         self._thought_signatures_by_fn[(fn, args)] = sig
+                        self._persist_signature(tc_id if isinstance(tc_id, str) else "", fn, args, sig)
         if len(self._thought_signatures) > 512 or len(self._thought_signatures_by_fn) > 512:
             # bound memory: keep the most recent half
             self._thought_signatures = dict(
@@ -436,10 +459,61 @@ class DirectProviderClient:
                 list(self._thought_signatures_by_fn.items())[-256:]
             )
 
+    def _persist_signature(
+        self, tc_id: str, fn_name: str, arguments: str, signature: str
+    ) -> None:
+        """Write one signature to the restart-surviving store (best effort)."""
+        db = self._sig_db
+        if db is None:
+            return
+        try:
+            with self._sig_lock:
+                db.execute(
+                    "INSERT OR REPLACE INTO thought_signatures"
+                    "(id, fn_name, arguments, signature, created_at) VALUES(?,?,?,?,?)",
+                    (tc_id, fn_name, arguments, signature, time.time()),
+                )
+                db.commit()
+        except sqlite3.Error:
+            logger.exception("failed to persist thought_signature")
+
+    def _lookup_signature(self, tc_id: str, fn_name: str, arguments: str) -> str | None:
+        """Check the memory index first, then the persisted store."""
+        sig = self._thought_signatures.get(tc_id) if tc_id else None
+        if sig is None and fn_name and arguments:
+            sig = self._thought_signatures_by_fn.get((fn_name, arguments))
+        if sig is None and self._sig_db is not None:
+            try:
+                with self._sig_lock:
+                    row = self._sig_db.execute(
+                        "SELECT signature FROM thought_signatures WHERE id=?",
+                        (tc_id,),
+                    ).fetchone()
+                    if row is None and fn_name and arguments:
+                        row = self._sig_db.execute(
+                            "SELECT signature FROM thought_signatures"
+                            " WHERE fn_name=? AND arguments=?"
+                            " ORDER BY created_at DESC LIMIT 1",
+                            (fn_name, arguments),
+                        ).fetchone()
+                if row is not None:
+                    sig = str(row[0])
+                    if tc_id:
+                        self._thought_signatures[tc_id] = sig
+                    if fn_name and arguments:
+                        self._thought_signatures_by_fn[(fn_name, arguments)] = sig
+            except sqlite3.Error:
+                logger.exception("failed to read thought_signature")
+        return sig
+
     def _restore_thought_signatures(self, messages: Any) -> None:
         """Re-attach stored Gemini thought_signatures to assistant turns."""
-        if not isinstance(messages, list) or (
-            not self._thought_signatures and not self._thought_signatures_by_fn
+        if not isinstance(messages, list):
+            return
+        if (
+            not self._thought_signatures
+            and not self._thought_signatures_by_fn
+            and self._sig_db is None
         ):
             return
         for msg in messages:
@@ -448,15 +522,15 @@ class DirectProviderClient:
             for tc in msg.get("tool_calls") or []:
                 if not isinstance(tc, dict):
                     continue
-                sig = self._thought_signatures.get(tc.get("id"))
-                if sig is None:
-                    # Clients (Hermes) rewrite provider call ids; fall back
-                    # to (fn_name, arguments) so the signature still reaches
-                    # the upstream.
-                    fn = (tc.get("function") or {}).get("name")
-                    args = (tc.get("function") or {}).get("arguments")
-                    if isinstance(fn, str) and isinstance(args, str):
-                        sig = self._thought_signatures_by_fn.get((fn, args))
+                if tc.get("extra_content"):
+                    continue
+                fn = (tc.get("function") or {}).get("name")
+                args = (tc.get("function") or {}).get("arguments")
+                sig = self._lookup_signature(
+                    str(tc.get("id") or ""),
+                    fn if isinstance(fn, str) else "",
+                    args if isinstance(args, str) else "",
+                )
                 if not sig:
                     continue
                 extra = tc.setdefault("extra_content", {})
