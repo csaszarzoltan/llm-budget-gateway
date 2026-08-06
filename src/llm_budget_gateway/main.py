@@ -164,6 +164,16 @@ def create_app(settings: Settings | None = None) -> FastAPI:
                     "user_agent": str(secret.get("user_agent", "")).strip() or None,
                     "models": models,
                 }
+                extra_body_raw = str(secret.get("extra_body_json", "") or "").strip()
+                if extra_body_raw:
+                    try:
+                        extra_body = json.loads(extra_body_raw)
+                        if isinstance(extra_body, dict) and extra_body:
+                            registry[slug]["extra_body"] = extra_body
+                    except json.JSONDecodeError:
+                        logger.warning(
+                            "provider=%s invalid extra_body_json, ignored", slug
+                        )
             if registry:
                 direct = DirectProviderClient(registry, timeout=settings.provider_timeout)
                 proxy.attach_direct_client(direct)

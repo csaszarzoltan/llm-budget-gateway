@@ -502,7 +502,12 @@ class GatewayProxy:
                         route_name,
                         candidate,
                         cooldown_seconds,
-                        reason=f"timeout_{int(target_timeout or 0)}s",
+                        reason=json.dumps(
+                            {
+                                "type": "timeout",
+                                "seconds": int(target_timeout or 0),
+                            }
+                        ),
                     )
                 except Exception:
                     logger.exception(
@@ -532,7 +537,12 @@ class GatewayProxy:
                         route_name,
                         candidate,
                         cooldown_seconds,
-                        reason="provider_error",
+                        reason=json.dumps(
+                            {
+                                "type": "error",
+                                "error": str(exc)[:500],
+                            }
+                        ),
                     )
                 except Exception:
                     logger.exception(
@@ -588,11 +598,31 @@ class GatewayProxy:
             if target_cooldowns:
                 cooldown_seconds = int(target_cooldowns.get(candidate, 3600))
             try:
+                body_text = ""
+                if isinstance(response.body, dict):
+                    err = response.body.get("error") or {}
+                    body_text = (
+                        str(err.get("provider_body", ""))
+                        if isinstance(err, dict)
+                        else str(err)
+                    )
+                if not body_text:
+                    body_text = (
+                        response.body
+                        if isinstance(response.body, str)
+                        else json.dumps(response.body)[:500]
+                    )
                 self._cost_tracker.set_model_cooldown(
                     route_name,
                     candidate,
                     cooldown_seconds,
-                    reason=f"http_{response.status_code}",
+                    reason=json.dumps(
+                        {
+                            "type": "http",
+                            "status_code": response.status_code,
+                            "body": body_text[:800],
+                        }
+                    ),
                 )
             except Exception:
                 logger.exception(
@@ -831,9 +861,14 @@ class GatewayProxy:
         except Exception as exc:
             status_code = int(getattr(exc, "status_code", 502))
             message = str(exc) or "upstream provider error"
+            body_detail = getattr(exc, "body", "") or ""
             return ProviderResponse(
                 status_code=status_code,
-                body={"error": {"message": message, "type": "provider_error"}},
+                body=(
+                    {"error": {"message": message, "type": "provider_error"}}
+                    if not body_detail
+                    else {"error": {"message": message, "type": "provider_error", "provider_body": body_detail}}
+                ),
                 headers={},
                 model=model,
                 usage=None,

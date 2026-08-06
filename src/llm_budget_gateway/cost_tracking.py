@@ -481,11 +481,11 @@ class CostStore:
             bucket_rows = self._conn.execute(
                 f"""
                 SELECT strftime('{fmt}', timestamp, 'unixepoch') AS bucket, model,
-                       SUM(prompt_tokens), SUM(completion_tokens),
+                       route, SUM(prompt_tokens), SUM(completion_tokens),
                        SUM(total_tokens), COUNT(*), SUM(total_cost)
                 FROM cost_records
                 WHERE timestamp >= ?
-                GROUP BY bucket, model
+                GROUP BY bucket, model, route
                 ORDER BY bucket ASC
                 """,
                 (since,),
@@ -503,7 +503,8 @@ class CostStore:
                 (since,),
             ).fetchall()
         by_bucket: dict[str, list[dict[str, object]]] = {}
-        for bucket, model, pt, ct, tt, reqs, cost in bucket_rows:
+        by_bucket_route: dict[str, list[dict[str, object]]] = {}
+        for bucket, model, rte, pt, ct, tt, reqs, cost in bucket_rows:
             by_bucket.setdefault(bucket, []).append(
                 {
                     "model": model,
@@ -514,8 +515,20 @@ class CostStore:
                     "cost_usd": round(float(cost or 0.0), 6),
                 }
             )
+            by_bucket_route.setdefault(bucket, []).append(
+                {
+                    "route": rte or "",
+                    "total_tokens": int(tt or 0),
+                    "requests": int(reqs or 0),
+                    "cost_usd": round(float(cost or 0.0), 6),
+                }
+            )
         buckets_out = [
-            {"date": bucket, "models": by_bucket[bucket]}
+            {
+                "date": bucket,
+                "models": by_bucket[bucket],
+                "routes": by_bucket_route[bucket],
+            }
             for bucket in sorted(by_bucket)
         ]
         if route:

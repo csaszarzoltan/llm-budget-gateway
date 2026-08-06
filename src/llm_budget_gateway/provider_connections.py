@@ -92,6 +92,18 @@ PROVIDER_TYPES: list[dict[str, Any]] = [
                 "type": "text",
                 "required": False,
             },
+            {
+                "name": "extra_headers_json",
+                "label": "Extra headers JSON",
+                "type": "text",
+                "required": False,
+            },
+            {
+                "name": "extra_body_json",
+                "label": "Extra body JSON (e.g. {\"flex\": true} for DeepInfra)",
+                "type": "text",
+                "required": False,
+            },
         ],
     },
     {
@@ -107,6 +119,12 @@ PROVIDER_TYPES: list[dict[str, Any]] = [
             {"name": "auth_header", "label": "Authentication header", "type": "text", "required": False},
             {"name": "auth_prefix", "label": "Authentication prefix", "type": "text", "required": False},
             {"name": "extra_headers_json", "label": "Extra headers JSON", "type": "text", "required": False},
+            {
+                "name": "extra_body_json",
+                "label": "Extra body JSON (merged into every request)",
+                "type": "text",
+                "required": False,
+            },
             {"name": "user_agent", "label": "Client user-agent (emulation)", "type": "text", "required": False},
             {"name": "models_field", "label": "Models array field", "type": "text", "required": True},
             {"name": "model_id_field", "label": "Model ID field", "type": "text", "required": True},
@@ -208,6 +226,7 @@ CREATE TABLE IF NOT EXISTS provider_models(provider_id TEXT NOT NULL,model_id TE
             merged.setdefault("auth_header", "Authorization")
             merged.setdefault("auth_prefix", "Bearer ")
             merged.setdefault("extra_headers_json", "{}")
+            merged.setdefault("extra_body_json", "{}")
             merged.setdefault("models_field", "data")
             merged.setdefault("model_id_field", "id")
         missing = [
@@ -327,9 +346,13 @@ CREATE TABLE IF NOT EXISTS provider_models(provider_id TEXT NOT NULL,model_id TE
             secret = self.connection_secret(provider_id)
             result["base_url"] = secret.get("base_url", "")
             result["user_agent"] = secret.get("user_agent", "")
+            result["extra_headers_json"] = secret.get("extra_headers_json", "")
+            result["extra_body_json"] = secret.get("extra_body_json", "")
         except Exception:
             result["base_url"] = ""
             result["user_agent"] = ""
+            result["extra_headers_json"] = ""
+            result["extra_body_json"] = ""
         return result
 
     def list(self) -> list[dict[str, Any]]:

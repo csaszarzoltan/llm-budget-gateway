@@ -104,13 +104,21 @@ class UnknownModelError(Exception):
 class UpstreamProviderError(Exception):
     """Raised when the upstream provider returns a non-2xx response.
 
-    Carries the provider status code and a redacted message so the proxy can
-    map it to a generic 502 without leaking provider error text.
+    Carries the provider status code, the redacted status message and the
+    raw response body (truncated) so callers can surface the real reason
+    (e.g. "context length exceeded", "missing field role") instead of a
+    generic 502 — the body is provider-owned error detail, not a secret.
     """
 
-    def __init__(self, status_code: int, message: str) -> None:
+    def __init__(
+        self,
+        status_code: int,
+        message: str,
+        body: str = "",
+    ) -> None:
         super().__init__(message)
         self.status_code = status_code
+        self.body = str(body)[:2000]
 
 
 @dataclass(frozen=True)
@@ -124,6 +132,7 @@ class ProviderEndpoint:
     models: tuple[str, ...] = field(default_factory=tuple)
     api_key_value: str | None = None  # direct key (vault), bypasses env
     user_agent: str | None = None  # client-emulation User-Agent for upstream
+    extra_body: dict[str, Any] | None = None  # provider-level body merge
 
     def api_key(self) -> str:
         """Read the API key from the vault value or the environment."""
@@ -215,6 +224,7 @@ class DirectProviderClient:
                 models=models,
                 api_key_value=raw.get("api_key") or None,
                 user_agent=raw.get("user_agent") or None,
+                extra_body=raw.get("extra_body") or None,
             )
             self._registry[name] = endpoint
             for model in models:
@@ -313,6 +323,10 @@ class DirectProviderClient:
         # Provider-qualified aliases (@slug/model) select the endpoint, but
         # the upstream always receives the bare model name.
         payload["model"] = model.split("/", 1)[1] if model.startswith("@") else model
+        # Provider-level extra body (e.g. DeepInfra "flex": true) — config is
+        # authoritative over anything the client sent.
+        if endpoint.extra_body:
+            payload.update(endpoint.extra_body)
         try:
             response = await self._client.post(
                 url, json=payload, headers=endpoint.headers()
@@ -325,6 +339,7 @@ class DirectProviderClient:
             raise UpstreamProviderError(
                 response.status_code,
                 f"upstream provider error: {endpoint.name} (HTTP {response.status_code})",
+                body=response.text[:2000],
             )
         try:
             data = response.json()
@@ -356,6 +371,10 @@ class DirectProviderClient:
         # the upstream always receives the bare model name.
         payload["model"] = model.split("/", 1)[1] if model.startswith("@") else model
         payload["stream"] = True
+        # Provider-level extra body (e.g. DeepInfra "flex": true) — config is
+        # authoritative over anything the client sent.
+        if endpoint.extra_body:
+            payload.update(endpoint.extra_body)
         chunks: list[dict[str, Any]] = []
         served: str = model
         try:
@@ -366,6 +385,7 @@ class DirectProviderClient:
                     raise UpstreamProviderError(
                         response.status_code,
                         f"upstream provider error: {endpoint.name} (HTTP {response.status_code})",
+                        body=response.text[:2000],
                     )
                 async for line in response.aiter_lines():
                     line = line.strip()
