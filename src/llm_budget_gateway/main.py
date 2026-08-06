@@ -88,6 +88,23 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         except sqlite3.Error:
             logger.exception("failed to attach routing control plane")
 
+    # Attach the UI-managed route store (cockpit Routes tab, pc_routes/targets
+    # model). Routes created and published there are served by this proxy and
+    # stay editable by the user in the UI — no code or restart needed after
+    # the user edits a route.
+    product_db = data_dir / "product.db"
+    if product_db.exists():
+        try:
+            from .product_console import ProductConsoleStore
+
+            product = ProductConsoleStore(
+                sqlite3.connect(str(product_db), check_same_thread=False)
+            )
+            proxy.attach_product_console(product)
+            logger.info("attached UI-managed product routes")
+        except Exception:
+            logger.exception("failed to attach product route store")
+
     # Attach the direct provider transport built from the persisted provider
     # connections (providers.db + vault key). This replaces litellm for all
     # gateway-configured providers (flat model names litellm cannot resolve).
@@ -102,12 +119,12 @@ def create_app(settings: Settings | None = None) -> FastAPI:
                 sqlite3.connect(str(providers_db), check_same_thread=False),
                 CredentialVault(master_key),
             )
-            # Provider priority for duplicate models: first provider wins.
-            # Mirrors the Hermes provider mapping — opencode-go serves the
-            # deepseek-* family, opencode-zen the mimo-* family. deepinfra,
-            # xiaomi, google and openrouter follow as generic catalogs.
-            priority = ["opencode-go", "opencode-zen", "deepinfra", "xiaomi", "google", "openrouter"]
-            connections = sorted(store.list(), key=lambda c: priority.index(c["slug"]) if c["slug"] in priority else 99)
+            # Provider registry order is the persisted connection list
+            # (as shown on the Providers tab); duplicate flat model names
+            # resolve first-wins inside DirectProviderClient, and routes pin
+            # providers explicitly with @slug/model aliases — no hardcoded
+            # priority list here.
+            connections = list(store.list())
             registry: dict[str, dict] = {}
             for connection in connections:
                 slug = str(connection["slug"])

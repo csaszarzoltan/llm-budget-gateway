@@ -102,6 +102,21 @@ CREATE TABLE IF NOT EXISTS pc_activity(id TEXT PRIMARY KEY,app_id TEXT,route TEX
             "status": "active",
         }
 
+    def authenticate_application(self, api_key: str) -> dict[str, Any]:
+        """Return the application record for a valid UI gateway key.
+
+        Raises PermissionError when the key is unknown, mirroring the
+        RoutingControlPlane contract so the proxy can try both stores.
+        """
+        digest = hashlib.sha256(api_key.encode()).hexdigest()
+        row = self.db.execute(
+            "SELECT id,name,default_route,created FROM pc_apps WHERE key_hash=?",
+            (digest,),
+        ).fetchone()
+        if not row:
+            raise PermissionError("invalid application key")
+        return {"id": row[0], "name": row[1], "default_route": row[2], "created": row[3]}
+
     def applications(self) -> list[dict[str, Any]]:
         """List applications without secret material."""
         rows = self.db.execute(
@@ -172,6 +187,21 @@ CREATE TABLE IF NOT EXISTS pc_activity(id TEXT PRIMARY KEY,app_id TEXT,route TEX
             self.route(r[0])
             for r in self.db.execute("SELECT id FROM pc_routes ORDER BY name")
         ]
+
+    def published_route_by_name(self, name: str) -> dict[str, Any] | None:
+        """Return the published (active) route with this name, if any.
+
+        This is the lookup the proxy uses so routes created and edited on the
+        Routes tab (pc_routes/targets model) are served by the gateway — no
+        code change required after the user edits a route in the UI.
+        """
+        row = self.db.execute(
+            "SELECT id FROM pc_routes WHERE name=? AND status='active'",
+            (name,),
+        ).fetchone()
+        if not row:
+            return None
+        return self.route(row[0])
 
     def publish_route(self, rid: str) -> dict[str, Any]:
         """Publish the current draft atomically."""

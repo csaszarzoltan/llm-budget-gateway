@@ -30,6 +30,11 @@ from .config import Settings
 from .cost_tracking import CostTracker, TokenUsage, accumulate_usage
 from .model_fallback import FallbackManager
 
+try:
+    from zoneinfo import ZoneInfo
+except ImportError:  # pragma: no cover
+    from backports.zoneinfo import ZoneInfo  # type: ignore[no-redef]
+
 logger = logging.getLogger(__name__)
 
 #: Client body fields allowed through to litellm. Everything else is dropped —
@@ -115,8 +120,18 @@ class GatewayProxy:
         self._budget_enforcer = budget_enforcer
         self._fallback_manager = fallback_manager
         self._routing_control_plane = None
+        self._product_console = None
         self._direct_client = None
         self._routing_now: Callable[[], datetime] = lambda: datetime.now(UTC)
+
+    def attach_product_console(self, store: object) -> None:
+        """Attach the UI-managed route store (pc_routes/targets model).
+
+        Routes created and published on the cockpit Routes tab are resolved
+        by this store; the user edits them in the UI and no gateway code
+        change or restart is needed afterwards.
+        """
+        self._product_console = store
 
     def attach_routing_control_plane(self, plane: object, *, now: Callable[[], datetime] | None = None) -> None:
         """Attach logical-route resolution for application gateway keys."""
@@ -162,6 +177,13 @@ class GatewayProxy:
         if self._routing_control_plane is not None:
             try:
                 self._routing_control_plane.authenticate_application(api_key)
+            except PermissionError:
+                pass
+            else:
+                return await self._handle_logical_route(body, api_key, headers, request_id)
+        if self._product_console is not None:
+            try:
+                self._product_console.authenticate_application(api_key)
             except PermissionError:
                 pass
             else:
@@ -235,10 +257,15 @@ class GatewayProxy:
     async def _handle_logical_route(
         self, body: dict, api_key: str, headers: dict, request_id: str
     ) -> ProviderResponse:
-        """Resolve and execute a published logical route for an application key."""
+        """Resolve and execute a published route for an application key.
+
+        Routes published on the cockpit Routes tab (pc_routes/targets model)
+        take precedence; the logical routing plane (admin API) is the fallback
+        for routes created outside the UI.
+        """
         plane = self._routing_control_plane
         alias = str(body.get("model", ""))
-        if not alias or not plane.has_published_route(alias):
+        if not alias:
             return self._error_response(404, f"unknown route: {alias}", alias)
         metadata = body.get("metadata", {})
         metadata = metadata if isinstance(metadata, dict) else {}
@@ -250,46 +277,68 @@ class GatewayProxy:
         for value in metadata.get("capabilities", []):
             if isinstance(value, str) and value not in capabilities:
                 capabilities.append(value)
-        try:
-            decision = plane.resolve_alias(
-                alias,
-                now=self._routing_now(),
-                quality_tier=str(metadata.get("quality_tier", "balanced")),
-                estimated_cost=float(metadata.get("max_cost_usd", 0)),
-                region=str(metadata.get("region", "eu")),
-                capabilities=capabilities,
-            )
-        except (KeyError, RuntimeError, TypeError, ValueError) as exc:
-            return self._error_response(422, str(exc), alias)
 
-        candidates = list(decision.get("candidate_models", []))
-        selected = str(decision["selected_model"])
-        if selected in candidates:
-            candidates.remove(selected)
-        candidates.insert(0, selected)
+        # 1) UI-managed route (Routes tab, targets model) — user-editable.
+        store = self._product_console
+        route = None
+        from_plane = False
+        if store is not None:
+            try:
+                route = store.published_route_by_name(alias)
+            except Exception:
+                route = None
+        if route is not None:
+            decision = self._resolve_targets(route, capabilities)
+            if decision is None:
+                return self._error_response(422, "no eligible route target", alias)
+            candidates = decision["candidates"]
+            fallback_statuses = decision["fallback_statuses"]
+            fallback = decision.get("fallback_reason") or "none"
+            route_name = route["name"]
+        else:
+            # 2) Logical routing plane (admin-created routes).
+            from_plane = True
+            try:
+                decision = plane.resolve_alias(
+                    alias,
+                    now=self._routing_now(),
+                    quality_tier=str(metadata.get("quality_tier", "balanced")),
+                    estimated_cost=float(metadata.get("max_cost_usd", 0)),
+                    region=str(metadata.get("region", "eu")),
+                    capabilities=capabilities,
+                )
+            except (KeyError, RuntimeError, TypeError, ValueError) as exc:
+                return self._error_response(404, f"unknown route: {alias}", alias)
+            candidates = list(decision.get("candidate_models", []))
+            selected = str(decision["selected_model"])
+            if selected in candidates:
+                candidates.remove(selected)
+            candidates.insert(0, selected)
+            fallback = decision.get("fallback_reason") or "none"
+            fallback_statuses = decision.get("fallback_statuses", [])
+            route_name = alias
         response = None
-        fallback = decision.get("fallback_reason") or "none"
         outbound = {k: v for k, v in body.items() if k != "metadata"}
         for index, candidate in enumerate(candidates):
             response = await self.forward(candidate, outbound)
-            if response.status_code not in set(decision.get("fallback_statuses", [])):
+            if response.status_code not in set(fallback_statuses):
                 break
             if index + 1 < len(candidates):
                 fallback = f"provider_status_{response.status_code}"
         assert response is not None
         response.headers = dict(response.headers)
-        response.headers.update(decision["response_headers"])
+        response.headers["X-Gateway-Route"] = route_name
         response.headers["X-Gateway-Serving-Model"] = response.model
         response.headers["X-Gateway-Fallback"] = str(fallback)
 
-        scope = BudgetScope(kind="key", key=str(plane.authenticate_application(api_key)["id"]))
+        scope = BudgetScope(kind="key", key=str(api_key))
         cost = 0.0
         try:
             record = self._cost_tracker.build_record(
                 request_id=request_id,
                 scope=scope,
                 model=response.model,
-                provider="litellm",
+                provider="direct",
                 usage=response.usage,
                 latency_ms=response.latency_ms,
                 status="success" if response.status_code < 400 else "error",
@@ -299,10 +348,72 @@ class GatewayProxy:
             if inspect.isawaitable(result):
                 await result
         except Exception:
-            logger.exception("logical route cost record failed request=%s", request_id)
-        if response.status_code < 400:
-            plane.record_model_spend(alias, response.model, cost, at=self._routing_now())
+            logger.exception("product route cost record failed request=%s", request_id)
+        if response.status_code < 400 and self._product_console is not None:
+            try:
+                self._product_console.record_request(
+                    app_id=str(api_key),
+                    route=route_name,
+                    model=response.model,
+                    cost=cost,
+                    latency=response.latency_ms,
+                    success=response.status_code < 400,
+                    reason=str(fallback),
+                )
+            except Exception:
+                logger.exception("product route activity record failed request=%s", request_id)
+        if response.status_code < 400 and from_plane:
+            try:
+                plane.record_model_spend(
+                    alias, response.model, cost, at=self._routing_now()
+                )
+            except Exception:
+                logger.exception("logical route spend record failed request=%s", request_id)
         return response
+
+    def _resolve_targets(
+        self, route: dict, capabilities: list[str]
+    ) -> dict | None:
+        """Pick the first eligible target of a UI route at the current instant.
+
+        Mirrors ProductConsoleStore.test_route: a target is eligible when the
+        current time in its timezone falls inside its start/end window and its
+        required capabilities are satisfied. Returns ordered candidates plus
+        the union of the on_status_codes fallback statuses.
+        """
+        now = self._routing_now()
+        eligible: list[dict] = []
+        excluded: list[str] = []
+        for target in route.get("targets", []):
+            local = now.astimezone(ZoneInfo(str(target.get("timezone", "UTC"))))
+            clock = local.strftime("%H:%M")
+            start = str(target.get("start", "00:00"))
+            end = str(target.get("end", "23:59"))
+            inside = (
+                start <= clock < end if start < end else clock >= start or clock < end
+            )
+            reason = None if inside else "outside_schedule"
+            if not set(target.get("required_capabilities", [])).issubset(capabilities):
+                reason = "missing_capabilities"
+            if reason:
+                excluded.append(f"{target.get('model')} ({reason})")
+            else:
+                eligible.append(target)
+        if not eligible:
+            return None
+        ordered = sorted(eligible, key=lambda t: int(t.get("priority", 100)))
+        statuses: set[int] = set()
+        for target in ordered:
+            for code in target.get("on_status_codes", [408, 409, 425, 429, 500, 502, 503, 504]):
+                try:
+                    statuses.add(int(code))
+                except (TypeError, ValueError):
+                    continue
+        return {
+            "candidates": [str(t["model"]) for t in ordered],
+            "fallback_statuses": sorted(statuses),
+            "fallback_reason": None if not excluded else "outside_schedule",
+        }
 
     async def _forward_direct(
         self, model: str, body: dict, stream: bool = False

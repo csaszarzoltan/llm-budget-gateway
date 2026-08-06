@@ -52,6 +52,39 @@ def test_activation_progress_is_derived_from_real_objects(
     assert provider["status"] == "healthy"
 
 
+def test_published_route_by_name_resolves_only_active_routes(
+    store: ProductConsoleStore,
+) -> None:
+    route = store.create_route(
+        "support-global",
+        [
+            {
+                "model": "openai/gpt-4o",
+                "priority": 10,
+                "timezone": "UTC",
+                "start": "00:00",
+                "end": "23:59",
+            }
+        ],
+    )
+    assert store.published_route_by_name("support-global") is None  # draft
+    store.publish_route(route["id"])
+    found = store.published_route_by_name("support-global")
+    assert found is not None
+    assert found["name"] == "support-global"
+    assert found["targets"][0]["model"] == "openai/gpt-4o"
+    assert store.published_route_by_name("missing") is None
+
+
+def test_authenticate_application_hashes_key(store: ProductConsoleStore) -> None:
+    app = store.create_application("Hermes Agent", "support-global")
+    identity = store.authenticate_application(app["api_key"])
+    assert identity["id"] == app["id"]
+    assert identity["name"] == "Hermes Agent"
+    with pytest.raises(PermissionError):
+        store.authenticate_application("gw_wrong-key")
+
+
 def test_provider_catalog_and_connection_health(store: ProductConsoleStore) -> None:
     provider = store.create_provider(
         "Anthropic EU", "anthropic", "eu", ["claude-sonnet"]
