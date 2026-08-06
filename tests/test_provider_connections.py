@@ -315,3 +315,83 @@ def test_provider_picker_has_a_real_scroll_overflow_and_custom_option() -> None:
     rule = styles.split(".provider-picker{", 1)[1].split("}", 1)[0]
     assert "height:250px" in rule
     assert "overflow-y:scroll" in rule
+
+
+def test_update_keeps_stored_secret_when_key_not_resent(
+    store: ProviderConnectionStore,
+) -> None:
+    created = store.create(
+        {
+            "name": "OpenAI Production",
+            "slug": "openai-prod",
+            "provider_type": "openai",
+            "api_key": "sk-original",
+            "base_url": "https://api.openai.com/v1",
+        }
+    )
+    updated = store.update(
+        created["id"],
+        {
+            "name": "OpenAI Prod Renamed",
+            "slug": "openai-prod",
+            "base_url": "https://alt.openai.com/v1",
+            "api_key": "",  # empty -> keep stored key
+        },
+    )
+    assert updated["name"] == "OpenAI Prod Renamed"
+    assert updated["base_url"] == "https://alt.openai.com/v1"
+    secret = store.connection_secret(created["id"])
+    assert secret["api_key"] == "sk-original"  # untouched
+    assert secret["base_url"] == "https://alt.openai.com/v1"
+
+
+def test_update_replaces_secret_when_key_resent(
+    store: ProviderConnectionStore,
+) -> None:
+    created = store.create(
+        {
+            "name": "OpenAI Production",
+            "slug": "openai-prod",
+            "provider_type": "openai",
+            "api_key": "sk-old",
+            "base_url": "https://api.openai.com/v1",
+        }
+    )
+    store.update(
+        created["id"],
+        {
+            "name": "OpenAI Production",
+            "slug": "openai-prod",
+            "api_key": "sk-new",
+            "base_url": "https://api.openai.com/v1",
+        },
+    )
+    assert store.connection_secret(created["id"])["api_key"] == "sk-new"
+
+
+def test_update_validates_slug_and_base_url(
+    store: ProviderConnectionStore,
+) -> None:
+    created = store.create(
+        {
+            "name": "OpenAI Production",
+            "slug": "openai-prod",
+            "provider_type": "openai",
+            "api_key": "sk-one",
+            "base_url": "https://api.openai.com/v1",
+        }
+    )
+    with pytest.raises(ValueError):
+        store.update(created["id"], {"slug": "bad slug!", "name": "X"})
+    with pytest.raises(ValueError):
+        store.update(
+            created["id"],
+            {"base_url": "ftp://nope", "name": "X", "slug": "openai-prod"},
+        )
+
+
+def test_update_unknown_provider_raises_key_error(
+    store: ProviderConnectionStore,
+) -> None:
+    with pytest.raises(KeyError):
+        store.update("provider_does_not_exist", {"name": "X"})

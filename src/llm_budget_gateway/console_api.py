@@ -695,6 +695,22 @@ def create_console_app(
         except ValueError as exc:
             raise HTTPException(422, str(exc)) from exc
 
+    @app.put("/v1/product/provider-connections/{provider_id}")
+    async def update_product_provider_connection(
+        provider_id: str, body: dict[str, object]
+    ) -> dict[str, object]:
+        """Update a provider connection (name/slug/region/base_url/key).
+
+        Secret fields are only replaced when the payload carries a non-empty
+        value — an empty api_key means "keep the stored key".
+        """
+        try:
+            return provider_store.update(provider_id, body)
+        except KeyError as exc:
+            raise HTTPException(404, "unknown provider connection") from exc
+        except ValueError as exc:
+            raise HTTPException(422, str(exc)) from exc
+
     @app.post("/v1/product/provider-connections/{provider_id}/sync-models")
     async def sync_product_provider_models(provider_id: str) -> dict[str, object]:
         """Verify credentials and download the provider-native model catalog."""

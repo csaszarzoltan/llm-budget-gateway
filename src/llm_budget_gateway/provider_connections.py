@@ -240,6 +240,56 @@ CREATE TABLE IF NOT EXISTS provider_models(provider_id TEXT NOT NULL,model_id TE
             raise ValueError("provider slug already exists") from exc
         return self.get(pid)
 
+    def update(self, provider_id: str, config: dict[str, Any]) -> dict[str, Any]:
+        """Update a provider connection, keeping unspecified secret fields.
+
+        Secret fields (api_key and friends) are only replaced when the payload
+        actually carries a non-empty value for them — an empty api_key in the
+        edit form means "keep the stored key". base_url/name/slug/region are
+        replaced from the payload (falling back to the stored value).
+        """
+        existing = self.get(provider_id)  # KeyError if unknown
+        provider_type = str(config.get("provider_type", existing["provider_type"]))
+        schema = next(
+            (item for item in PROVIDER_TYPES if item["id"] == provider_type), None
+        )
+        if not schema:
+            raise ValueError("unsupported provider type")
+        name = str(config.get("name", existing["name"])).strip()
+        slug = str(config.get("slug", existing["slug"])).strip().lower()
+        if not name or not re.fullmatch(r"[a-z0-9][a-z0-9-]{1,62}", slug):
+            raise ValueError("name and a URL-safe unique slug are required")
+        secret_fields = {field["name"] for field in schema["fields"]}
+        current = self.connection_secret(provider_id)
+        protected: dict[str, Any] = {}
+        for key in secret_fields:
+            new_value = config.get(key)
+            if isinstance(new_value, str) and new_value.strip():
+                protected[key] = new_value.strip()
+            else:
+                protected[key] = current.get(key, "")
+        base_url = str(protected.get("base_url", ""))
+        if base_url and not base_url.startswith(("https://", "http://")):
+            raise ValueError("base URL must use HTTP or HTTPS")
+        region = str(config.get("region", existing["region"]))
+        try:
+            self.db.execute(
+                "UPDATE provider_connections SET name=?, slug=?, provider_type=?, "
+                "region=?, encrypted_config=? WHERE id=?",
+                (
+                    name,
+                    slug,
+                    provider_type,
+                    region,
+                    self.vault.encrypt(protected),
+                    provider_id,
+                ),
+            )
+            self.db.commit()
+        except sqlite3.IntegrityError as exc:
+            raise ValueError("provider slug already exists") from exc
+        return self.get(provider_id)
+
     def get(self, provider_id: str) -> dict[str, Any]:
         row = self.db.execute(
             "SELECT id,name,slug,provider_type,region,status,last_sync,last_error,created FROM provider_connections WHERE id=?",
@@ -247,7 +297,7 @@ CREATE TABLE IF NOT EXISTS provider_models(provider_id TEXT NOT NULL,model_id TE
         ).fetchone()
         if not row:
             raise KeyError(provider_id)
-        return {
+        result: dict[str, Any] = {
             "id": row[0],
             "name": row[1],
             "slug": row[2],
@@ -263,6 +313,15 @@ CREATE TABLE IF NOT EXISTS provider_models(provider_id TEXT NOT NULL,model_id TE
                 (provider_id,),
             ).fetchone()[0],
         }
+        # base_url is not secret material — expose it so the UI can prefill
+        # the edit form without ever round-tripping the api_key.
+        try:
+            result["base_url"] = self.connection_secret(provider_id).get(
+                "base_url", ""
+            )
+        except Exception:
+            result["base_url"] = ""
+        return result
 
     def list(self) -> list[dict[str, Any]]:
         return [
