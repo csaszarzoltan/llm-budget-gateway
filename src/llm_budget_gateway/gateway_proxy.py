@@ -841,6 +841,7 @@ class GatewayProxy:
                             {
                                 "type": "error",
                                 "error": str(exc)[:500],
+                                "body": getattr(exc, "body", "")[:500],
                             }
                         ),
                     )
