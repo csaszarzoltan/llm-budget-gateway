@@ -4,6 +4,8 @@ from __future__ import annotations
 
 import sqlite3
 import tempfile
+import time
+import os
 from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
 from pathlib import Path
@@ -53,6 +55,20 @@ from .provider_connections import (
     CredentialVault,
     ProviderConnectionStore,
     ProviderDiscovery,
+)
+from .market_features import (
+    CostAwareRouter as MarketCostAwareRouter,
+    ExactResponseCache,
+    PIIRedactor,
+    UsageAnomalyDetector,
+)
+from .operations_suite import PromptRegistry, QuotaDiagnostic, SLOMonitor
+from .evaluation_suite import (
+    AuditReport,
+    BatchManifest,
+    EvaluationStore,
+    ReleaseGate,
+    RuleEvaluator,
 )
 from .routing_control_plane import RoutingControlPlane
 from .service_manager import ServiceManager
@@ -1211,5 +1227,201 @@ def create_console_app(
     ) -> dict[str, object]:
         _require_local_action(request, x_console_action)
         return {"services": service_manager.stop_all()}
+
+    # ------------------------------------------------------------------
+    # Integrated capabilities (formerly separate satellite services)
+    # ------------------------------------------------------------------
+    # Intelligence: PII redaction, exact-response cache, anomaly detection
+    # and cost-aware routing, exposed from the cockpit product API with the
+    # same bearer-token auth as every other product endpoint.
+    redactor = PIIRedactor()
+    cache = ExactResponseCache(str(repository_root / ".gateway-console" / "intelligence.db"))
+    anomaly = UsageAnomalyDetector()
+    cost_router = MarketCostAwareRouter()
+
+    @app.get("/v1/product/intelligence/redact")
+    async def intelligence_redact(text: str = "") -> dict[str, object]:
+        result = redactor.redact(text)
+        return {
+            "text": result.text,
+            "categories": list(result.categories),
+            "count": result.count,
+        }
+
+    @app.post("/v1/product/intelligence/cache")
+    async def intelligence_cache_put(body: dict[str, object]) -> dict[str, object]:
+        try:
+            key = cache.put(
+                "default",
+                body.get("request", {}),
+                body.get("response"),
+                int(body.get("ttl", 0)),
+            )
+        except (ValueError, TypeError) as exc:
+            raise HTTPException(400, str(exc)) from exc
+        return {"key": key, "status": "stored"}
+
+    @app.post("/v1/product/intelligence/cache/lookup")
+    async def intelligence_cache_get(body: dict[str, object]) -> dict[str, object]:
+        value = cache.get("default", body.get("request", {}))
+        if value is None:
+            return {"hit": False}
+        return {"hit": True, "value": value}
+
+    @app.post("/v1/product/intelligence/anomaly")
+    async def intelligence_anomaly(body: dict[str, object]) -> dict[str, object]:
+        try:
+            return anomaly.detect(
+                [float(x) for x in body.get("history", [])],
+                float(body.get("current", 0)),
+                float(body.get("z_limit", 3.0)),
+            )
+        except (ValueError, TypeError) as exc:
+            raise HTTPException(400, str(exc)) from exc
+
+    @app.post("/v1/product/intelligence/route")
+    async def intelligence_route(body: dict[str, object]) -> dict[str, object]:
+        try:
+            return cost_router.choose(
+                body.get("candidates", []),
+                float(body.get("min_quality", 0.0)),
+                int(body["max_latency_ms"]) if body.get("max_latency_ms") else None,
+            )
+        except (ValueError, KeyError, TypeError) as exc:
+            raise HTTPException(400, str(exc)) from exc
+
+    # Operations: prompt registry with immutable versions + deterministic
+    # A/B assignment; quota classification for provider errors.
+    prompts = PromptRegistry(str(repository_root / ".gateway-console" / "operations.db"))
+    quota = QuotaDiagnostic()
+
+    @app.get("/v1/product/prompts")
+    async def prompts_list(name: str = "") -> dict[str, object]:
+        if name:
+            return {"name": name, "versions": prompts.list("default", name)}
+        names = {
+            row[0]
+            for row in prompts.db.execute(
+                "SELECT DISTINCT name FROM prompt_version WHERE tenant='default'"
+            )
+        }
+        return {"names": sorted(names)}
+
+    @app.post("/v1/product/prompts", status_code=201)
+    async def prompts_create(body: dict[str, object]) -> dict[str, object]:
+        try:
+            return prompts.create(
+                "default",
+                str(body.get("name", "")),
+                str(body.get("template", "")),
+                body.get("metadata"),
+            )
+        except ValueError as exc:
+            raise HTTPException(400, str(exc)) from exc
+
+    @app.post("/v1/product/prompts/assign")
+    async def prompts_assign(body: dict[str, object]) -> dict[str, object]:
+        try:
+            return prompts.assign(
+                "default",
+                str(body.get("name", "")),
+                str(body.get("subject", "")),
+                [int(x) for x in body.get("versions", [])],
+            )
+        except ValueError as exc:
+            raise HTTPException(400, str(exc)) from exc
+
+    @app.post("/v1/product/quota/classify")
+    async def quota_classify(body: dict[str, object]) -> dict[str, object]:
+        return quota.classify(
+            int(body.get("status_code", 0)),
+            str(body.get("code") or ""),
+            str(body.get("message") or ""),
+        )
+
+    # Quality: rule-based output evaluation, release gates, batch manifests
+    # and audit reports, with persisted runs in the cockpit DB.
+    evaluator = RuleEvaluator()
+    gate = ReleaseGate()
+    batches = BatchManifest()
+    audits = AuditReport()
+    eval_store = EvaluationStore(
+        str(repository_root / ".gateway-console" / "evaluations.db")
+    )
+
+    @app.post("/v1/product/quality/evaluate")
+    async def quality_evaluate(body: dict[str, object]) -> dict[str, object]:
+        try:
+            result = evaluator.evaluate(
+                str(body.get("output", "")), body.get("rules", {})
+            )
+            record = eval_store.record("default", str(body.get("name", "eval")), result)
+            return {**record, "checks": result.checks, "passed": result.passed}
+        except (ValueError, TypeError) as exc:
+            raise HTTPException(400, str(exc)) from exc
+
+    @app.get("/v1/product/quality/runs")
+    async def quality_runs() -> dict[str, object]:
+        return {"runs": eval_store.list("default")}
+
+    @app.post("/v1/product/quality/release-gate")
+    async def quality_release_gate(body: dict[str, object]) -> dict[str, object]:
+        try:
+            return gate.decide(
+                [float(x) for x in body.get("scores", [])],
+                float(body.get("minimum", 0.8)),
+                float(body.get("max_regression", 0.05)),
+                float(body["baseline"]) if body.get("baseline") is not None else None,
+            )
+        except ValueError as exc:
+            raise HTTPException(400, str(exc)) from exc
+
+    @app.post("/v1/product/quality/batch")
+    async def quality_batch(body: dict[str, object]) -> dict[str, object]:
+        try:
+            return batches.build(
+                body.get("requests", []), float(body.get("discount", 0.5))
+            )
+        except ValueError as exc:
+            raise HTTPException(400, str(exc)) from exc
+
+    @app.post("/v1/product/quality/audit")
+    async def quality_audit(body: dict[str, object]) -> dict[str, object]:
+        try:
+            return audits.create(
+                body.get("findings", []), int(body.get("generated_at", 0))
+            )
+        except (ValueError, TypeError) as exc:
+            raise HTTPException(400, str(exc)) from exc
+
+    @app.post("/v1/product/quality/audit/verify")
+    async def quality_audit_verify(body: dict[str, object]) -> dict[str, object]:
+        return {"valid": audits.verify(body)}
+
+    # SLO monitoring over the last 24h of recorded requests.
+    slo = SLOMonitor()
+
+    @app.get("/v1/product/slo")
+    async def product_slo() -> dict[str, object]:
+        total = 0
+        failed = 0
+        try:
+            for row in cost_store._conn.execute(
+                "SELECT COUNT(*), COALESCE(SUM(CASE WHEN status_code >= 400 THEN 1 ELSE 0 END),0) "
+                "FROM cost_records WHERE timestamp >= ?",
+                (int(time.time()) - 86400,),
+            ):
+                total, failed = int(row[0]), int(row[1])
+        except sqlite3.Error:
+            total = failed = 0
+        if total <= 0:
+            return {
+                "availability": None,
+                "target": float(os.getenv("GATEWAY_SLO_TARGET", "0.99")),
+                "burn_rate": None,
+                "state": "no_data",
+                "remaining_failures": None,
+            }
+        return slo.evaluate(total, failed, float(os.getenv("GATEWAY_SLO_TARGET", "0.99")))
 
     return app

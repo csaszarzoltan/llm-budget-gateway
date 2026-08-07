@@ -25,6 +25,16 @@ class ServiceDefinition:
 
 
 SERVICES = (
+    # Only the proxy is auto-started by default. The satellite services
+    # that shipped with early demo versions are intentionally NOT started:
+    # their useful capabilities (intelligence, prompts, quality) have been
+    # folded into the cockpit product API and the rest were placeholder
+    # dashboards with no real implementation. Set
+    # GATEWAY_ENABLE_SATELLITES=1 to bring back the legacy services.
+    ServiceDefinition(
+        "gateway", "Gateway", "llm_budget_gateway.main:create_app", 8000, "/docs"
+    ),
+) if os.environ.get("GATEWAY_ENABLE_SATELLITES", "") != "1" else (
     ServiceDefinition(
         "gateway", "Gateway", "llm_budget_gateway.main:create_app", 8000, "/docs"
     ),
