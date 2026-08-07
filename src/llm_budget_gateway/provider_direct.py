@@ -40,6 +40,7 @@ that to HTTP 404).
 
 from __future__ import annotations
 
+import asyncio
 import json
 import logging
 import os
@@ -47,7 +48,7 @@ import sqlite3
 import threading
 import time
 from dataclasses import dataclass, field
-from typing import Any
+from typing import Any, AsyncIterator
 
 import httpx
 
@@ -840,3 +841,75 @@ class DirectProviderClient:
         except httpx.HTTPError as exc:
             raise UpstreamProviderError(502, f"upstream provider error: {endpoint.name}") from exc
         return response.status_code, chunks, served
+
+    async def stream_chunks(
+        self,
+        model: str,
+        body: dict[str, Any],
+        *,
+        kind: str = "chat",
+    ) -> AsyncIterator[dict[str, Any]]:
+        """Stream a request chunk-by-chunk as an async generator.
+
+        Unlike ``forward_stream`` (which drains the whole stream before
+        returning), this yields each SSE chunk the moment it arrives, so the
+        client sees tokens as they are generated. The httpx client timeout
+        covers connect + the gap between chunks. On completion the generator
+        raises ``StopAsyncIteration`` naturally.
+
+        Gemini thought_signatures are captured per chunk and reassembled at
+        the end (same as ``forward_stream``). Tool names are restored per
+        chunk.
+        """
+        endpoint = self.resolve(model)
+        url = self._request_url(endpoint, kind)
+        payload = {k: v for k, v in body.items() if k in _FORWARD_ALLOWLIST}
+        payload["model"] = model.split("/", 1)[1] if model.startswith("@") else model
+        payload["stream"] = True
+        if endpoint.extra_body:
+            payload.update(endpoint.extra_body)
+        if _model_needs_reasoning_echo(payload.get("model", "")):
+            _pad_reasoning_content(payload.get("messages"))
+        self._restore_thought_signatures(payload.get("messages"))
+        tool_name_map = _collect_tool_name_map(payload)
+        chunks: list[dict[str, Any]] = []
+        try:
+            async with self._client.stream(
+                "POST", url, json=payload, headers=endpoint.headers()
+            ) as response:
+                if response.status_code >= 400:
+                    body_text = ""
+                    try:
+                        body_text = (await response.aread()).decode(
+                            "utf-8", errors="replace"
+                        )[:2000]
+                    except Exception:
+                        body_text = ""
+                    raise UpstreamProviderError(
+                        response.status_code,
+                        f"upstream provider error: {endpoint.name} (HTTP {response.status_code})",
+                        body=body_text,
+                    )
+                async for line in response.aiter_lines():
+                    line = line.strip()
+                    if not line.startswith("data:"):
+                        continue
+                    data = line[5:].strip()
+                    if data == "[DONE]":
+                        break
+                    try:
+                        chunk = json.loads(data)
+                    except json.JSONDecodeError:
+                        continue
+                    if not isinstance(chunk, dict):
+                        continue
+                    chunks.append(chunk)
+                    self._capture_thought_signatures(chunk)
+                    _restore_tool_names(chunk, tool_name_map)
+                    yield chunk
+                self._reassemble_and_capture(chunks)
+        except httpx.TimeoutException as exc:
+            raise UpstreamProviderError(502, f"upstream provider timed out: {endpoint.name}") from exc
+        except httpx.HTTPError as exc:
+            raise UpstreamProviderError(502, f"upstream provider error: {endpoint.name}") from exc
+

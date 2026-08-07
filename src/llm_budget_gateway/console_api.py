@@ -2,22 +2,45 @@
 
 from __future__ import annotations
 
+import csv
+import io
+import os
 import sqlite3
 import tempfile
 import time
-import os
 from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
 from pathlib import Path
 
 from fastapi import FastAPI, Header, HTTPException, Request
-from fastapi.responses import FileResponse, HTMLResponse, RedirectResponse
+from fastapi.responses import (
+    FileResponse,
+    HTMLResponse,
+    PlainTextResponse,
+    RedirectResponse,
+)
 from fastapi.staticfiles import StaticFiles
 
 from .completion_features import MigrationPlanner, PolicyRouteSimulator
 from .console_ui import catalog, render_console
 from .console_workflows import get_workflow, search_workflows
+from .cost_tracking import CostStore
+from .evaluation_suite import (
+    AuditReport,
+    BatchManifest,
+    EvaluationStore,
+    ReleaseGate,
+    RuleEvaluator,
+)
 from .evidence_plane import EvidenceEvent, EvidencePlane
+from .market_features import (
+    CostAwareRouter as MarketCostAwareRouter,
+)
+from .market_features import (
+    ExactResponseCache,
+    PIIRedactor,
+    UsageAnomalyDetector,
+)
 from .market_priority import (
     ChangeImpactLab,
     CompatibilityContract,
@@ -27,6 +50,7 @@ from .market_priority import (
     RuntimeGovernor,
     RuntimeStep,
 )
+from .operations_suite import PromptRegistry, QuotaDiagnostic, SLOMonitor
 from .p0_workflows import (
     CompatibilityProbe,
     CompatibilityRunStore,
@@ -43,7 +67,6 @@ from .priority_features import (
     SchemaFormService,
 )
 from .priority_routes import PriorityRouteStore
-from .cost_tracking import CostStore
 from .product_console import ProductConsoleStore
 from .product_extensions import ProductExtensions
 from .production_readiness import (
@@ -55,20 +78,6 @@ from .provider_connections import (
     CredentialVault,
     ProviderConnectionStore,
     ProviderDiscovery,
-)
-from .market_features import (
-    CostAwareRouter as MarketCostAwareRouter,
-    ExactResponseCache,
-    PIIRedactor,
-    UsageAnomalyDetector,
-)
-from .operations_suite import PromptRegistry, QuotaDiagnostic, SLOMonitor
-from .evaluation_suite import (
-    AuditReport,
-    BatchManifest,
-    EvaluationStore,
-    ReleaseGate,
-    RuleEvaluator,
 )
 from .routing_control_plane import RoutingControlPlane
 from .service_manager import ServiceManager
@@ -169,6 +178,7 @@ def create_console_app(
         connection=cost_connection
         or sqlite3.connect(":memory:", check_same_thread=False)
     )
+    attribution = cost_store.attribution_store()
     trace_store = TraceStore(
         trace_connection or sqlite3.connect(":memory:", check_same_thread=False)
     )
@@ -395,6 +405,7 @@ def create_console_app(
             raise HTTPException(409, "replay executor is not configured")
         try:
             from dataclasses import asdict
+
             from .replay_execution import ReplayRequest
 
             result = await replay_executor.execute(
@@ -938,6 +949,150 @@ def create_console_app(
             page_size=page_size,
         )
         return base
+
+    # -- Cost attribution (US-001) -----------------------------------------
+
+    @app.get("/v1/product/customers")
+    async def product_customers() -> dict[str, object]:
+        """List customers with MTD summary and budget status each."""
+        customers = []
+        for cust in attribution.list_customers():
+            entry = {
+                "id": cust["id"],
+                "name": cust["name"],
+                "tenant": cust["tenant"],
+                "created_at": cust["created_at"],
+                "mtd": {
+                    "cost_usd": cust["mtd_cost_usd"],
+                    "calls": cust["mtd_calls"],
+                    "total_tokens": cust["mtd_total_tokens"],
+                    "prompt_tokens": cust["mtd_prompt_tokens"],
+                    "completion_tokens": cust["mtd_completion_tokens"],
+                },
+            }
+            budget = attribution.get_budget(cust["id"])
+            if budget is not None:
+                entry["budget"] = {
+                    "monthly_limit_usd": budget["monthly_limit_usd"],
+                    "percent_used": budget["percent_used"],
+                    "remaining_usd": budget["remaining_usd"],
+                }
+            else:
+                entry["budget"] = None
+            customers.append(entry)
+        return {"customers": customers, "total_customers": len(customers)}
+
+    @app.post("/v1/product/customers", status_code=201)
+    async def product_create_customer(body: dict[str, object]) -> dict[str, object]:
+        """Create a customer (409 on duplicate name, 422 on empty name)."""
+        name = str(body.get("name", "") or "").strip()
+        if not name:
+            raise HTTPException(422, "name is required")
+        try:
+            return attribution.create_customer(name)
+        except ValueError as exc:
+            raise HTTPException(409, str(exc)) from exc
+
+    @app.get("/v1/product/customers/{customer_id}")
+    async def product_customer_detail(customer_id: str) -> dict[str, object]:
+        """Customer detail payload (summary + budget status)."""
+        customer = attribution.get_customer(customer_id)
+        if customer is None:
+            raise HTTPException(404, "unknown customer")
+        summary = attribution.mtd_summary(customer_id)
+        budget = attribution.get_budget(customer_id)
+        return {
+            "customer": customer,
+            "summary": {
+                "mtd_cost_usd": summary.mtd_cost_usd,
+                "mtd_calls": summary.mtd_calls,
+                "mtd_total_tokens": summary.mtd_total_tokens,
+                "mtd_prompt_tokens": summary.mtd_prompt_tokens,
+                "mtd_completion_tokens": summary.mtd_completion_tokens,
+            },
+            "budget": budget,
+        }
+
+    @app.put("/v1/product/customers/{customer_id}/budget")
+    async def product_set_customer_budget(
+        customer_id: str, body: dict[str, object]
+    ) -> dict[str, object]:
+        """Set a monthly budget for a customer (422 on non-positive limit)."""
+        raw = body.get("monthly_limit_usd") or body.get("limit_usd") or 0
+        try:
+            limit = float(str(raw))
+        except (TypeError, ValueError) as exc:
+            raise HTTPException(422, "monthly_limit_usd must be positive") from exc
+        if limit <= 0:
+            raise HTTPException(422, "monthly_limit_usd must be positive")
+        if attribution.get_customer(customer_id) is None:
+            raise HTTPException(404, "unknown customer")
+        return attribution.set_monthly_budget(customer_id, limit)
+
+    @app.get("/v1/product/customers/{customer_id}/daily-spend")
+    async def product_customer_daily_spend(
+        customer_id: str, days: int = 31, granularity: str = "day"
+    ) -> dict[str, object]:
+        """Daily/weekly/monthly spend chart data for a customer."""
+        if attribution.get_customer(customer_id) is None:
+            raise HTTPException(404, "unknown customer")
+        if granularity not in ("day", "week", "month"):
+            raise HTTPException(422, "granularity must be day|week|month")
+        points = attribution.daily_spend(customer_id, days=days, granularity=granularity)
+        return {
+            "customer_id": customer_id,
+            "granularity": granularity,
+            "points": [
+                {
+                    "date": p.date,
+                    "cost_usd": p.cost_usd,
+                    "calls": p.calls,
+                    "total_tokens": p.total_tokens,
+                }
+                for p in points
+            ],
+        }
+
+    @app.get("/v1/product/customers/{customer_id}/models")
+    async def product_customer_models(customer_id: str) -> dict[str, object]:
+        """Breakdown by model (MTD by default) sorted by cost desc."""
+        if attribution.get_customer(customer_id) is None:
+            raise HTTPException(404, "unknown customer")
+        models = attribution.spend_by_model(customer_id)
+        return {
+            "customer_id": customer_id,
+            "since_epoch": int(time.time()),
+            "models": [
+                {
+                    "model": m.model,
+                    "cost_usd": m.cost_usd,
+                    "calls": m.calls,
+                    "total_tokens": m.total_tokens,
+                }
+                for m in models
+            ],
+        }
+
+    @app.get("/v1/product/customers/{customer_id}/export.csv")
+    async def product_customer_export_csv(customer_id: str) -> PlainTextResponse:
+        """CSV ledger export: one row per entry, newest first."""
+        customer = attribution.get_customer(customer_id)
+        if customer is None:
+            raise HTTPException(404, "unknown customer")
+        rows = attribution.ledger_rows(customer_id)
+        buf = io.StringIO()
+        writer = csv.writer(buf)
+        writer.writerow(["customer", "timestamp", "model", "tokens", "cost"])
+        for row in rows:
+            writer.writerow(
+                [row.customer, row.timestamp, row.model, row.tokens, f"{row.cost:.6f}"]
+            )
+        filename = f"{customer['name']}-usage.csv"
+        return PlainTextResponse(
+            buf.getvalue(),
+            media_type="text/csv",
+            headers={"Content-Disposition": f'attachment; filename="{filename}"'},
+        )
 
     @app.get("/v1/product/routes/{route_id}/status")
     async def product_route_status(route_id: str) -> dict[str, object]:

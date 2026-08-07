@@ -14,7 +14,7 @@ import json
 import logging
 import random
 import time
-from collections.abc import Callable
+from collections.abc import AsyncIterator, Callable
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from uuid import uuid4
@@ -137,7 +137,7 @@ def _is_context_error(body: dict | str | list) -> bool:
 @dataclass
 class ProviderResponse:
     status_code: int
-    body: dict | str | list
+    body: dict | str | list | AsyncIterator[str]
     headers: dict[str, str]
     model: str  # actual model that served the request
     usage: TokenUsage | None
@@ -333,6 +333,7 @@ class GatewayProxy:
                 latency_ms=0,
                 status="timeout",
                 status_code=502,
+                customer_id=self._resolve_request_customer(body, headers),
             )
             return self._error_response(502, "upstream provider timed out", model)
         except Exception as exc:
@@ -350,6 +351,7 @@ class GatewayProxy:
                 latency_ms=0,
                 status="error",
                 status_code=502,
+                customer_id=self._resolve_request_customer(body, headers),
             )
             return self._error_response(502, "upstream provider error", model)
 
@@ -360,6 +362,7 @@ class GatewayProxy:
             usage=response.usage,
             latency_ms=response.latency_ms,
             status="success",
+            customer_id=self._resolve_request_customer(body, headers),
         )
         # Rate-limit visibility: attach standard X-RateLimit-* headers from
         # the last check_sync so clients (Hermes) can show remaining quota.
@@ -554,6 +557,9 @@ class GatewayProxy:
                         client_id=client_id,
                         client_profile=client_profile,
                         cache_hit=True,
+                    )
+                    cache_record.customer_id = self._cost_tracker.resolve_customer_id(
+                        metadata=metadata, headers=headers, client_id=client_id
                     )
                     try:
                         result = self._cost_tracker.record(cache_record)
@@ -915,6 +921,64 @@ class GatewayProxy:
 
         scope = BudgetScope(kind="key", key=str(api_key))
         cost = 0.0
+
+        # Live-stream responses carry a body generator; the usage is only
+        # known once the stream finishes, so the cost record is deferred to
+        # a wrapper generator that runs after the last chunk.
+        if isinstance(response.body, AsyncIterator):
+            original_body = response.body
+
+            async def _wrapped_stream() -> AsyncIterator[str]:
+                nonlocal cost
+                stream_usage: TokenUsage | None = None
+                try:
+                    async for ev in original_body:
+                        yield ev
+                finally:
+                    # Aggregate usage from the drained chunks (the direct
+                    # client stores them on the response).
+                    gen_chunks = getattr(response, "_stream_chunks", None) or []
+                    stream_usage = GatewayProxy._collect_stream_usage(gen_chunks)
+                    try:
+                        record = self._cost_tracker.build_record(
+                            request_id=request_id,
+                            scope=scope,
+                            model=served or response.model,
+                            provider="direct",
+                            usage=stream_usage,
+                            latency_ms=int(
+                                (time.perf_counter() - chain_started) * 1000
+                            ),
+                            status="success"
+                            if response.status_code < 400
+                            else "error",
+                            route=route_name,
+                            status_code=response.status_code,
+                            conversation_id=conversation_id,
+                        )
+                        record.client_id = client_id
+                        record.client_profile = client_profile
+                        record.cache_hit = False
+                        record.customer_id = (
+                            self._cost_tracker.resolve_customer_id(
+                                metadata=metadata,
+                                headers=headers,
+                                client_id=client_id,
+                            )
+                        )
+                        cost = float(getattr(record, "total_cost", 0.0))
+                        result = self._cost_tracker.record(record)
+                        if inspect.isawaitable(result):
+                            await result
+                    except Exception:
+                        logger.exception(
+                            "product route stream cost record failed request=%s",
+                            request_id,
+                        )
+
+            response.body = _wrapped_stream()
+            return response
+
         try:
             record = self._cost_tracker.build_record(
                 request_id=request_id,
@@ -935,6 +999,9 @@ class GatewayProxy:
             record.client_id = client_id
             record.client_profile = client_profile
             record.cache_hit = False
+            record.customer_id = self._cost_tracker.resolve_customer_id(
+                metadata=metadata, headers=headers, client_id=client_id
+            )
             cost = float(getattr(record, "total_cost", 0.0))
             result = self._cost_tracker.record(record)
             if inspect.isawaitable(result):
@@ -1111,14 +1178,18 @@ class GatewayProxy:
         return None
 
     async def _forward_direct(
-        self, model: str, body: dict, stream: bool = False, timeout: float | None = None
+        self, model: str, body: dict, stream: bool = False, timeout: float | None = None,
+        request_id: str | None = None,
     ) -> ProviderResponse:
         """Forward via the direct provider transport (no litellm).
 
-        The direct client resolves the model to a configured provider
-        endpoint and issues a plain HTTP call. Stream=true requests are
-        drained into SSE lines; usage is extracted from the final chunk.
-        ``timeout`` overrides the global provider timeout per target.
+        Stream=true requests now yield SSE chunks LIVE to the client
+        instead of draining them first: the first chunk arrives within
+        ``timeout`` (first-byte budget), then each subsequent chunk is
+        yielded immediately. The response body is an async SSE generator.
+        Usage is NOT available in the ProviderResponse.usage (None); the
+        caller wraps the generator and writes the cost record on
+        completion.
         """
         start = time.perf_counter()
         effective_timeout = (
@@ -1129,21 +1200,84 @@ class GatewayProxy:
         )
         is_stream = (not is_embedding) and (stream or bool(body.get("stream")))
         kind = "embedding" if is_embedding else "chat"
-        status = 502
-        chunks: list = []
-        data: dict = {}
         served = model
+        if is_stream:
+            # Live streaming: await the FIRST chunk HERE (inside the route
+            # loop, so a 4xx/5xx/timeout on the first byte falls back to the
+            # next candidate exactly like a drained call), then yield the
+            # remaining chunks to the client as they arrive.
+            chunks: list[dict] = []
+            agen = self._direct_client.stream_chunks(  # type: ignore[attr-defined]
+                model, body, kind=kind
+            )
+            try:
+                first_chunk = await asyncio.wait_for(
+                    agen.__anext__(), timeout=effective_timeout
+                )
+            except StopAsyncIteration:
+                await agen.aclose()  # type: ignore[union-attr]
+                return ProviderResponse(
+                    status_code=200,
+                    body=[],
+                    headers={},
+                    model=served or model,
+                    usage=None,
+                    latency_ms=int((time.perf_counter() - start) * 1000),
+                )
+            except TimeoutError as exc:
+                try:
+                    await agen.aclose()  # type: ignore[union-attr]
+                except Exception:
+                    pass
+                raise ProviderTimeoutError(
+                    f"upstream provider timed out after {effective_timeout}s"
+                ) from exc
+            chunks.append(first_chunk)
+            if isinstance(first_chunk, dict) and first_chunk.get("model"):
+                served = first_chunk["model"]
+
+            async def _rest_stream() -> AsyncIterator[str]:
+                # First chunk is already consumed — emit it, then stream
+                # the remainder live.
+                yield "data: " + json.dumps(
+                    GatewayProxy._chunk_to_dict(first_chunk),
+                    ensure_ascii=False,
+                    default=str,
+                ) + "\n\n"
+                async for chunk in agen:
+                    chunks.append(chunk)
+                    yield "data: " + json.dumps(
+                        GatewayProxy._chunk_to_dict(chunk),
+                        ensure_ascii=False,
+                        default=str,
+                    ) + "\n\n"
+                yield "data: [DONE]\n\n"
+                # Usage is aggregated here (last usage chunk), so the cost
+                # record written by the caller with usage=None is stale —
+                # the caller updates it when the stream completes.
+                _rest_stream.chunks = chunks  # type: ignore[attr-defined]
+
+            resp = ProviderResponse(
+                status_code=200,
+                body=_rest_stream(),
+                headers={"X-Gateway-Streaming": "1"},
+                model=served or model,
+                usage=None,  # filled by the wrapper at stream end
+                latency_ms=0,  # will be set by caller after stream ends
+            )
+            # Async generators have no __dict__, so the caller cannot read
+            # the drained chunks off the body object — attach them to the
+            # response instead (the wrapper generator consumes them).
+            resp._stream_chunks = chunks  # type: ignore[attr-defined]
+            return resp
+
+        status = 502
+        data: dict = {}
         try:
-            if is_stream:
-                status, chunks, served = await asyncio.wait_for(
-                    self._direct_client.forward_stream(model, body, kind=kind),  # type: ignore[attr-defined]
-                    timeout=effective_timeout,
-                )
-            else:
-                status, data, served = await asyncio.wait_for(
-                    self._direct_client.forward(model, body, kind=kind),  # type: ignore[attr-defined]
-                    timeout=effective_timeout,
-                )
+            status, data, served = await asyncio.wait_for(
+                self._direct_client.forward(model, body, kind=kind),  # type: ignore[attr-defined]
+                timeout=effective_timeout,
+            )
         except TimeoutError as exc:
             raise ProviderTimeoutError(
                 f"upstream provider timed out after {effective_timeout}s"
@@ -1166,51 +1300,22 @@ class GatewayProxy:
             )
 
         usage: TokenUsage | None = None
-        if is_stream:
-            # Aggregate usage across chunks like the litellm streaming path.
-            chunks_usage = [c for c in chunks if isinstance(c, dict) and c.get("usage")]
-            if chunks_usage:
-                last = chunks_usage[-1]["usage"]
-                usage = TokenUsage(
-                    prompt_tokens=int(last.get("prompt_tokens", 0) or 0),
-                    completion_tokens=int(last.get("completion_tokens", 0) or 0),
-                    total_tokens=int(last.get("total_tokens", 0) or 0),
-                )
-            body_out: dict | str | list = self._sse_lines(chunks)
-            # Partial tool call visibility: mark the response when the
-            # stream contained any tool_calls delta, so the client (Hermes)
-            # can show the tool activity immediately instead of waiting for
-            # the full response.
-            headers_out: dict = {}
-            if any(
-                isinstance(c, dict)
-                and c.get("choices")
-                and any(
-                    (ch.get("delta") or {}).get("tool_calls")
-                    for ch in c.get("choices", [])
-                )
-                for c in chunks
-            ):
-                headers_out["X-Gateway-Partial-Tool-Call"] = "1"
-        else:
-            resp_usage = data.get("usage")
-            if isinstance(resp_usage, dict):
-                usage = TokenUsage(
-                    prompt_tokens=int(resp_usage.get("prompt_tokens", 0) or 0),
-                    completion_tokens=int(resp_usage.get("completion_tokens", 0) or 0),
-                    total_tokens=int(
-                        resp_usage.get("total_tokens", 0)
-                        or 0
-                        or int(resp_usage.get("prompt_tokens", 0) or 0)
-                        + int(resp_usage.get("completion_tokens", 0) or 0)
-                    ),
-                )
-            body_out = data
-            headers_out = {}
+        resp_usage = data.get("usage")
+        if isinstance(resp_usage, dict):
+            usage = TokenUsage(
+                prompt_tokens=int(resp_usage.get("prompt_tokens", 0) or 0),
+                completion_tokens=int(resp_usage.get("completion_tokens", 0) or 0),
+                total_tokens=int(
+                    resp_usage.get("total_tokens", 0)
+                    or 0
+                    or int(resp_usage.get("prompt_tokens", 0) or 0)
+                    + int(resp_usage.get("completion_tokens", 0) or 0)
+                ),
+            )
         return ProviderResponse(
             status_code=status,
-            body=body_out,
-            headers=headers_out,
+            body=data,
+            headers={},
             model=served or model,
             usage=usage,
             latency_ms=int((time.perf_counter() - start) * 1000),
@@ -1265,7 +1370,8 @@ class GatewayProxy:
                     resolved = None
                 if resolved is not None:
                     return await self._forward_direct(
-                        model, body, stream, timeout=effective_timeout
+                        model, body, stream, timeout=effective_timeout,
+                        request_id=getattr(self, "_current_request_id", None),
                     )
 
         # Whitelist only — never forward api_key/base_url/headers from the
@@ -1420,6 +1526,24 @@ class GatewayProxy:
         return lines
 
     @staticmethod
+    def _collect_stream_usage(chunks: list) -> TokenUsage | None:
+        """Aggregate usage from the final usage chunk of a stream.
+
+        The live-streaming path cannot build the UsageRecord until the
+        stream ends, so the wrapper generator calls this on [DONE] and the
+        record is written after the response is fully streamed.
+        """
+        for c in reversed(chunks):
+            if isinstance(c, dict) and c.get("usage"):
+                last = c["usage"]
+                return TokenUsage(
+                    prompt_tokens=int(last.get("prompt_tokens", 0) or 0),
+                    completion_tokens=int(last.get("completion_tokens", 0) or 0),
+                    total_tokens=int(last.get("total_tokens", 0) or 0),
+                )
+        return None
+
+    @staticmethod
     def _chunk_to_dict(chunk: object) -> dict:
         """Best-effort plain-dict projection of a stream chunk (litellm
         ModelResponse, pydantic model, dict or namespace)."""
@@ -1485,6 +1609,7 @@ class GatewayProxy:
         latency_ms: int,
         status: str,
         status_code: int | None = None,
+        customer_id: str | None = None,
     ) -> None:
         """Best-effort cost record; tolerates non-awaitable tracker doubles.
 
@@ -1505,6 +1630,7 @@ class GatewayProxy:
                 status=status,
                 status_code=status_code,
             )
+            usage_record.customer_id = customer_id
             result = self._cost_tracker.record(usage_record)
             if inspect.isawaitable(result):
                 await result
@@ -1515,6 +1641,20 @@ class GatewayProxy:
                 model,
                 status,
             )
+
+    def _resolve_request_customer(self, body: dict, headers: dict) -> str | None:
+        """Resolve the customer id for a request — best effort, never raises."""
+        try:
+            metadata = body.get("metadata", {})
+            if not isinstance(metadata, dict):
+                metadata = {}
+            client_id = str(metadata.get("client_id", "")) or None
+            return self._cost_tracker.resolve_customer_id(
+                metadata=metadata, headers=headers, client_id=client_id
+            )
+        except Exception:
+            logger.exception("customer id resolution failed request=%s", body)
+            return None
 
     def _estimate_input_tokens(self, body: dict) -> int:
         """Estimate prompt tokens via the fallback manager (0 when unknown)."""

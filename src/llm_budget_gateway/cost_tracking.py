@@ -8,12 +8,16 @@ analysis brief §4 P0-2.
 from __future__ import annotations
 
 import asyncio
+import logging
 import sqlite3
 import threading
 import time
 from dataclasses import dataclass
 
 from .budget_enforcement import BudgetScope
+from .cost_attribution import CostAttributionStore
+
+logger = logging.getLogger(__name__)
 
 _CREATE_TABLE = """
 CREATE TABLE IF NOT EXISTS cost_records (
@@ -99,6 +103,7 @@ class UsageRecord:
     client_profile: str | None = None
     cache_hit: bool = False
     conversation_id: str | None = None
+    customer_id: str | None = None
 
 
 def accumulate_usage(chunks: list[dict]) -> TokenUsage:
@@ -217,6 +222,10 @@ class CostStore:
                 "CREATE INDEX IF NOT EXISTS idx_cost_records_api_key_timestamp "
                 "ON cost_records (api_key, timestamp)"
             )
+            self._conn.execute(
+                "CREATE INDEX IF NOT EXISTS idx_cost_records_customer_timestamp "
+                "ON cost_records (customer_id, timestamp)"
+            )
             self._conn.commit()
 
     def _migrate_legacy_schema(self) -> None:
@@ -239,6 +248,7 @@ class CostStore:
             ("client_id", "TEXT"),
             ("client_profile", "TEXT"),
             ("cache_hit", "INTEGER NOT NULL DEFAULT 0"),
+            ("customer_id", "TEXT"),
         ):
             if column not in existing:
                 self._conn.execute(
@@ -257,8 +267,9 @@ class CostStore:
                     input_cost, output_cost, reasoning_cost, total_cost,
                     latency_ms, status, status_code, timestamp,
                     tool_name, project, route,
-                    client_id, client_profile, cache_hit, conversation_id
-                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    client_id, client_profile, cache_hit, conversation_id,
+                    customer_id
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 """,
                 (
                     record.request_id,
@@ -286,6 +297,7 @@ class CostStore:
                     record.client_profile,
                     1 if record.cache_hit else 0,
                     record.conversation_id,
+                    record.customer_id,
                 ),
             )
             self._conn.commit()
@@ -688,6 +700,10 @@ class CostStore:
             ),
         }
 
+    def attribution_store(self) -> CostAttributionStore:
+        """Return a CostAttributionStore over the same ledger connection."""
+        return CostAttributionStore(self._conn)
+
 
 class CostTracker:
     """Async facade over CostStore + CostCalculator."""
@@ -813,3 +829,39 @@ class CostTracker:
     def active_cooldowns(self) -> list[dict[str, object]]:
         """Not-yet-expired cooldowns for the UI."""
         return self._store.active_cooldowns()
+
+    def resolve_customer_id(
+        self,
+        metadata: dict | None = None,
+        headers: dict | None = None,
+        client_id: str | None = None,
+    ) -> str | None:
+        """Resolve the customer id for a request — best effort, never raises.
+
+        Priority: ``metadata.customer_id`` > ``X-Gateway-Customer-Id`` header
+        > exact ``customers.name`` match on ``client_id``. Unknown customers
+        resolve to ``None`` (the request stays attributed to client only).
+        """
+        try:
+            if metadata and isinstance(metadata, dict):
+                value = metadata.get("customer_id")
+                if value:
+                    return str(value)
+            if headers and isinstance(headers, dict):
+                value = headers.get("x-gateway-customer-id")
+                if not value:
+                    lowered = {
+                        str(k).lower(): v for k, v in headers.items()
+                    }
+                    value = lowered.get("x-gateway-customer-id")
+                if value:
+                    return str(value)
+            if client_id:
+                row = self._store._conn.execute(  # noqa: SLF001
+                    "SELECT id FROM customers WHERE name = ?", (client_id,)
+                ).fetchone()
+                if row is not None:
+                    return str(row[0])
+        except Exception:
+            logger.exception("customer id resolution failed")
+        return None
