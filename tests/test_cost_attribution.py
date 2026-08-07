@@ -437,29 +437,6 @@ class TestUsageRecordCustomerIdField:
 # ===========================================================================
 
 
-class TestStubMethodsRaiseNotImplementedError:
-    """Verify every store method raises NotImplementedError on the stub."""
-
-    @pytest.mark.parametrize(
-        "method_name, args",
-        [
-            ("create_customer", ("Test",)),
-            ("list_customers", ()),
-            ("get_customer", ("cus_nonexistent",)),
-            ("set_monthly_budget", ("cus_nonexistent", 50.0)),
-            ("get_budget", ("cus_nonexistent",)),
-            ("mtd_summary", ("cus_nonexistent",)),
-            ("daily_spend", ("cus_nonexistent",)),
-            ("spend_by_model", ("cus_nonexistent",)),
-            ("ledger_rows", ("cus_nonexistent",)),
-        ],
-    )
-    def test_raises_not_implemented(self, attribution_store, method_name, args):
-        method = getattr(attribution_store, method_name)
-        with pytest.raises(NotImplementedError):
-            method(*args)
-
-
 class TestCreateCustomerBehavioral:
     """RED: Customer creation and duplicate detection."""
 
