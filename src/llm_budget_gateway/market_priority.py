@@ -250,6 +250,32 @@ class CompatibilityContractCatalog:
         self.connection.commit()
         return contract
 
+    def record_result(
+        self,
+        result: object,
+        *,
+        model_id: str,
+        checked_at: int,
+        region: str,
+        price_per_million: float | None,
+    ) -> int:
+        """Persist a ProviderCompatibilityLab result as one contract per probe."""
+        saved = 0
+        probes = getattr(result, "probes", None) or []
+        for probe in probes:
+            contract = CompatibilityContract(
+                provider_id=str(getattr(result, "provider_id", "")),
+                model_id=model_id,
+                capability=str(getattr(probe, "capability", "")),
+                supported=bool(getattr(probe, "passed", False)),
+                checked_at=checked_at,
+                price_per_million=price_per_million,
+                region=region,
+            )
+            self.record(contract)
+            saved += 1
+        return saved
+
     def matrix(self, provider_id: str) -> list[dict[str, Any]]:
         """Return newest-first provider contracts as JSON-ready dictionaries."""
         rows = self.connection.execute(

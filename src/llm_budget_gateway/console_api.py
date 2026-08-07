@@ -154,6 +154,7 @@ def create_console_app(
     provider_discovery_transport: object | None = None,
     auto_start_services: bool = False,
     cockpit_first: bool = False,
+    replay_executor: object | None = None,
 ) -> FastAPI:
     """Create the console with local one-click lifecycle controls."""
     repository_root = project_root or Path(__file__).resolve().parents[2]
@@ -383,6 +384,40 @@ def create_console_app(
                 ReplayCandidate(**dict(body.get("candidate", {}))),
             )
             return asdict(result)
+        except (TypeError, ValueError) as exc:
+            raise HTTPException(422, str(exc)) from exc
+
+    @app.post("/v1/console/replay/run")
+    async def replay_run(body: dict[str, object], request: Request) -> dict[str, object]:
+        """Execute a bounded candidate replay through the local gateway."""
+        _require_local_client(request)
+        if replay_executor is None:
+            raise HTTPException(409, "replay executor is not configured")
+        try:
+            from dataclasses import asdict
+            from .replay_execution import ReplayRequest
+
+            result = await replay_executor.execute(
+                ReplayRequest(
+                    request_id=str(body.get("request_id", "")),
+                    model=str(body.get("candidate_model", "")),
+                    messages=tuple(body.get("messages", [])),
+                    max_completion_tokens=int(
+                        body.get("max_completion_tokens", 256)
+                    ),
+                    estimated_cost_usd=float(body.get("estimated_cost_usd", 0)),
+                )
+            )
+            baseline_cost = float(body.get("baseline_cost_usd", 0))
+            return {
+                "executed": True,
+                "candidate": asdict(result),
+                "impact": {
+                    "cost_delta_usd": result.estimated_cost_usd - baseline_cost,
+                    "tokens": result.tokens,
+                    "latency_ms": result.latency_ms,
+                },
+            }
         except (TypeError, ValueError) as exc:
             raise HTTPException(422, str(exc)) from exc
 

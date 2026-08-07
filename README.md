@@ -71,7 +71,30 @@ cd ui && npm test && npm run build
 - **Activity:** explainable routing decisions and trace evidence
 - **Usage:** request, cost, latency, and success summaries
 - **Safety:** Runaway Cost Firewall, Provider Compatibility Lab, and Explain-and-Fix Incident Timeline
+- **Intelligence:** PII redaction, exact-response cache, anomaly detection and cost-aware routing (integrated into the proxy path, opt-in per request)
+- **Prompts:** immutable versioned prompt registry with deterministic A/B assignment
+- **Quality:** rule-based output evaluation, release gates, batch manifests and audit reports
 - **Advanced:** services, nested traces, governance, security, supply chain, and API access
+
+## Integrated intelligence (14.1.0)
+
+The legacy satellite services (control, intelligence, operations, quality, security, resilience,
+optimization, collaboration, platform, agentops, fleet, assurance) are no longer auto-started.
+Their useful capabilities are folded into the cockpit product API and the proxy path:
+
+- **Exact-response cache** — identical requests answered from SQLite cache (`X-Gateway-Cache: 1`
+  header or `metadata.cache: true`); successful responses are stored with a 5-minute TTL.
+- **PII redaction** — emails, cards and phones in user messages are masked locally before the
+  request reaches the provider (`X-Gateway-Redact-Pii: 1` header or `metadata.redact_pii: true`).
+- **Cost-aware routing** — eligible route targets reordered by lowest cost among healthy models
+  (`metadata.cost_aware: true`); falls back to fixed priority on any error.
+- **Prompt registry** — `GET/POST /v1/product/prompts`, `POST /v1/product/prompts/assign`.
+- **Quality** — `POST /v1/product/quality/evaluate`, `/release-gate`, `/batch`, `/audit`,
+  `GET /v1/product/quality/runs`.
+- **SLO monitor** — `GET /v1/product/slo` over the last 24h of cost records.
+
+Only the proxy (8000) and cockpit (8013) run by default. Set `GATEWAY_ENABLE_SATELLITES=1` to
+restore the legacy standalone services.
 
 ## Key documentation
 

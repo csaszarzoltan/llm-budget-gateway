@@ -129,6 +129,24 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         except Exception:
             logger.exception("failed to attach product route store")
 
+    # Attach the integrated intelligence helpers (formerly the separate
+    # Intelligence satellite service): exact-response cache, PII redaction
+    # and cost-aware routing. All are wired into the proxy request path and
+    # opt-in per request (X-Gateway-Cache: 1, X-Gateway-Redact-Pii: 1,
+    # metadata.cost_aware: true).
+    try:
+        from .market_features import ExactResponseCache, PIIRedactor, UsageAnomalyDetector
+        from .market_features import CostAwareRouter as MarketCostAwareRouter
+
+        proxy.attach_intelligence(
+            cache=ExactResponseCache(str(data_dir / "intelligence.db")),
+            redactor=PIIRedactor(),
+            cost_router=MarketCostAwareRouter(),
+        )
+        logger.info("attached integrated intelligence helpers")
+    except Exception:
+        logger.exception("failed to attach intelligence helpers")
+
     # Attach the direct provider transport built from the persisted provider
     # connections (providers.db + vault key). This replaces litellm for all
     # gateway-configured providers (flat model names litellm cannot resolve).

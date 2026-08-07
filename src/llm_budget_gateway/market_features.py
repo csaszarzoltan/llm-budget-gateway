@@ -10,6 +10,7 @@ import sqlite3
 import time
 from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass
+from pathlib import Path
 from statistics import fmean, pstdev
 
 
@@ -51,6 +52,9 @@ class ExactResponseCache:
 
     def __init__(self, path: str, clock: Callable[[], int] | None = None) -> None:
         self.clock = clock or (lambda: int(time.time()))
+        parent = Path(path).parent
+        if str(parent) and not parent.exists():
+            parent.mkdir(parents=True, exist_ok=True)
         self.db = sqlite3.connect(path, check_same_thread=False)
         self.db.execute(
             "CREATE TABLE IF NOT EXISTS response_cache("

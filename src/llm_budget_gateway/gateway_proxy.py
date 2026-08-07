@@ -167,6 +167,19 @@ class GatewayProxy:
         # session_id -> (serving model, monotonic ts) for sticky sessions:
         # an agentic conversation keeps its model while it stays healthy.
         self._sticky_sessions: dict[str, tuple[str, float]] = {}
+        # Integrated intelligence (formerly the separate satellite service):
+        # exact-response cache, PII redaction and cost-aware routing are now
+        # wired straight into the proxy path. Attached lazily by main.py so
+        # tests can run without the SQLite files.
+        self._intel_cache = None
+        self._intel_redactor = None
+        self._intel_cost_router = None
+
+    def attach_intelligence(self, cache=None, redactor=None, cost_router=None) -> None:
+        """Attach the integrated intelligence helpers (cache, PII, cost)."""
+        self._intel_cache = cache
+        self._intel_redactor = redactor
+        self._intel_cost_router = cost_router
 
     def attach_product_console(self, store: object) -> None:
         """Attach the UI-managed route store (pc_routes/targets model).
@@ -418,6 +431,79 @@ class GatewayProxy:
         response = None
         served: str | None = None
         outbound = {k: v for k, v in body.items() if k != "metadata"}
+        # Integrated intelligence — exact-response cache: an identical
+        # request (same route + payload) served recently is answered from
+        # the cache instead of burning tokens. Opt-in per request via
+        # X-Gateway-Cache: 1 header, or per route via metadata.
+        want_cache = (
+            str(headers.get("x-gateway-cache", "")).lower() == "1"
+            or str(metadata.get("cache", "")).lower() == "1"
+        )
+        if want_cache and self._intel_cache is not None:
+            try:
+                cached = self._intel_cache.get("default", outbound)
+                if cached is not None:
+                    resp = ProviderResponse(
+                        status_code=200,
+                        body=cached,
+                        headers={"X-Gateway-Cache-Hit": "1", "X-Gateway-Route": route_name},
+                        latency_ms=0,
+                        model=str(served or cached.get("model", "")),
+                        usage=None,
+                    )
+                    logger.info(
+                        "request=%s route=%s cache-hit", request_id, route_name
+                    )
+                    return resp
+            except Exception:
+                logger.exception("cache lookup failed request=%s", request_id)
+        # Integrated intelligence — PII redaction: when the client asks
+        # (X-Gateway-Redact-Pii: 1), user messages are redacted before the
+        # request reaches the provider, so emails/cards/phones never leave
+        # the gateway in plaintext.
+        want_redact = (
+            str(headers.get("x-gateway-redact-pii", "")).lower() == "1"
+            or str(metadata.get("redact_pii", "")).lower() == "1"
+        )
+        if want_redact and self._intel_redactor is not None and isinstance(outbound.get("messages"), list):
+            try:
+                for msg in outbound["messages"]:
+                    if isinstance(msg, dict) and isinstance(msg.get("content"), str):
+                        result = self._intel_redactor.redact(msg["content"])
+                        if result.count:
+                            msg["content"] = result.text
+            except Exception:
+                logger.exception("pii redaction failed request=%s", request_id)
+        # Integrated intelligence — cost-aware routing: when the request
+        # asks for it (metadata cost_aware: true), reorder the eligible
+        # candidates by lowest cost among healthy models instead of fixed
+        # priority. Falls back to the original order on any error.
+        if (
+            str(metadata.get("cost_aware", "")).lower() in ("1", "true")
+            and self._intel_cost_router is not None
+            and len(candidates) > 1
+        ):
+            try:
+                priced: list[dict] = []
+                for cand in candidates:
+                    _, _, total_per_m = self._cost_tracker.estimate_cost(cand, 1000, 1000)
+                    priced.append({
+                        "model": cand,
+                        "cost": float(total_per_m),
+                        "quality": 1.0,
+                        "latency_ms": 0,
+                        "healthy": True,
+                    })
+                chosen = self._intel_cost_router.choose(
+                    priced, min_quality=0.0, max_latency_ms=None
+                )
+                best = str(chosen["model"])
+                if best in candidates:
+                    rest = [c for c in candidates if c != best]
+                    candidates = [best] + rest
+                    fallback = "cost_aware"
+            except Exception:
+                logger.exception("cost-aware routing failed request=%s", request_id)
         # Sticky session: while a conversation's model stays healthy (not in
         # cooldown), keep serving it instead of re-walking the whole chain.
         session_id = self._extract_session_id(body)
@@ -694,6 +780,20 @@ class GatewayProxy:
                 )
             except Exception:
                 logger.exception("logical route spend record failed request=%s", request_id)
+        # Cache the successful response when the client asked for caching,
+        # so an identical later request is answered without a provider call.
+        if (
+            want_cache
+            and self._intel_cache is not None
+            and response.status_code < 400
+            and isinstance(response.body, dict)
+        ):
+            try:
+                self._intel_cache.put(
+                    "default", outbound, response.body, ttl=300
+                )
+            except Exception:
+                logger.exception("cache put failed request=%s", request_id)
         return response
 
     def _resolve_targets(
