@@ -66,6 +66,7 @@ def test_signature_stored_under_rewritten_name_and_lookup_tries_colon_form(tmp_p
     # And the id-based lookup still works.
     sig3 = client._lookup_signature("tc1", "", "")
     assert sig3 == "SIG123"
+    assert sig3 == "SIG123"
 
     # Persisted store carries the rewritten form (what the provider echoed).
     db = sqlite3.connect(tmp_path / "sig.db")
@@ -177,4 +178,62 @@ def test_streaming_delta_reassembly_keys_signature_under_full_arguments(tmp_path
         "SELECT fn_name, arguments FROM thought_signatures WHERE id='tc9'"
     ).fetchall()
     assert rows and rows[0][1] == '{"action":"list"}'
-    db.close()
+
+
+def test_lookup_json_normalized_arguments(tmp_path):
+    """Replay arguments may be reserialized with different spacing/key order
+    ({"board": "default"} vs {"board":"default"}) — the lookup must match on
+    parsed JSON, not raw string, or the Gemini replay 400 comes back."""
+    client = _make_client(tmp_path)
+    data = {
+        "choices": [
+            {
+                "message": {
+                    "tool_calls": [
+                        {
+                            "id": "tcA",
+                            "type": "function",
+                            "function": {
+                                "name": "default_api_kanban_show",
+                                "arguments": '{"board":"default"}',
+                            },
+                            "extra_content": {
+                                "google": {"thought_signature": "SIGJSON"}
+                            },
+                        }
+                    ]
+                }
+            }
+        ]
+    }
+    client._capture_thought_signatures(data)
+
+    # Exact string match still works.
+    assert client._lookup_signature("", "default_api:kanban_show", '{"board":"default"}') == "SIGJSON"
+    # Space-padded reserialization must match via JSON normalization.
+    assert client._lookup_signature("", "default_api:kanban_show", '{"board": "default"}') == "SIGJSON"
+    # Reordered keys must match too.
+    assert client._lookup_signature("", "default_api:kanban_show", '{"board":"default","extra":"x"}') is None  # different payload
+    data2 = {
+        "choices": [
+            {
+                "message": {
+                    "tool_calls": [
+                        {
+                            "id": "tcB",
+                            "type": "function",
+                            "function": {
+                                "name": "default_api_kanban_show",
+                                "arguments": '{"a":1,"b":2}',
+                            },
+                            "extra_content": {
+                                "google": {"thought_signature": "SIGREORDER"}
+                            },
+                        }
+                    ]
+                }
+            }
+        ]
+    }
+    client._capture_thought_signatures(data2)
+    assert client._lookup_signature("", "default_api_kanban_show", '{"b":2,"a":1}') == "SIGREORDER"

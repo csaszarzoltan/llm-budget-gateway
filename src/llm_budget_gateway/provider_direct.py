@@ -591,6 +591,38 @@ class DirectProviderClient:
                         self._thought_signatures_by_fn[(fn_name, arguments)] = sig
             except sqlite3.Error:
                 logger.exception("failed to read thought_signature")
+        # JSON-normalized fallback: the arguments string is a JSON object,
+        # and clients (Hermes) may reserialize it with different spacing or
+        # key order than the provider echoed ({"board": "default"} vs
+        # {"board":"default"}). A raw string match then misses even though
+        # the semantic payload is identical. Compare parsed JSON instead.
+        if sig is None and fn_name and arguments and self._sig_db is not None:
+            try:
+                parsed = json.loads(arguments)
+            except (TypeError, ValueError):
+                parsed = None
+            if isinstance(parsed, (dict, list)):
+                try:
+                    with self._sig_lock:
+                        rows = self._sig_db.execute(
+                            "SELECT fn_name, arguments, signature FROM thought_signatures"
+                            " WHERE fn_name IN (?, ?)"
+                            " ORDER BY created_at DESC LIMIT 50",
+                            (fn_name, fn_name.replace(":", "_") if ":" in fn_name else fn_name),
+                        ).fetchall()
+                    for db_fn, db_args, db_sig in rows:
+                        try:
+                            if json.loads(db_args) == parsed:
+                                sig = str(db_sig)
+                                if tc_id:
+                                    self._thought_signatures[tc_id] = sig
+                                if fn_name and arguments:
+                                    self._thought_signatures_by_fn[(fn_name, arguments)] = sig
+                                break
+                        except (TypeError, ValueError):
+                            continue
+                except sqlite3.Error:
+                    logger.exception("failed to read thought_signature (json fallback)")
         return sig
 
     def _restore_thought_signatures(self, messages: Any) -> None:
