@@ -134,6 +134,30 @@ def _is_context_error(body: dict | str | list) -> bool:
     )
 
 
+def _body_has_images(body: dict | None) -> bool:
+    """True when a chat request carries image parts (image_url content).
+
+    Vision-only models can handle these; text-only providers reject them
+    with a 400 (e.g. Console Go: ``unknown variant image_url``), so the
+    route resolver excludes non-vision targets before the chain runs.
+    """
+    if not body or not isinstance(body, dict):
+        return False
+    for msg in body.get("messages", []) or []:
+        if not isinstance(msg, dict):
+            continue
+        content = msg.get("content")
+        if isinstance(content, str):
+            continue
+        if isinstance(content, list):
+            for part in content:
+                if isinstance(part, dict) and part.get("type") == "image_url":
+                    return True
+        if isinstance(content, dict) and content.get("type") == "image_url":
+            return True
+    return False
+
+
 @dataclass
 class ProviderResponse:
     status_code: int
@@ -1079,10 +1103,25 @@ class GatewayProxy:
                 start <= clock < end if start < end else clock >= start or clock < end
             )
             reason = None if inside else "outside_schedule"
+            # required_capabilities = capabilities the CLIENT must declare
+            # (e.g. "tools", "structured_output") — the request is ineligible
+            # when it does not declare one the target demands.
             if reason is None and not set(
                 target.get("required_capabilities", [])
             ).issubset(capabilities):
                 reason = "missing_capabilities"
+            # Vision gate: image-bearing requests (image_url content parts)
+            # can only be served by vision-capable models. The target's
+            # ``capabilities`` field declares MODEL abilities (independent of
+            # the request-declared capabilities above) — non-vision targets
+            # are excluded so a 400 (unknown variant image_url) does not
+            # burn the chain on text-only providers.
+            if (
+                reason is None
+                and _body_has_images(body)
+                and "vision" not in (target.get("capabilities") or [])
+            ):
+                reason = "no_vision"
             if reason is None:
                 reason = self._condition_reason(target, body)
             if reason is None:
