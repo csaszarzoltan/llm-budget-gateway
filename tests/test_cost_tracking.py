@@ -670,6 +670,75 @@ def test_usage_by_period_buckets(store: CostStore) -> None:
     assert filtered["calls"] == []
 
 
+def test_usage_by_period_pagination(store: CostStore) -> None:
+    """calls pagination: page/page_size slice the list and total_calls
+    reports the full window count."""
+    import time as _t
+
+    now = int(_t.time())
+    base = {
+        "request_id": "", "api_key": "k", "user_id": None, "team": None,
+        "model": "nemotron", "provider": "p", "prompt_tokens": 1,
+        "completion_tokens": 1, "total_tokens": 2, "input_cost": 0.0,
+        "output_cost": 0.0, "total_cost": 0.0, "latency_ms": 5,
+        "status": "success", "timestamp": now, "route": "hermes-default",
+    }
+    for i in range(25):
+        store.insert(UsageRecord(**{**base, "request_id": f"r{i:02d}"}))
+    first = store.usage_by_period(period="day", days=1, page=1, page_size=10)
+    assert len(first["calls"]) == 10
+    assert first["total_calls"] == 25
+    second = store.usage_by_period(period="day", days=1, page=2, page_size=10)
+    assert len(second["calls"]) == 10
+    third = store.usage_by_period(period="day", days=1, page=3, page_size=10)
+    assert len(third["calls"]) == 5
+    # distinct request ids across pages, newest first
+    ids = [c["request_id"] for c in first["calls"]] + [
+        c["request_id"] for c in second["calls"]
+    ] + [c["request_id"] for c in third["calls"]]
+    assert len(set(ids)) == 25
+
+
+def test_usage_missing_flag(store: CostStore) -> None:
+    """success + 0 total tokens must be flagged usage_missing so the UI can
+    warn instead of showing a misleading zero."""
+    import time as _t
+
+    now = int(_t.time())
+    store.insert(
+        UsageRecord(
+            request_id="ok", api_key="k", user_id=None, team=None,
+            model="nemotron", provider="p", prompt_tokens=10,
+            completion_tokens=5, total_tokens=15, input_cost=0.0,
+            output_cost=0.0, total_cost=0.0, latency_ms=5,
+            status="success", timestamp=now, route="hermes-default",
+        )
+    )
+    store.insert(
+        UsageRecord(
+            request_id="missing", api_key="k", user_id=None, team=None,
+            model="nemotron", provider="p", prompt_tokens=0,
+            completion_tokens=0, total_tokens=0, input_cost=0.0,
+            output_cost=0.0, total_cost=0.0, latency_ms=500,
+            status="success", timestamp=now, route="hermes-default",
+        )
+    )
+    store.insert(
+        UsageRecord(
+            request_id="error", api_key="k", user_id=None, team=None,
+            model="nemotron", provider="p", prompt_tokens=0,
+            completion_tokens=0, total_tokens=0, input_cost=0.0,
+            output_cost=0.0, total_cost=0.0, latency_ms=500,
+            status="error", timestamp=now, route="hermes-default",
+        )
+    )
+    result = store.usage_by_period(period="day", days=1)
+    flags = {c["request_id"]: c["usage_missing"] for c in result["calls"]}
+    assert flags["ok"] is False
+    assert flags["missing"] is True
+    assert flags["error"] is False
+
+
 def test_route_status_and_cooldown_reset(store: CostStore) -> None:
     """route_status reports last call + cooldown; clear_cooldown resets."""
     import time as _t

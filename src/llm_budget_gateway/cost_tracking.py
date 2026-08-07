@@ -329,9 +329,14 @@ class CostStore:
         self,
         days: int = 14,
         route: str | None = None,
+        page: int = 1,
+        page_size: int = 200,
     ) -> dict[str, object]:
         """Aggregate token usage per day per serving model, plus the raw
         request list for the same window (OpenRouter-style usage page).
+
+        ``page``/``page_size`` paginate the ``calls`` list so the UI can
+        page through more than the most recent 200 requests.
 
         Returns:
             {
@@ -342,9 +347,13 @@ class CostStore:
               "calls": [{"request_id", "model", "route", "prompt_tokens",
                          "completion_tokens", "total_tokens", "total_cost",
                          "status", "timestamp", "latency_ms"}],
+              "total_calls": int,
             }
         """
         since = int(time.time()) - days * 86400
+        page = max(1, int(page))
+        page_size = max(1, min(int(page_size), 1000))
+        offset = (page - 1) * page_size
         with self._lock:
             day_rows = self._conn.execute(
                 """
@@ -358,6 +367,10 @@ class CostStore:
                 """,
                 (since,),
             ).fetchall()
+            total_calls = self._conn.execute(
+                "SELECT COUNT(*) FROM cost_records WHERE timestamp >= ?",
+                (since,),
+            ).fetchone()[0]
             call_rows = self._conn.execute(
                 """
                 SELECT request_id, model, route, prompt_tokens, completion_tokens,
@@ -366,9 +379,9 @@ class CostStore:
                 FROM cost_records
                 WHERE timestamp >= ?
                 ORDER BY timestamp DESC
-                LIMIT 200
+                LIMIT ? OFFSET ?
                 """,
-                (since,),
+                (since, page_size, offset),
             ).fetchall()
         by_day: dict[str, list[dict[str, object]]] = {}
         for day, model, pt, ct, tt, reqs, cost in day_rows:
@@ -408,9 +421,16 @@ class CostStore:
                     "client_id": r[12],
                     "client_profile": r[13],
                     "cache_hit": bool(r[14]),
+                    # success but no usage recorded → the provider streamed
+                    # without a usage chunk (or an old build lost it). Flag
+                    # so the UI can warn instead of showing misleading 0s.
+                    "usage_missing": bool(
+                        r[7] == "success" and int(r[5] or 0) == 0
+                    ),
                 }
                 for r in calls
             ],
+            "total_calls": int(total_calls),
         }
 
     def set_model_cooldown(
@@ -493,6 +513,8 @@ class CostStore:
         period: str = "day",
         days: int = 14,
         route: str | None = None,
+        page: int = 1,
+        page_size: int = 200,
     ) -> dict[str, object]:
         """Aggregate token usage per bucket per serving model.
 
@@ -500,6 +522,8 @@ class CostStore:
         ``days`` hours), ``day`` (last ``days`` days) or ``month`` (last
         ``days`` months of calendar buckets). Mirrors the daily_usage
         output shape so the UI can switch views with one renderer.
+
+        ``page``/``page_size`` paginate the ``calls`` list.
         """
         if period == "hour":
             fmt = "%Y-%m-%d %H:00"
@@ -510,6 +534,9 @@ class CostStore:
         else:
             fmt = "%Y-%m-%d"
             since = int(time.time()) - days * 86400
+        page = max(1, int(page))
+        page_size = max(1, min(int(page_size), 1000))
+        offset = (page - 1) * page_size
         with self._lock:
             bucket_rows = self._conn.execute(
                 f"""
@@ -523,6 +550,10 @@ class CostStore:
                 """,
                 (since,),
             ).fetchall()
+            total_calls = self._conn.execute(
+                "SELECT COUNT(*) FROM cost_records WHERE timestamp >= ?",
+                (since,),
+            ).fetchone()[0]
             call_rows = self._conn.execute(
                 """
                 SELECT request_id, model, route, prompt_tokens, completion_tokens,
@@ -531,9 +562,9 @@ class CostStore:
                 FROM cost_records
                 WHERE timestamp >= ?
                 ORDER BY timestamp DESC
-                LIMIT 200
+                LIMIT ? OFFSET ?
                 """,
-                (since,),
+                (since, page_size, offset),
             ).fetchall()
         by_bucket: dict[str, list[dict[str, object]]] = {}
         by_bucket_route: dict[str, list[dict[str, object]]] = {}
@@ -587,9 +618,13 @@ class CostStore:
                     "client_id": r[12],
                     "client_profile": r[13],
                     "cache_hit": bool(r[14]),
+                    "usage_missing": bool(
+                        r[7] == "success" and int(r[5] or 0) == 0
+                    ),
                 }
                 for r in calls
             ],
+            "total_calls": int(total_calls),
         }
 
     def route_status(

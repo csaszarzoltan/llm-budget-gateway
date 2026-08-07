@@ -920,7 +920,11 @@ def create_console_app(
 
     @app.get("/v1/product/usage")
     async def product_usage(
-        days: int = 14, route: str = "", period: str = "day"
+        days: int = 14,
+        route: str = "",
+        period: str = "day",
+        page: int = 1,
+        page_size: int = 200,
     ) -> dict[str, object]:
         base = product.usage()
         bucket_key = {"hour": "hourly", "day": "daily", "month": "monthly"}.get(
@@ -930,6 +934,8 @@ def create_console_app(
             period=period,
             days=max(1, min(days, 90)),
             route=route or None,
+            page=page,
+            page_size=page_size,
         )
         return base
 
