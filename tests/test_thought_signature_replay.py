@@ -109,3 +109,72 @@ def test_restore_attaches_signature_to_colon_named_tool_call(tmp_path):
     client._restore_thought_signatures(messages)
     tc = messages[1]["tool_calls"][0]
     assert tc["extra_content"]["google"]["thought_signature"] == "SIG456"
+
+
+def test_streaming_delta_reassembly_keys_signature_under_full_arguments(tmp_path):
+    """Gemini streams a tool_call as several deltas (first carries id +
+    signature with empty arguments, later chunks append the arguments in
+    fragments). Per-chunk capture would key the signature under a partial
+    arguments string; _reassemble_and_capture must concatenate the fragments
+    so the (fn, arguments) lookup succeeds on replay."""
+    client = _make_client(tmp_path)
+
+    chunks = [
+        {
+            "choices": [
+                {
+                    "delta": {
+                        "role": "assistant",
+                        "tool_calls": [
+                            {
+                                "index": 0,
+                                "id": "tc9",
+                                "type": "function",
+                                "function": {"name": "kanban_show", "arguments": ""},
+                                "extra_content": {
+                                    "google": {"thought_signature": "SIG789"}
+                                },
+                            }
+                        ],
+                    }
+                }
+            ]
+        },
+        {
+            "choices": [
+                {
+                    "delta": {
+                        "tool_calls": [
+                            {"index": 0, "function": {"arguments": '{"action":'}}
+                        ]
+                    }
+                }
+            ]
+        },
+        {
+            "choices": [
+                {
+                    "delta": {
+                        "tool_calls": [
+                            {"index": 0, "function": {"arguments": '"list"}'}}
+                        ]
+                    }
+                }
+            ]
+        },
+    ]
+    client._reassemble_and_capture(chunks)
+
+    sig = client._lookup_signature("", "kanban_show", '{"action":"list"}')
+    assert sig == "SIG789"
+
+    # The id-based lookup also works.
+    assert client._lookup_signature("tc9", "", "") == "SIG789"
+
+    # Persisted with the FULL arguments.
+    db = sqlite3.connect(tmp_path / "sig.db")
+    rows = db.execute(
+        "SELECT fn_name, arguments FROM thought_signatures WHERE id='tc9'"
+    ).fetchall()
+    assert rows and rows[0][1] == '{"action":"list"}'
+    db.close()

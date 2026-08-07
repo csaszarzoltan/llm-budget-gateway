@@ -416,6 +416,77 @@ class DirectProviderClient:
             raise UnknownModelError(f"unknown model: {model}")
         return endpoint
 
+    def _reassemble_and_capture(self, chunks: list[dict[str, Any]]) -> None:
+        """Merge streaming tool_call deltas per index, then capture signatures.
+
+        Gemini's OpenAI-compatible streaming endpoint emits each tool_call as
+        several chunks: the first carries ``id`` + ``extra_content.google.
+        thought_signature`` (with empty/partial ``arguments``), and later
+        chunks append ``arguments`` fragments. Per-chunk capture keys the
+        signature under a partial arguments string, so a replay carrying the
+        full arguments misses the (fn, arguments) index and Gemini rejects
+        it with HTTP 400 "missing thought_signature". This reassembles the
+        fragments (indexed by ``delta.tool_calls[].index``) and captures the
+        completed tool_calls so the persisted index is replay-complete.
+        """
+        merged: dict[int, dict[str, Any]] = {}
+        order: list[int] = []
+        for chunk in chunks:
+            if not isinstance(chunk, dict):
+                continue
+            for choice in chunk.get("choices", []):
+                if not isinstance(choice, dict):
+                    continue
+                delta = choice.get("delta")
+                if not isinstance(delta, dict):
+                    continue
+                for tc in delta.get("tool_calls") or []:
+                    if not isinstance(tc, dict):
+                        continue
+                    idx = tc.get("index")
+                    try:
+                        idx = int(idx) if idx is not None else None
+                    except (TypeError, ValueError):
+                        idx = None
+                    if idx is None:
+                        continue
+                    bucket = merged.setdefault(idx, {})
+                    if idx not in order:
+                        order.append(idx)
+                    # id / type / extra_content appear only on the first delta
+                    # of a tool_call — later deltas carry only index + args.
+                    for key in ("id", "type", "extra_content"):
+                        if tc.get(key) is not None and bucket.get(key) is None:
+                            bucket[key] = tc[key]
+                    fn = tc.get("function")
+                    if isinstance(fn, dict):
+                        existing_fn = bucket.setdefault("function", {})
+                        if isinstance(existing_fn, dict):
+                            if fn.get("name") is not None:
+                                existing_fn["name"] = fn["name"]
+                            # arguments arrive in fragments — concatenate.
+                            if isinstance(fn.get("arguments"), str):
+                                existing_fn["arguments"] = (
+                                    str(existing_fn.get("arguments", ""))
+                                    + fn["arguments"]
+                                )
+        if not merged:
+            return
+        synthetic = {
+            "choices": [
+                {
+                    "message": {
+                        "tool_calls": [
+                            merged[idx]
+                            for idx in order
+                            if merged[idx].get("function", {}).get("arguments")
+                        ]
+                    }
+                }
+            ]
+        }
+        self._capture_thought_signatures(synthetic)
+
     def _capture_thought_signatures(self, data: Any) -> None:
         """Persist Gemini tool-call thought_signatures by tool_call id.
 
@@ -724,6 +795,14 @@ class DirectProviderClient:
                         self._capture_thought_signatures(chunk)
                         # Restore original (colon-qualified) tool names.
                         _restore_tool_names(chunk, tool_name_map)
+                # Gemini streams tool_calls as deltas: the FIRST chunk carries
+                # id + signature (with empty/partial arguments), later chunks
+                # append the arguments in fragments. Capturing per-chunk keys
+                # the signature under a partial arguments string, so a replay
+                # with the FULL arguments misses the lookup → Gemini 400.
+                # Reassemble the deltas per index and capture the completed
+                # tool_calls so the (fn, arguments) index is complete.
+                self._reassemble_and_capture(chunks)
         except httpx.TimeoutException as exc:
             raise UpstreamProviderError(502, f"upstream provider timed out: {endpoint.name}") from exc
         except httpx.HTTPError as exc:
