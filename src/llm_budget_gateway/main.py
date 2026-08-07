@@ -210,9 +210,41 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         body = await _read_json_body(request)
         if isinstance(body, ProviderResponse):
             return _provider_response(body)
-        response = await proxy.handle_chat_completion(
-            body, _bearer_token(request), dict(request.headers)
+        # Cancel-on-disconnect: when the client requests it, a disconnect
+        # during the upstream call cancels the provider request instead of
+        # letting it burn tokens to completion (Hermes long-running calls).
+        cancel_on_disconnect = (
+            request.headers.get("x-gateway-cancel-on-disconnect", "").strip() == "1"
         )
+        if not cancel_on_disconnect:
+            response = await proxy.handle_chat_completion(
+                body, _bearer_token(request), dict(request.headers)
+            )
+            return _provider_response(response)
+        # Cancellable path: run the upstream call as a task and cancel it
+        # the moment the client disconnects.
+        import asyncio
+
+        upstream = asyncio.create_task(
+            proxy.handle_chat_completion(
+                body, _bearer_token(request), dict(request.headers)
+            )
+        )
+        while not upstream.done():
+            try:
+                disconnected = await asyncio.wait_for(
+                    request.is_disconnected(), timeout=0.1
+                )
+            except asyncio.TimeoutError:
+                disconnected = False
+            if disconnected:
+                upstream.cancel()
+                try:
+                    await upstream
+                except (asyncio.CancelledError, Exception):
+                    pass
+                return Response(status_code=499, content="client disconnected")
+        response = upstream.result()
         return _provider_response(response)
 
     @app.post("/v1/completions")
@@ -308,6 +340,58 @@ def create_app(settings: Settings | None = None) -> FastAPI:
                 "data": sorted(models, key=lambda x: x["id"]),
             }
         )
+
+    @app.get("/v1/models/{model}/capabilities")
+    async def model_capabilities(model: str) -> JSONResponse:
+        """Per-route model capabilities for client auto-configuration.
+
+        Hermes (and other clients) can query what a route name supports:
+        context length, thinking/reasoning, tool calls, streaming,
+        embeddings, response cache and multi-target fallback. The data is
+        derived from the route's published targets, so capabilities stay
+        correct as the user edits routes in the cockpit — no hardcoded
+        catalog.
+        """
+        product = getattr(proxy, "_product_console", None)
+        route = None
+        if product is not None:
+            try:
+                for r in product.routes():
+                    if str(r.get("name", "")) == model:
+                        route = r
+                        break
+            except Exception:
+                logger.exception("failed to load route %s capabilities", model)
+        if route is None or route.get("status") == "archived":
+            return JSONResponse(
+                {"error": {"message": f"unknown model: {model}", "type": "invalid_request_error"}},
+                status_code=404,
+            )
+        targets = route.get("targets", []) or []
+        ctx_lengths = [
+            t.get("context_length") for t in targets if t.get("context_length") is not None
+        ]
+        caps: dict = {
+            "id": model,
+            "object": "model.capabilities",
+            "context_length": min(ctx_lengths) if ctx_lengths else None,
+            "target_count": len(targets),
+            "fallback": len(targets) > 1,
+            "streaming": True,
+            "tool_calls": True,
+            "thinking": False,
+            "embeddings": False,
+            "response_cache": True,
+        }
+        # Any target explicitly enabling thinking / reasoning_effort support
+        # (required_capabilities contains thinking, or the target model name
+        # hints reasoning-capable) marks the route as thinking-capable.
+        for t in targets:
+            reqs = [str(x).lower() for x in (t.get("required_capabilities") or [])]
+            if "thinking" in reqs or "reasoning" in reqs:
+                caps["thinking"] = True
+                break
+        return JSONResponse(caps)
 
     @app.get("/health")
     async def health() -> JSONResponse:

@@ -361,6 +361,25 @@ class GatewayProxy:
             latency_ms=response.latency_ms,
             status="success",
         )
+        # Rate-limit visibility: attach standard X-RateLimit-* headers from
+        # the last check_sync so clients (Hermes) can show remaining quota.
+        try:
+            rl = getattr(self._budget_enforcer, "_last_rate_limit_state", {})
+            if rl:
+                first = next(iter(rl.values()))
+                response.headers = dict(response.headers or {})
+                if "tpm_remaining" in first:
+                    response.headers["X-RateLimit-Remaining"] = str(
+                        first["tpm_remaining"]
+                    )
+                if "rpm_remaining" in first:
+                    response.headers["X-RateLimit-RPM-Remaining"] = str(
+                        first["rpm_remaining"]
+                    )
+                if "reset_at" in first:
+                    response.headers["X-RateLimit-Reset"] = str(first["reset_at"])
+        except Exception:
+            logger.exception("rate limit header attach failed request=%s", request_id)
         return response
 
     async def _handle_logical_route(
@@ -377,7 +396,47 @@ class GatewayProxy:
         if not alias:
             return self._error_response(404, f"unknown route: {alias}", alias)
         metadata = body.get("metadata", {})
+        # Profile-aware routing: a client (Hermes) can request a specific
+        # route per profile via X-Hermes-Profile or X-Gateway-Route header
+        # (or metadata.profile). The header wins over the body model name,
+        # so one client key can drive multiple routes without editing
+        # configs — e.g. hermes-coding → coding route, hermes-research →
+        # research route.
+        profile_route = ""
+        for hdr in ("x-hermes-profile", "x-gateway-route"):
+            val = headers.get(hdr) if isinstance(headers, dict) else None
+            if val:
+                profile_route = str(val).strip()
+                break
+        if not profile_route:
+            profile_route = str(metadata.get("profile", "") or "").strip()
+        if profile_route and profile_route != alias:
+            # Only override when the named route actually exists — otherwise
+            # fall through to the body model (which may be a valid alias).
+            store = self._product_console
+            exists = False
+            if store is not None:
+                try:
+                    exists = store.published_route_by_name(profile_route) is not None
+                except Exception:
+                    exists = False
+            if exists:
+                alias = profile_route
+        # Conversation tracking: an optional X-Gateway-Conversation header
+        # (or metadata.conversation_id) tags every request of one client
+        # conversation so usage can be aggregated per conversation.
         metadata = metadata if isinstance(metadata, dict) else {}
+        conversation_id = ""
+        for hdr in ("x-gateway-conversation", "x-conversation-id"):
+            val = headers.get(hdr) if isinstance(headers, dict) else None
+            if val:
+                conversation_id = str(val).strip()
+                break
+        if not conversation_id:
+            conversation_id = str(
+                metadata.get("conversation_id", "") or ""
+            ).strip()
+        conversation_id = conversation_id or None
         # Client identity: any client may send these to tag who originated
         # the request (e.g. hermes profile names, custom app names).
         client_id = str(metadata.get("client_id", "")) or None
@@ -837,6 +896,7 @@ class GatewayProxy:
                 status="success" if response.status_code < 400 else "error",
                 route=route_name,
                 status_code=response.status_code,
+                conversation_id=conversation_id,
             )
             # Tag the record with client identity and cache status.
             record.client_id = client_id
@@ -1084,6 +1144,21 @@ class GatewayProxy:
                     total_tokens=int(last.get("total_tokens", 0) or 0),
                 )
             body_out: dict | str | list = self._sse_lines(chunks)
+            # Partial tool call visibility: mark the response when the
+            # stream contained any tool_calls delta, so the client (Hermes)
+            # can show the tool activity immediately instead of waiting for
+            # the full response.
+            headers_out: dict = {}
+            if any(
+                isinstance(c, dict)
+                and c.get("choices")
+                and any(
+                    (ch.get("delta") or {}).get("tool_calls")
+                    for ch in c.get("choices", [])
+                )
+                for c in chunks
+            ):
+                headers_out["X-Gateway-Partial-Tool-Call"] = "1"
         else:
             resp_usage = data.get("usage")
             if isinstance(resp_usage, dict):
@@ -1098,10 +1173,11 @@ class GatewayProxy:
                     ),
                 )
             body_out = data
+            headers_out = {}
         return ProviderResponse(
             status_code=status,
             body=body_out,
-            headers={},
+            headers=headers_out,
             model=served or model,
             usage=usage,
             latency_ms=int((time.perf_counter() - start) * 1000),

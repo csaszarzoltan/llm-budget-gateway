@@ -168,6 +168,7 @@ class BudgetEnforcer:
         self.cost_tracker = cost_tracker
         self.counter_store = counter_store
         self._now_fn = now_fn if now_fn is not None else (lambda: int(time.time()))
+        self._last_rate_limit_state: dict[str, dict[str, object]] = {}
 
     def config_for(self, scope: BudgetScope) -> BudgetConfig | None:
         """Return the config whose scope matches ``scope`` (by scope_key)."""
@@ -188,6 +189,7 @@ class BudgetEnforcer:
         if self.counter_store is None:
             return
         now = int(self._now_fn())
+        state: dict[str, dict[str, object]] = {}
         for scope in scopes:
             cfg = self.config_for(scope)
             if cfg is None:
@@ -195,14 +197,23 @@ class BudgetEnforcer:
             window_sec = self.window_seconds(cfg.window)
             bucket = (now // window_sec) * window_sec
             base = f"{scope.scope_key()}:{cfg.window}:{bucket}"
+            remaining: dict[str, object] = {}
             if cfg.tpm_limit is not None:
                 tpm = self.counter_store.increment(f"{base}:tpm", est_input_tokens)
                 if tpm > cfg.tpm_limit:
                     raise RateLimitExceededError(scope, "tpm", cfg.tpm_limit)
+                remaining["tpm_remaining"] = max(0, cfg.tpm_limit - tpm)
             if cfg.rpm_limit is not None:
                 rpm = self.counter_store.increment(f"{base}:rpm", 1)
                 if rpm > cfg.rpm_limit:
                     raise RateLimitExceededError(scope, "rpm", cfg.rpm_limit)
+                remaining["rpm_remaining"] = max(0, cfg.rpm_limit - rpm)
+            if remaining:
+                remaining["reset_at"] = bucket + window_sec
+                state[scope.scope_key()] = remaining
+        # Expose the latest limits so the request path can attach standard
+        # X-RateLimit-* headers (client-visible quota).
+        self._last_rate_limit_state = state
 
     async def check_hard(self, scopes: list[BudgetScope]) -> None:
         """Raise BudgetExceededError for any scope over its hard limit."""

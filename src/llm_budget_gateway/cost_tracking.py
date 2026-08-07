@@ -40,7 +40,8 @@ CREATE TABLE IF NOT EXISTS cost_records (
     route TEXT,
     client_id TEXT,
     client_profile TEXT,
-    cache_hit INTEGER NOT NULL DEFAULT 0
+    cache_hit INTEGER NOT NULL DEFAULT 0,
+    conversation_id TEXT
 )
 """
 
@@ -97,6 +98,7 @@ class UsageRecord:
     client_id: str | None = None
     client_profile: str | None = None
     cache_hit: bool = False
+    conversation_id: str | None = None
 
 
 def accumulate_usage(chunks: list[dict]) -> TokenUsage:
@@ -249,8 +251,8 @@ class CostStore:
                     input_cost, output_cost, reasoning_cost, total_cost,
                     latency_ms, status, status_code, timestamp,
                     tool_name, project, route,
-                    client_id, client_profile, cache_hit
-                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    client_id, client_profile, cache_hit, conversation_id
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 """,
                 (
                     record.request_id,
@@ -277,6 +279,7 @@ class CostStore:
                     record.client_id,
                     record.client_profile,
                     1 if record.cache_hit else 0,
+                    record.conversation_id,
                 ),
             )
             self._conn.commit()
@@ -375,7 +378,8 @@ class CostStore:
                 """
                 SELECT request_id, model, route, prompt_tokens, completion_tokens,
                        total_tokens, total_cost, status, timestamp, latency_ms,
-                       status_code, reasoning_tokens, client_id, client_profile, cache_hit
+                       status_code, reasoning_tokens, client_id, client_profile, cache_hit,
+                       conversation_id
                 FROM cost_records
                 WHERE timestamp >= ?
                 ORDER BY timestamp DESC
@@ -427,6 +431,7 @@ class CostStore:
                     "usage_missing": bool(
                         r[7] == "success" and int(r[5] or 0) == 0
                     ),
+                    "conversation_id": r[15],
                 }
                 for r in calls
             ],
@@ -558,7 +563,8 @@ class CostStore:
                 """
                 SELECT request_id, model, route, prompt_tokens, completion_tokens,
                        total_tokens, total_cost, status, timestamp, latency_ms,
-                       status_code, reasoning_tokens, client_id, client_profile, cache_hit
+                       status_code, reasoning_tokens, client_id, client_profile, cache_hit,
+                       conversation_id
                 FROM cost_records
                 WHERE timestamp >= ?
                 ORDER BY timestamp DESC
@@ -621,6 +627,7 @@ class CostStore:
                     "usage_missing": bool(
                         r[7] == "success" and int(r[5] or 0) == 0
                     ),
+                    "conversation_id": r[15],
                 }
                 for r in calls
             ],
@@ -709,6 +716,7 @@ class CostTracker:
         status: str,
         route: str | None = None,
         status_code: int | None = None,
+        conversation_id: str | None = None,
     ) -> UsageRecord:
         """Assemble a UsageRecord, computing costs from usage (zero when None)."""
         if usage is not None:
@@ -743,6 +751,7 @@ class CostTracker:
             timestamp=int(time.time()),
             route=route,
             reasoning_tokens=reasoning_tokens,
+            conversation_id=conversation_id,
         )
 
     def estimate_cost(

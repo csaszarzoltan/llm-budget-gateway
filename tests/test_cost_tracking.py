@@ -139,6 +139,7 @@ class TestUsageRecordInterface:
             "client_id",
             "client_profile",
             "cache_hit",
+            "conversation_id",
         }
 
     def test_constructible(self) -> None:
@@ -263,6 +264,7 @@ class TestCostTrackerInterface:
             "status",
             "route",
             "status_code",
+            "conversation_id",
         ]
         for name in (
             "request_id",
