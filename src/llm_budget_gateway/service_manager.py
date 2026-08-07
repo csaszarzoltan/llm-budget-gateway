@@ -26,6 +26,7 @@ class ServiceDefinition:
     factory: str
     port: int
     home_path: str
+    workers: int | None = None  # None → GATEWAY_WORKERS env or 1 (uvicorn default)
 
 
 SERVICES = (
@@ -244,6 +245,19 @@ class ServiceManager:
                 "--port",
                 str(service.port),
             ]
+            # Worker count: per-service override, else GATEWAY_WORKERS env,
+            # else uvicorn's default (1). Multiple workers give real
+            # CPU-parallelism; the shared SQLite stores are WAL + lock-serialized
+            # and the in-memory caches are per-worker (acceptable trade-off).
+            workers = service.workers
+            if workers is None:
+                raw = os.environ.get("GATEWAY_WORKERS", "")
+                try:
+                    workers = int(raw) if raw.strip() else None
+                except ValueError:
+                    workers = None
+            if workers is not None and workers > 1:
+                command += ["--workers", str(workers)]
             kwargs: dict[str, object] = {
                 "cwd": str(self._workdir),
                 "stdin": subprocess.DEVNULL,
