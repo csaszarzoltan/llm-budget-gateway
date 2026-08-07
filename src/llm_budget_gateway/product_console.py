@@ -611,6 +611,21 @@ def _targets(items: list[dict[str, Any]]) -> list[dict[str, Any]]:
             "required_capabilities": raw.get("required_capabilities", []),
             "context_length": raw.get("context_length"),
         }
+        # Timeout floor: large-context routes (hermes-default serves 130K+
+        # token conversations) must never be shrunk below 90s by client-side
+        # tooling that writes targets with the legacy 60s default. A 60s
+        # per-target timeout produced an 502 "upstream provider timed out"
+        # flood for 131K-token contexts (2026-08-07). Enforce the floor here
+        # so route mutations (UI, scripts, cron) cannot regress it.
+        to = item.get("timeout_seconds")
+        if to is not None:
+            try:
+                to_int = int(to)
+            except (TypeError, ValueError):
+                raise ValueError("timeout_seconds must be a number")
+            if to_int <= 0:
+                raise ValueError("timeout_seconds must be positive")
+            item["timeout_seconds"] = max(to_int, 90)
         ZoneInfo(item["timezone"])
         # validate context_length if provided
         ctx_len = item["context_length"]

@@ -284,3 +284,59 @@ def test_target_context_length_validation_and_persistence(
             raise AssertionError(f"expected ValueError for context_length={bad!r}")
         except ValueError:
             pass
+
+
+def test_timeout_floor_applies_to_route_targets(
+    store: ProductConsoleStore,
+) -> None:
+    """Route mutations can never shrink a target below the 90s floor.
+
+    Regression guard for the 2026-08-07 502 flood: client-side tooling that
+    wrote targets with the legacy 60s default caused "upstream provider timed
+    out" on 131K-token contexts. The floor must hold through the public
+    mutation path (create + update + publish), not just the private helper.
+    """
+    route = store.create_route(
+        "large-context",
+        [
+            {"model": "gemini-flash", "priority": 10, "timeout_seconds": 60},
+            {"model": "nemotron-free", "priority": 20, "timeout_seconds": 45},
+            {"model": "mimo-free", "priority": 30, "timeout_seconds": 300},
+        ],
+    )
+    by_model = {t["model"]: t["timeout_seconds"] for t in route["targets"]}
+    assert by_model["gemini-flash"] == 90
+    assert by_model["nemotron-free"] == 90
+    assert by_model["mimo-free"] == 300
+
+    # Update path: a later mutation passing 60s again is also floored.
+    updated = store.update_route(
+        route["id"],
+        [
+            {"model": "gemini-flash", "priority": 10, "timeout_seconds": 60},
+        ],
+    )
+    assert updated["targets"][0]["timeout_seconds"] == 90
+
+    # Target without timeout_seconds stays unset (inherits global default).
+    bare = store.create_route(
+        "bare-target",
+        [{"model": "gemini-flash", "priority": 10}],
+    )
+    assert bare["targets"][0].get("timeout_seconds") is None
+
+
+def test_timeout_floor_rejects_invalid_values(
+    store: ProductConsoleStore,
+) -> None:
+    """Non-numeric and non-positive timeouts are rejected, not floored."""
+    with pytest.raises(ValueError):
+        store.create_route(
+            "bad-timeout",
+            [{"model": "m", "priority": 10, "timeout_seconds": "abc"}],
+        )
+    with pytest.raises(ValueError):
+        store.create_route(
+            "zero-timeout",
+            [{"model": "m", "priority": 10, "timeout_seconds": 0}],
+        )
