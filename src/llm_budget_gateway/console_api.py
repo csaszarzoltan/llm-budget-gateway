@@ -1076,6 +1076,19 @@ def create_console_app(
     @app.get("/v1/product/customers/{customer_id}/export.csv")
     async def product_customer_export_csv(customer_id: str) -> PlainTextResponse:
         """CSV ledger export: one row per entry, newest first."""
+
+        def _csv_field(value: str) -> str:
+            """Neutralize spreadsheet formula triggers in a CSV cell.
+
+            A leading '=', '+', '-', '@', tab or CR makes Excel/LibreOffice/
+            Sheets interpret the cell as a formula on open (spreadsheet
+            exfiltration class). Prefix a single apostrophe so the value is
+            rendered as literal text; csv.writer quoting applies afterwards.
+            """
+            if value[:1] in ("=", "+", "-", "@", "\t", "\r"):
+                return "'" + value
+            return value
+
         customer = attribution.get_customer(customer_id)
         if customer is None:
             raise HTTPException(404, "unknown customer")
@@ -1085,7 +1098,13 @@ def create_console_app(
         writer.writerow(["customer", "timestamp", "model", "tokens", "cost"])
         for row in rows:
             writer.writerow(
-                [row.customer, row.timestamp, row.model, row.tokens, f"{row.cost:.6f}"]
+                [
+                    _csv_field(row.customer),
+                    row.timestamp,
+                    _csv_field(row.model),
+                    row.tokens,
+                    f"{row.cost:.6f}",
+                ]
             )
         filename = f"{customer['name']}-usage.csv"
         return PlainTextResponse(

