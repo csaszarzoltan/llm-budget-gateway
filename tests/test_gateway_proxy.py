@@ -956,3 +956,128 @@ class TestCreateAppBehavior:
         assert result.status_code == 400
         # the fallback was never attempted for a plain client error
         assert [c.args[0] for c in proxy.forward.call_args_list] == ["@a/small"]
+
+    @pytest.mark.asyncio
+    async def test_product_route_transient_503_retries_once_then_falls_back(
+        self, settings: Settings, mocker
+    ) -> None:
+        """A transient 503 on the primary must be retried once on the SAME
+        model before falling back, so a rare blip does not degrade the
+        response (opencode-go scenario)."""
+        store = Mock()
+        store.published_route_by_name.return_value = {
+            "name": "hermes-default",
+            "targets": [
+                {
+                    "model": "@a/primary",
+                    "priority": 10,
+                    "timeout_seconds": 15,
+                    "on_status_codes": [429, 500, 503],
+                },
+                {
+                    "model": "@b/fallback",
+                    "priority": 20,
+                    "timeout_seconds": 30,
+                    "on_status_codes": [429, 500, 503],
+                },
+            ],
+        }
+        tracker = Mock()
+        tracker.model_in_cooldown.return_value = 0
+        tracker.build_record.return_value = SimpleNamespace(total_cost=0.0)
+        proxy = GatewayProxy(
+            settings=settings,
+            cost_tracker=tracker,
+            budget_enforcer=Mock(),
+            fallback_manager=FallbackManager([]),
+        )
+        proxy.attach_product_console(store)
+
+        calls = []
+
+        async def _forward(
+            model: str,
+            body: dict,
+            stream: bool = False,
+            timeout: float | None = None,
+        ):
+            calls.append(model)
+            if model == "@a/primary" and len(calls) == 1:
+                return ProviderResponse(
+                    503, {"error": {"message": "overloaded"}}, {}, model, None, 5
+                )
+            if model == "@a/primary":
+                return ProviderResponse(200, {}, {}, model, None, 5)
+
+            return ProviderResponse(200, {}, {}, model, None, 5)
+
+        proxy.forward = AsyncMock(side_effect=_forward)  # type: ignore[method-assign]
+        result = await proxy.handle_chat_completion(
+            {
+                "model": "hermes-default",
+                "messages": [{"role": "user", "content": "hi"}],
+            },
+            "sk_test_abc",
+            {},
+        )
+        assert result.status_code == 200
+        # retried the SAME model once, never touched the fallback
+        assert calls == ["@a/primary", "@a/primary"]
+        # a success after retry must NOT set a cooldown
+        assert not tracker.set_model_cooldown.called
+
+    @pytest.mark.asyncio
+    async def test_product_route_transient_503_short_cooldown(
+        self, settings: Settings, mocker
+    ) -> None:
+        """When the transient 503 survives the retry and the chain is
+        exhausted, the cooldown must be SHORT (<=60s), not the target's
+        full cooldown (600s) — a transient overload is not a dead model."""
+        store = Mock()
+        store.published_route_by_name.return_value = {
+            "name": "hermes-default",
+            "targets": [
+                {
+                    "model": "@a/primary",
+                    "priority": 10,
+                    "timeout_seconds": 15,
+                    "cooldown_seconds": 600,
+                    "on_status_codes": [429, 500, 503],
+                },
+            ],
+        }
+        tracker = Mock()
+        tracker.model_in_cooldown.return_value = 0
+        tracker.build_record.return_value = SimpleNamespace(total_cost=0.0)
+        proxy = GatewayProxy(
+            settings=settings,
+            cost_tracker=tracker,
+            budget_enforcer=Mock(),
+            fallback_manager=FallbackManager([]),
+        )
+        proxy.attach_product_console(store)
+
+        async def _forward(
+            model: str,
+            body: dict,
+            stream: bool = False,
+            timeout: float | None = None,
+        ):
+            return ProviderResponse(
+                503, {"error": {"message": "overloaded"}}, {}, model, None, 5
+            )
+
+        proxy.forward = AsyncMock(side_effect=_forward)  # type: ignore[method-assign]
+        result = await proxy.handle_chat_completion(
+            {
+                "model": "hermes-default",
+                "messages": [{"role": "user", "content": "hi"}],
+            },
+            "sk_test_abc",
+            {},
+        )
+        # transient 503 with a single target → surfaced, but with SHORT cooldown
+        assert result.status_code == 503
+        assert tracker.set_model_cooldown.called
+        cooldown_kwargs = tracker.set_model_cooldown.call_args
+        assert cooldown_kwargs.args[2] <= 60

@@ -578,6 +578,7 @@ class GatewayProxy:
         )
         for index, candidate in enumerate(candidates):
             is_last = index + 1 >= len(candidates)
+            response_retried = False
             remaining = 0
             if not from_plane:
                 try:
@@ -731,9 +732,50 @@ class GatewayProxy:
                 if index + 1 < len(candidates):
                     fallback = "context_window_400"
                 continue
+            # Transient 5xx (502/503/504) is usually momentary provider
+            # overload — retry the SAME model once before falling back, so a
+            # rare blip does not degrade the response or park the model in a
+            # long cooldown. Only one retry, then fall through to the normal
+            # fallback + short-cooldown path below.
+            if (
+                int(response.status_code or 0) in (502, 503, 504)
+                and not response_retried
+            ):
+                response_retried = True
+                logger.info(
+                    "route=%s model=%s transient %s retrying once request=%s",
+                    route_name,
+                    candidate,
+                    response.status_code,
+                    request_id,
+                )
+                try:
+                    response = await self.forward(
+                        candidate, outbound, timeout=target_timeout
+                    )
+                except ProviderTimeoutError:
+                    if is_last:
+                        raise
+                    continue
+                except Exception as exc:
+                    if is_last:
+                        raise
+                    continue
+                if int(response.status_code or 0) < 400:
+                    served = candidate
+                    break
             cooldown_seconds = 3600
             if target_cooldowns:
                 cooldown_seconds = int(target_cooldowns.get(candidate, 3600))
+            # Transient 5xx (502/503/504) usually means the provider is
+            # momentarily overloaded, not that the model is unusable — a
+            # short cooldown (or none) lets the model come back quickly
+            # instead of being parked for the target's full cooldown
+            # (e.g. 600s), which is what the UI "cooldown" would do. Rate
+            # limits (429) and hard client errors keep the full cooldown.
+            transient = int(response.status_code or 0) in (502, 503, 504)
+            if transient:
+                cooldown_seconds = min(cooldown_seconds, 60)
             try:
                 body_text = ""
                 if isinstance(response.body, dict):
