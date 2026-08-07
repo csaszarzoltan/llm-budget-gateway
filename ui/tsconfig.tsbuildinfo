@@ -1,1 +1,1 @@
-{"root":["./src/app.browser.test.tsx","./src/main.test.tsx","./src/main.tsx"],"version":"5.9.2"}
+{"root":["./src/app.browser.test.tsx","./src/customers-components.tsx","./src/customers.test.tsx","./src/main.test.tsx","./src/main.tsx"],"version":"5.9.2"}
