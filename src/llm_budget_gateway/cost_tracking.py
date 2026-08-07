@@ -203,6 +203,12 @@ class CostStore:
                 )
             except sqlite3.OperationalError:
                 pass  # column already exists
+            try:
+                self._conn.execute(
+                    "ALTER TABLE cost_records ADD COLUMN conversation_id TEXT"
+                )
+            except sqlite3.OperationalError:
+                pass  # column already exists
             self._conn.execute(
                 "CREATE INDEX IF NOT EXISTS idx_cost_records_timestamp "
                 "ON cost_records (timestamp)"
