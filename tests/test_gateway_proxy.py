@@ -13,6 +13,7 @@ from __future__ import annotations
 
 import inspect
 import json
+import asyncio
 from dataclasses import fields, is_dataclass
 from types import SimpleNamespace
 from unittest.mock import AsyncMock, Mock
@@ -1081,3 +1082,78 @@ class TestCreateAppBehavior:
         assert tracker.set_model_cooldown.called
         cooldown_kwargs = tracker.set_model_cooldown.call_args
         assert cooldown_kwargs.args[2] <= 60
+
+
+    @pytest.mark.asyncio
+    async def test_route_chain_budget_skips_mid_targets(
+        self, settings: Settings, mocker
+    ) -> None:
+        """When the per-target timeouts would exceed the client's own timeout
+        (Hermes gives up at ~60-90s), the chain budget must skip the middle
+        candidates and land on the last one quickly instead of burning 2-3
+        minutes on slow timeouts."""
+        store = Mock()
+        store.published_route_by_name.return_value = {
+            "name": "hermes-default",
+            "targets": [
+                {
+                    "model": "@a/primary",
+                    "priority": 10,
+                    "timeout_seconds": 120,
+                    "on_status_codes": [429, 500],
+                },
+                {
+                    "model": "@b/mid",
+                    "priority": 20,
+                    "timeout_seconds": 120,
+                    "on_status_codes": [429, 500],
+                },
+                {
+                    "model": "@c/last",
+                    "priority": 30,
+                    "timeout_seconds": 120,
+                    "on_status_codes": [429, 500],
+                },
+            ],
+        }
+        tracker = Mock()
+        tracker.model_in_cooldown.return_value = 0
+        tracker.build_record.return_value = SimpleNamespace(total_cost=0.0)
+        settings.route_timeout_budget = 0.1  # tiny budget for the test
+        proxy = GatewayProxy(
+            settings=settings,
+            cost_tracker=tracker,
+            budget_enforcer=Mock(),
+            fallback_manager=FallbackManager([]),
+        )
+        proxy.attach_product_console(store)
+
+        async def _forward(
+            model: str,
+            body: dict,
+            stream: bool = False,
+            timeout: float | None = None,
+        ):
+            # Both primary and mid burn the budget with slow timeouts.
+            if model in ("@a/primary", "@b/mid"):
+                await asyncio.sleep(0.2)
+                raise ProviderTimeoutError("slow timeout")
+            return ProviderResponse(200, {}, {}, model, None, 5)
+
+        proxy.forward = AsyncMock(side_effect=_forward)  # type: ignore[method-assign]
+        result = await proxy.handle_chat_completion(
+            {
+                "model": "hermes-default",
+                "messages": [{"role": "user", "content": "hi"}],
+            },
+            "sk_test_abc",
+            {},
+        )
+        # The mid target is skipped by the budget; the last one serves.
+        assert result.status_code == 200
+        assert result.model == "@c/last"
+        # primary attempted, mid skipped, last served
+        assert [c.args[0] for c in proxy.forward.call_args_list] == [
+            "@a/primary",
+            "@c/last",
+        ]

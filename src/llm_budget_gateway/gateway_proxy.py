@@ -635,10 +635,32 @@ class GatewayProxy:
             ",".join(candidates),
             sticky_model or "-",
         )
+        # Total fallback-chain deadline: the sum of per-target timeouts can
+        # exceed the client's own timeout (Hermes ~60-90s), so a chain of
+        # cooldown skips + slow timeouts ends with the client giving up
+        # ("provider failed after retries") even though a later fallback
+        # would answer. Once the budget is spent, skip the remaining
+        # candidates and try the last one with the leftover time.
+        chain_started = time.perf_counter()
+        chain_budget = float(getattr(self._settings, "route_timeout_budget", 90.0))
         for index, candidate in enumerate(candidates):
             is_last = index + 1 >= len(candidates)
             response_retried = False
             remaining = 0
+            # Enforce the chain budget: after it is spent, only the last
+            # candidate may still be attempted (with whatever time is left).
+            elapsed = time.perf_counter() - chain_started
+            if elapsed >= chain_budget and not is_last:
+                fallback = f"chain_budget_{int(chain_budget)}s"
+                logger.info(
+                    "route=%s chain budget %ss spent (%.1fs) skipping %s request=%s",
+                    route_name,
+                    chain_budget,
+                    elapsed,
+                    candidate,
+                    request_id,
+                )
+                continue
             if not from_plane:
                 try:
                     remaining = self._cost_tracker.model_in_cooldown(
@@ -682,6 +704,17 @@ class GatewayProxy:
                         )
                 except (TypeError, ValueError):
                     target_timeout = None
+            # Cap the per-target timeout by the remaining chain budget so a
+            # single target cannot burn the whole budget (a 120-180s target
+            # would still blow past the client timeout).
+            if target_timeout is not None:
+                remaining_budget = chain_budget - (
+                    time.perf_counter() - chain_started
+                )
+                if remaining_budget > 0:
+                    target_timeout = min(target_timeout, remaining_budget)
+                else:
+                    target_timeout = 0.01  # last candidate: tiny grace
             try:
                 response = await self.forward(
                     candidate, outbound, timeout=target_timeout

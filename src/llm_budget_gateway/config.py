@@ -29,5 +29,13 @@ class Settings(BaseSettings):
     #: ``GATEWAY_PROVIDER_TIMEOUT``. A hung upstream must never hang the
     #: worker indefinitely (availability review checklist item 2).
     provider_timeout: float = 60.0
+    #: Total wall-clock budget for a route's whole fallback chain. When
+    #: several targets are in cooldown or timing out, the chain can exceed
+    #: the client's own timeout (Hermes waits ~60-90s) and the client gives
+    #: up ("provider failed after retries") even though a fallback would
+    #: eventually answer. This caps the sum: once the budget is spent, the
+    #: remaining candidates are skipped and the last one is tried with the
+    #: leftover time. Env ``GATEWAY_ROUTE_TIMEOUT_BUDGET``.
+    route_timeout_budget: float = 90.0
 
     model_config = SettingsConfigDict(env_prefix="GATEWAY_")
