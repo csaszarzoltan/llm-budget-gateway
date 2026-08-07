@@ -594,6 +594,10 @@ class DirectProviderClient:
         # authoritative over anything the client sent.
         if endpoint.extra_body:
             payload.update(endpoint.extra_body)
+        logger.debug(
+            "direct forward %s -> %s extra_body=%s payload_keys=%s",
+            model, endpoint.name, endpoint.extra_body, sorted(payload),
+        )
         # DeepSeek/Kimi/MiMo thinking mode: assistant turns must carry
         # reasoning_content or the upstream rejects with HTTP 400. Clients
         # routing via a route name (not the model name) may strip it.

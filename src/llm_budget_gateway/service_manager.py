@@ -12,6 +12,10 @@ from dataclasses import asdict, dataclass
 from pathlib import Path
 from typing import IO
 
+import logging
+
+logger = logging.getLogger(__name__)
+
 
 @dataclass(frozen=True)
 class ServiceDefinition:
@@ -215,10 +219,17 @@ class ServiceManager:
             self._reap(slug)
             if slug in self._processes:
                 return self.status(slug)
+            # The previous process may still be draining (TIME_WAIT / slow
+            # shutdown) right after a restart — wait briefly for the port to
+            # free up instead of failing the whole startup silently.
             if self._is_port_open(service.port):
-                raise RuntimeError(
-                    f"port {service.port} is already in use by an unmanaged process"
-                )
+                deadline = time.monotonic() + self._startup_timeout
+                while self._is_port_open(service.port) and time.monotonic() < deadline:
+                    time.sleep(0.25)
+                if self._is_port_open(service.port):
+                    raise RuntimeError(
+                        f"port {service.port} is already in use by an unmanaged process"
+                    )
 
             self._log_dir.mkdir(parents=True, exist_ok=True)
             log = (self._log_dir / f"{slug}.log").open("ab", buffering=0)
@@ -303,6 +314,7 @@ class ServiceManager:
             try:
                 results.append(self.start(slug))
             except RuntimeError as exc:
+                logger.error("service %s failed to start: %s", slug, exc)
                 results.append({**self.status(slug), "error": str(exc)})
         return results
 
