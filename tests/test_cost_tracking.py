@@ -88,7 +88,7 @@ class TestTokenUsageInterface:
 
     def test_fields(self) -> None:
         names = {f.name for f in fields(TokenUsage)}
-        assert names == {"prompt_tokens", "completion_tokens", "total_tokens"}
+        assert names == {"prompt_tokens", "completion_tokens", "total_tokens", "reasoning_tokens"}
 
     def test_constructible(self) -> None:
         u = TokenUsage(prompt_tokens=10, completion_tokens=5, total_tokens=15)
@@ -101,7 +101,7 @@ class TestModelPriceInterface:
 
     def test_fields(self) -> None:
         names = {f.name for f in fields(ModelPrice)}
-        assert names == {"input_cost_per_million", "output_cost_per_million"}
+        assert names == {"input_cost_per_million", "output_cost_per_million", "reasoning_cost_per_million"}
 
     def test_constructible(self) -> None:
         p = ModelPrice(input_cost_per_million=3.0, output_cost_per_million=15.0)
@@ -134,6 +134,11 @@ class TestUsageRecordInterface:
             "project",
             "route",
             "status_code",
+            "reasoning_tokens",
+            "reasoning_cost",
+            "client_id",
+            "client_profile",
+            "cache_hit",
         }
 
     def test_constructible(self) -> None:
@@ -187,7 +192,7 @@ class TestCostCalculatorInterface:
     def test_calculate_signature(self) -> None:
         sig = inspect.signature(CostCalculator.calculate)
         params = list(sig.parameters)
-        assert params == ["self", "model", "prompt_tokens", "completion_tokens"]
+        assert params == ["self", "model", "prompt_tokens", "completion_tokens", "reasoning_tokens"]
         assert "tuple" in str(sig.return_annotation)
 
 
@@ -299,7 +304,7 @@ class TestCostMathBehavior:
         price = litellm.model_cost[model]
         expected_input = prompt_tokens * price["input_cost_per_token"]
         expected_output = completion_tokens * price["output_cost_per_token"]
-        input_cost, output_cost, total_cost = calculator.calculate(
+        input_cost, output_cost, _reasoning, total_cost = calculator.calculate(
             model, prompt_tokens, completion_tokens
         )
         assert input_cost == pytest.approx(expected_input, abs=1e-9)
@@ -312,7 +317,7 @@ class TestCostMathBehavior:
             ModelPrice(input_cost_per_million=100.0, output_cost_per_million=200.0),
         )
         calculator = CostCalculator(price_map)
-        input_cost, output_cost, total = calculator.calculate("gpt-4o", 1000, 500)
+        input_cost, output_cost, _reasoning, total = calculator.calculate("gpt-4o", 1000, 500)
         assert input_cost == pytest.approx(1000 * 100.0 / 1e6, abs=1e-9)
         assert output_cost == pytest.approx(500 * 200.0 / 1e6, abs=1e-9)
         assert total == pytest.approx(input_cost + output_cost, abs=1e-9)

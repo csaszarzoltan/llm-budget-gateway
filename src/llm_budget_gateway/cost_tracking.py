@@ -26,8 +26,10 @@ CREATE TABLE IF NOT EXISTS cost_records (
     prompt_tokens INTEGER NOT NULL,
     completion_tokens INTEGER NOT NULL,
     total_tokens INTEGER NOT NULL,
+    reasoning_tokens INTEGER NOT NULL DEFAULT 0,
     input_cost REAL NOT NULL,
     output_cost REAL NOT NULL,
+    reasoning_cost REAL NOT NULL DEFAULT 0.0,
     total_cost REAL NOT NULL,
     latency_ms INTEGER NOT NULL,
     status TEXT NOT NULL,
@@ -35,7 +37,10 @@ CREATE TABLE IF NOT EXISTS cost_records (
     timestamp INTEGER NOT NULL,
     tool_name TEXT,
     project TEXT,
-    route TEXT
+    route TEXT,
+    client_id TEXT,
+    client_profile TEXT,
+    cache_hit INTEGER NOT NULL DEFAULT 0
 )
 """
 
@@ -56,12 +61,14 @@ class TokenUsage:
     prompt_tokens: int
     completion_tokens: int
     total_tokens: int
+    reasoning_tokens: int = 0
 
 
 @dataclass
 class ModelPrice:
     input_cost_per_million: float
     output_cost_per_million: float
+    reasoning_cost_per_million: float = 0.0
 
 
 @dataclass
@@ -85,6 +92,11 @@ class UsageRecord:
     project: str | None = None  # project scope key when attribution is project-scoped
     route: str | None = None  # logical route name that served this request
     status_code: int | None = None  # HTTP status when status != "success"
+    reasoning_tokens: int = 0
+    reasoning_cost: float = 0.0
+    client_id: str | None = None
+    client_profile: str | None = None
+    cache_hit: bool = False
 
 
 def accumulate_usage(chunks: list[dict]) -> TokenUsage:
@@ -92,14 +104,17 @@ def accumulate_usage(chunks: list[dict]) -> TokenUsage:
     prompt_tokens = 0
     completion_tokens = 0
     total_tokens = 0
+    reasoning_tokens = 0
     for chunk in chunks:
         prompt_tokens += int(chunk.get("prompt_tokens", 0) or 0)
         completion_tokens += int(chunk.get("completion_tokens", 0) or 0)
         total_tokens += int(chunk.get("total_tokens", 0) or 0)
+        reasoning_tokens += int(chunk.get("reasoning_tokens", 0) or 0)
     return TokenUsage(
         prompt_tokens=prompt_tokens,
         completion_tokens=completion_tokens,
         total_tokens=total_tokens,
+        reasoning_tokens=reasoning_tokens,
     )
 
 
@@ -144,13 +159,15 @@ class CostCalculator:
         self._price_map = price_map
 
     def calculate(
-        self, model: str, prompt_tokens: int, completion_tokens: int
-    ) -> tuple[float, float, float]:
-        """Return ``(input_cost, output_cost, total_cost)`` for the usage."""
+        self, model: str, prompt_tokens: int, completion_tokens: int,
+        reasoning_tokens: int = 0,
+    ) -> tuple[float, float, float, float]:
+        """Return ``(input_cost, output_cost, reasoning_cost, total_cost)`` for the usage."""
         price = self._price_map.get_price(model)
         input_cost = prompt_tokens * price.input_cost_per_million / 1e6
         output_cost = completion_tokens * price.output_cost_per_million / 1e6
-        return input_cost, output_cost, input_cost + output_cost
+        reasoning_cost = reasoning_tokens * price.reasoning_cost_per_million / 1e6
+        return input_cost, output_cost, reasoning_cost, input_cost + output_cost + reasoning_cost
 
 
 class CostStore:
@@ -209,6 +226,11 @@ class CostStore:
             ("tool_name", "TEXT"),
             ("project", "TEXT"),
             ("route", "TEXT"),
+            ("reasoning_tokens", "INTEGER NOT NULL DEFAULT 0"),
+            ("reasoning_cost", "REAL NOT NULL DEFAULT 0.0"),
+            ("client_id", "TEXT"),
+            ("client_profile", "TEXT"),
+            ("cache_hit", "INTEGER NOT NULL DEFAULT 0"),
         ):
             if column not in existing:
                 self._conn.execute(
@@ -223,10 +245,12 @@ class CostStore:
                 INSERT OR REPLACE INTO cost_records (
                     request_id, api_key, user_id, team, model, provider,
                     prompt_tokens, completion_tokens, total_tokens,
-                    input_cost, output_cost, total_cost,
+                    reasoning_tokens,
+                    input_cost, output_cost, reasoning_cost, total_cost,
                     latency_ms, status, status_code, timestamp,
-                    tool_name, project, route
-                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    tool_name, project, route,
+                    client_id, client_profile, cache_hit
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 """,
                 (
                     record.request_id,
@@ -238,8 +262,10 @@ class CostStore:
                     record.prompt_tokens,
                     record.completion_tokens,
                     record.total_tokens,
+                    record.reasoning_tokens,
                     record.input_cost,
                     record.output_cost,
+                    record.reasoning_cost,
                     record.total_cost,
                     record.latency_ms,
                     record.status,
@@ -248,6 +274,9 @@ class CostStore:
                     record.tool_name,
                     record.project,
                     record.route,
+                    record.client_id,
+                    record.client_profile,
+                    1 if record.cache_hit else 0,
                 ),
             )
             self._conn.commit()
@@ -333,7 +362,7 @@ class CostStore:
                 """
                 SELECT request_id, model, route, prompt_tokens, completion_tokens,
                        total_tokens, total_cost, status, timestamp, latency_ms,
-                       status_code
+                       status_code, reasoning_tokens, client_id, client_profile, cache_hit
                 FROM cost_records
                 WHERE timestamp >= ?
                 ORDER BY timestamp DESC
@@ -375,6 +404,10 @@ class CostStore:
                     "timestamp": int(r[8] or 0),
                     "latency_ms": int(r[9] or 0),
                     "status_code": int(r[10]) if r[10] is not None else None,
+                    "reasoning_tokens": int(r[11] or 0),
+                    "client_id": r[12],
+                    "client_profile": r[13],
+                    "cache_hit": bool(r[14]),
                 }
                 for r in calls
             ],
@@ -494,7 +527,7 @@ class CostStore:
                 """
                 SELECT request_id, model, route, prompt_tokens, completion_tokens,
                        total_tokens, total_cost, status, timestamp, latency_ms,
-                       status_code
+                       status_code, reasoning_tokens, client_id, client_profile, cache_hit
                 FROM cost_records
                 WHERE timestamp >= ?
                 ORDER BY timestamp DESC
@@ -550,6 +583,10 @@ class CostStore:
                     "timestamp": int(r[8] or 0),
                     "latency_ms": int(r[9] or 0),
                     "status_code": int(r[10]) if r[10] is not None else None,
+                    "reasoning_tokens": int(r[11] or 0),
+                    "client_id": r[12],
+                    "client_profile": r[13],
+                    "cache_hit": bool(r[14]),
                 }
                 for r in calls
             ],
@@ -640,15 +677,17 @@ class CostTracker:
     ) -> UsageRecord:
         """Assemble a UsageRecord, computing costs from usage (zero when None)."""
         if usage is not None:
-            input_cost, output_cost, total_cost = self._calculator.calculate(
-                model, usage.prompt_tokens, usage.completion_tokens
+            input_cost, output_cost, reasoning_cost, total_cost = self._calculator.calculate(
+                model, usage.prompt_tokens, usage.completion_tokens,
+                usage.reasoning_tokens,
             )
             prompt_tokens = usage.prompt_tokens
             completion_tokens = usage.completion_tokens
             total_tokens = usage.total_tokens
+            reasoning_tokens = usage.reasoning_tokens
         else:
-            input_cost = output_cost = total_cost = 0.0
-            prompt_tokens = completion_tokens = total_tokens = 0
+            input_cost = output_cost = reasoning_cost = total_cost = 0.0
+            prompt_tokens = completion_tokens = total_tokens = reasoning_tokens = 0
         return UsageRecord(
             request_id=request_id,
             api_key=scope.key if scope.kind == "key" else "",
@@ -661,20 +700,26 @@ class CostTracker:
             total_tokens=total_tokens,
             input_cost=input_cost,
             output_cost=output_cost,
+            reasoning_cost=reasoning_cost,
             total_cost=total_cost,
             latency_ms=latency_ms,
             status=status,
             status_code=status_code,
             timestamp=int(time.time()),
             route=route,
+            reasoning_tokens=reasoning_tokens,
         )
 
     def estimate_cost(
-        self, model: str, input_tokens: int, max_output_tokens: int
+        self, model: str, input_tokens: int, max_output_tokens: int,
+        reasoning_tokens: int = 0,
     ) -> tuple[float, float, float]:
         """Upper-bound cost estimate (input, output, total) for a model plus a
         request size. Used by the proxy for per-target budget gates."""
-        return self._calculator.calculate(model, input_tokens, max_output_tokens)
+        input_c, output_c, reasoning_c, total = self._calculator.calculate(
+            model, input_tokens, max_output_tokens, reasoning_tokens,
+        )
+        return input_c, output_c, total
 
     def daily_usage(
         self,

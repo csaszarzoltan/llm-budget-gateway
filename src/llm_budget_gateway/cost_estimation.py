@@ -60,7 +60,7 @@ class CostEstimator:
                 "max_tokens/max_completion_tokens must be a non-negative integer"
             )
         input_tokens = self._fallback_manager.estimate_tokens(dict(body))
-        input_cost, output_cost, total = self._calculator.calculate(
+        input_cost, output_cost, _reasoning, total = self._calculator.calculate(
             model, input_tokens, max_output
         )
         price = self._calculator._price_map.get_price(model)

@@ -28,7 +28,7 @@ from .budget_enforcement import (
     RateLimitExceededError,
 )
 from .config import Settings
-from .cost_tracking import CostTracker, TokenUsage, accumulate_usage
+from .cost_tracking import CostTracker, TokenUsage, UsageRecord, accumulate_usage
 from .model_fallback import FallbackManager
 
 try:
@@ -378,6 +378,10 @@ class GatewayProxy:
             return self._error_response(404, f"unknown route: {alias}", alias)
         metadata = body.get("metadata", {})
         metadata = metadata if isinstance(metadata, dict) else {}
+        # Client identity: any client may send these to tag who originated
+        # the request (e.g. hermes profile names, custom app names).
+        client_id = str(metadata.get("client_id", "")) or None
+        client_profile = str(metadata.get("client_profile", "")) or None
         capabilities = []
         if body.get("tools"):
             capabilities.append("tools")
@@ -431,6 +435,14 @@ class GatewayProxy:
         response = None
         served: str | None = None
         outbound = {k: v for k, v in body.items() if k != "metadata"}
+        # Thinking / reasoning support: when the client sends metadata.thinking
+        # or metadata.reasoning_effort, forward them to the provider in the
+        # request body. Different providers use different field names — the
+        # gateway passes them through so every thinking-capable model works.
+        if metadata.get("thinking"):
+            outbound["thinking"] = metadata["thinking"]
+        if metadata.get("reasoning_effort"):
+            outbound["reasoning_effort"] = metadata["reasoning_effort"]
         # Integrated intelligence — exact-response cache: an identical
         # request (same route + payload) served recently is answered from
         # the cache instead of burning tokens. Opt-in per request via
@@ -451,6 +463,32 @@ class GatewayProxy:
                         model=str(served or cached.get("model", "")),
                         usage=None,
                     )
+                    # Record the cache hit so the Usage page shows it
+                    scope = BudgetScope(kind="key", key=str(api_key))
+                    cache_record = UsageRecord(
+                        request_id=request_id,
+                        api_key=str(api_key),
+                        user_id=None, team=None,
+                        model=str(served or cached.get("model", "")),
+                        provider="direct",
+                        prompt_tokens=0, completion_tokens=0, total_tokens=0,
+                        reasoning_tokens=0,
+                        input_cost=0.0, output_cost=0.0, reasoning_cost=0.0,
+                        total_cost=0.0,
+                        latency_ms=0,
+                        status="success",
+                        timestamp=int(time.time()),
+                        route=route_name,
+                        client_id=client_id,
+                        client_profile=client_profile,
+                        cache_hit=True,
+                    )
+                    try:
+                        result = self._cost_tracker.record(cache_record)
+                        if inspect.isawaitable(result):
+                            await result
+                    except Exception:
+                        pass
                     logger.info(
                         "request=%s route=%s cache-hit", request_id, route_name
                     )
@@ -745,6 +783,10 @@ class GatewayProxy:
                 route=route_name,
                 status_code=response.status_code,
             )
+            # Tag the record with client identity and cache status.
+            record.client_id = client_id
+            record.client_profile = client_profile
+            record.cache_hit = False
             cost = float(getattr(record, "total_cost", 0.0))
             result = self._cost_tracker.record(record)
             if inspect.isawaitable(result):
@@ -1126,6 +1168,7 @@ class GatewayProxy:
                     prompt_tokens=prompt_tokens,
                     completion_tokens=completion_tokens,
                     total_tokens=total_tokens,
+                    reasoning_tokens=getattr(resp_usage, "reasoning_tokens", 0) or 0,
                 )
             body_out = self._serializable_body(response, stream)
 
@@ -1168,6 +1211,7 @@ class GatewayProxy:
                             getattr(chunk_usage, "completion_tokens", 0) or 0
                         ),
                         "total_tokens": (getattr(chunk_usage, "total_tokens", 0) or 0),
+                        "reasoning_tokens": (getattr(chunk_usage, "reasoning_tokens", 0) or 0),
                     }
                 )
         usage = accumulate_usage(usage_parts) if usage_parts else None

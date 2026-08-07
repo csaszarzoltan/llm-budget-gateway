@@ -1325,6 +1325,27 @@ def create_console_app(
         except (ValueError, KeyError, TypeError) as exc:
             raise HTTPException(400, str(exc)) from exc
 
+    @app.get("/v1/product/intelligence/cache-stats")
+    async def intelligence_cache_stats() -> dict[str, object]:
+        """Aggregate cache hit/miss counts from the cost records."""
+        try:
+            with cost_store._lock:
+                row = cost_store._conn.execute(
+                    "SELECT COUNT(*), SUM(CASE WHEN cache_hit = 1 THEN 1 ELSE 0 END) "
+                    "FROM cost_records WHERE timestamp >= ?",
+                    (int(time.time()) - 7 * 86400,),
+                ).fetchone()
+                total = int(row[0] or 0)
+                hits = int(row[1] or 0)
+                return {
+                    "total_requests": total,
+                    "cache_hits": hits,
+                    "cache_misses": total - hits,
+                    "hit_rate": round(hits / total, 4) if total > 0 else 0.0,
+                }
+        except Exception as exc:
+            raise HTTPException(500, str(exc)) from exc
+
     # Operations: prompt registry with immutable versions + deterministic
     # A/B assignment; quota classification for provider errors.
     prompts = PromptRegistry(str(repository_root / ".gateway-console" / "operations.db"))
