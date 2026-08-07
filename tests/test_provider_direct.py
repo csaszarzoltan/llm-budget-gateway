@@ -684,3 +684,54 @@ class TestForwardStream:
         tc = captured["body"]["messages"][1]["tool_calls"][0]
         assert tc["extra_content"]["google"]["thought_signature"] == "SIGFN"
         await client.aclose()
+
+
+@pytest.mark.asyncio
+async def test_extra_body_merged_into_payload():
+    """Provider-level extra_body (e.g. DeepInfra service_tier: flex) must be
+    merged into the outbound payload, not hardcoded in the client."""
+    captured: dict[str, object] = {}
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        captured["body"] = json.loads(request.content)
+        return _ok_handler(request)
+
+    registry = {
+        "deepinfra": {
+            "base_url": "https://api.deepinfra.com/v1/openai",
+            "api_key_env": "DEEPINFRA_API_KEY",
+            "api_key": "test-key",
+            "models": ["deepseek-ai/DeepSeek-V3"],
+            "extra_body": {"service_tier": "flex"},
+        }
+    }
+    client = _client(handler, registry)
+    await client.forward(
+        "@deepinfra/deepseek-ai/DeepSeek-V3",
+        {"model": "@deepinfra/deepseek-ai/DeepSeek-V3", "messages": [{"role": "user", "content": "go"}]},
+    )
+    body = captured["body"]
+    assert isinstance(body, dict)
+    assert body.get("service_tier") == "flex"
+    # the bare model name goes upstream, not the @-qualified alias
+    assert body["model"] == "deepseek-ai/DeepSeek-V3"
+    await client.aclose()
+
+
+@pytest.mark.asyncio
+async def test_extra_body_from_registry_raw_load():
+    """The registry loader must pass extra_body through from raw config so a
+    provider connection's Extra body JSON field reaches the payload."""
+    registry = {
+        "deepinfra": {
+            "base_url": "https://api.deepinfra.com/v1/openai",
+            "api_key_env": "DEEPINFRA_API_KEY",
+            "api_key": "test-key",
+            "models": ["deepseek-ai/DeepSeek-V3"],
+            "extra_body": {"service_tier": "flex"},
+        }
+    }
+    client = DirectProviderClient(registry)
+    endpoint = client.resolve("@deepinfra/deepseek-ai/DeepSeek-V3")
+    assert endpoint.extra_body == {"service_tier": "flex"}
+    await client.aclose()

@@ -136,7 +136,7 @@ PROVIDER_TYPES: list[dict[str, Any]] = [
             {"name": "base_url", "label": "Base URL", "type": "url", "required": True},
             {
                 "name": "extra_body_json",
-                "label": "Extra body JSON (e.g. {\"flex\": true} for flexible capacity)",
+                "label": "Extra body JSON (e.g. {\"service_tier\": \"flex\"} for DeepInfra flex discount)",
                 "type": "text",
                 "required": False,
             },
