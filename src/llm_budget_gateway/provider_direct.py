@@ -482,6 +482,15 @@ class DirectProviderClient:
         sig = self._thought_signatures.get(tc_id) if tc_id else None
         if sig is None and fn_name and arguments:
             sig = self._thought_signatures_by_fn.get((fn_name, arguments))
+            # The outbound tool-name rewriter maps "ns:fn" -> "ns_fn"; the
+            # captured signature is keyed under the REWRITTEN name (that is
+            # what the provider echoed back). Replays arrive with the original
+            # colon form, so also try the rewritten variant before falling
+            # back to the persisted store.
+            if sig is None and ":" in fn_name:
+                sig = self._thought_signatures_by_fn.get(
+                    (fn_name.replace(":", "_"), arguments)
+                )
         if sig is None and self._sig_db is not None:
             try:
                 with self._sig_lock:
@@ -496,6 +505,13 @@ class DirectProviderClient:
                             " ORDER BY created_at DESC LIMIT 1",
                             (fn_name, arguments),
                         ).fetchone()
+                        if row is None and ":" in fn_name:
+                            row = self._sig_db.execute(
+                                "SELECT signature FROM thought_signatures"
+                                " WHERE fn_name=? AND arguments=?"
+                                " ORDER BY created_at DESC LIMIT 1",
+                                (fn_name.replace(":", "_"), arguments),
+                            ).fetchone()
                 if row is not None:
                     sig = str(row[0])
                     if tc_id:
