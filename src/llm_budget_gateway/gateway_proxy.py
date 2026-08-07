@@ -393,6 +393,19 @@ class GatewayProxy:
 
         # 1) UI-managed route (Routes tab, targets model) — user-editable.
         store = self._product_console
+        # When omitted, the gateway falls back to the registered application
+        # name so every request is attributed — no client modification needed.
+        if not client_id:
+            # Try pc_apps first (UI-created applications).
+            if store is not None:
+                try:
+                    app_info = store.authenticate_application(str(api_key))
+                    client_id = str(app_info.get("name", ""))
+                except Exception:
+                    pass
+            # Fallback: control-plane / gateway keys → use key prefix + short ID
+            if not client_id:
+                client_id = f"gw-{str(api_key)[-8:]}" if api_key else "anonymous"
         route = None
         from_plane = False
         if store is not None:
