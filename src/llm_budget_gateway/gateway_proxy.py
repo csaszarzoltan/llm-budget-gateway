@@ -134,6 +134,46 @@ def _is_context_error(body: dict | str | list) -> bool:
     )
 
 
+def _model_supports_vision(model: str | None) -> bool:
+    """True when a model can accept image content (image_url parts).
+
+    Determined WITHOUT the route DB: the model slug itself is the source of
+    truth, so a newly added model is routed correctly with zero config.
+
+    Signals (case-insensitive):
+      - explicit markers: ``vision``, ``vl``, ``multimodal``, ``4o``,
+        ``omni``, ``gemini``, ``claude-3``
+      - a curated list of models whose vendor reports image input even
+        though the slug does not (e.g. xiaomi/mimo-v2.5).
+    """
+    if not model:
+        return False
+    text = model.lower()
+    markers = (
+        "vision",
+        "vl",
+        "multimodal",
+        "4o",
+        "omni",
+        "gemini",
+        "claude-3",
+        "claude-3-5",
+        "claude-3-7",
+        "gpt-4o",
+        "gpt-4.1",
+        "llava",
+        "qwen2-vl",
+        "qwen2.5-vl",
+        "pixtral",
+    )
+    if any(m in text for m in markers):
+        return True
+    curated = (
+        "@xiaomi/mimo-v2.5",
+    )
+    return model in curated
+
+
 def _body_has_images(body: dict | None) -> bool:
     """True when a chat request carries image parts (image_url content).
 
@@ -1111,15 +1151,15 @@ class GatewayProxy:
             ).issubset(capabilities):
                 reason = "missing_capabilities"
             # Vision gate: image-bearing requests (image_url content parts)
-            # can only be served by vision-capable models. The target's
-            # ``capabilities`` field declares MODEL abilities (independent of
-            # the request-declared capabilities above) — non-vision targets
-            # are excluded so a 400 (unknown variant image_url) does not
-            # burn the chain on text-only providers.
+            # can only be served by vision-capable models. Capability is
+            # inferred from the model slug itself (zero-config — a newly
+            # added model is routed correctly without touching the route
+            # DB), so non-vision targets are excluded before the chain runs
+            # and a 400 (unknown variant image_url) never happens.
             if (
                 reason is None
                 and _body_has_images(body)
-                and "vision" not in (target.get("capabilities") or [])
+                and not _model_supports_vision(str(target.get("model", "")))
             ):
                 reason = "no_vision"
             if reason is None:
