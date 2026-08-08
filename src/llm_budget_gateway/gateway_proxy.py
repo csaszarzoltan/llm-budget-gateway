@@ -548,6 +548,13 @@ class GatewayProxy:
             fallback = decision.get("fallback_reason") or "none"
             target_cooldowns = decision.get("target_cooldowns", {})
             route_name = route["name"]
+            # Merge route-level metadata (cache policy) into the request
+            # metadata so the cache lookup/write can use route settings.
+            route_meta = route.get("metadata", {})
+            if isinstance(route_meta, dict) and route_meta:
+                for key in ("cache_auto", "cache_ttl"):
+                    if key in route_meta and key not in metadata:
+                        metadata[key] = route_meta[key]
         else:
             # 2) Logical routing plane (admin-created routes).
             from_plane = True
@@ -585,10 +592,20 @@ class GatewayProxy:
         # Integrated intelligence — exact-response cache: an identical
         # request (same route + payload) served recently is answered from
         # the cache instead of burning tokens. Opt-in per request via
-        # X-Gateway-Cache: 1 header, or per route via metadata.
+        # X-Gateway-Cache: 1 header, per route via metadata, or
+        # automatically for deterministic requests (temperature=0, no
+        # stream, n=1) when cache_auto is enabled on the route.
+        cache_auto = str(metadata.get("cache_auto", "")).lower() == "1"
+        is_deterministic = (
+            outbound.get("temperature", 1.0) == 0
+            and not outbound.get("stream", False)
+            and outbound.get("n", 1) == 1
+            and "tools" not in outbound
+        )
         want_cache = (
             str(headers.get("x-gateway-cache", "")).lower() == "1"
             or str(metadata.get("cache", "")).lower() == "1"
+            or (cache_auto and is_deterministic)
         )
         if want_cache and self._intel_cache is not None:
             try:
@@ -1104,15 +1121,17 @@ class GatewayProxy:
                 logger.exception("logical route spend record failed request=%s", request_id)
         # Cache the successful response when the client asked for caching,
         # so an identical later request is answered without a provider call.
+        # cache_ttl from route metadata overrides the default 300s.
         if (
             want_cache
             and self._intel_cache is not None
             and response.status_code < 400
             and isinstance(response.body, dict)
         ):
+            cache_ttl = int(metadata.get("cache_ttl", 300))
             try:
                 self._intel_cache.put(
-                    "default", outbound, response.body, ttl=300
+                    "default", outbound, response.body, ttl=cache_ttl
                 )
             except Exception:
                 logger.exception("cache put failed request=%s", request_id)

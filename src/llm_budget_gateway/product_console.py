@@ -205,12 +205,12 @@ CREATE TABLE IF NOT EXISTS pc_activity(id TEXT PRIMARY KEY,app_id TEXT,route TEX
     def route(self, rid: str) -> dict[str, Any]:
         """Return one route."""
         r = self.db.execute(
-            "SELECT id,name,draft_version,published_version,status,targets FROM pc_routes WHERE id=?",
+            "SELECT id,name,draft_version,published_version,status,targets,metadata FROM pc_routes WHERE id=?",
             (rid,),
         ).fetchone()
         if not r:
             raise KeyError(rid)
-        return {
+        result = {
             "id": r[0],
             "name": r[1],
             "draft_version": r[2],
@@ -218,6 +218,13 @@ CREATE TABLE IF NOT EXISTS pc_activity(id TEXT PRIMARY KEY,app_id TEXT,route TEX
             "status": r[4],
             "targets": json.loads(r[5]),
         }
+        # Attach route-level metadata (cache policy, etc.) when present.
+        if r[6]:
+            try:
+                result["metadata"] = json.loads(r[6])
+            except (json.JSONDecodeError, TypeError):
+                result["metadata"] = {}
+        return result
 
     def routes(self) -> list[dict[str, Any]]:
         """List routes."""

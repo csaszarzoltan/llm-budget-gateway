@@ -1507,9 +1507,13 @@ def create_console_app(
 
     @app.get("/v1/product/intelligence/cache-stats")
     async def intelligence_cache_stats() -> dict[str, object]:
-        """Aggregate cache hit/miss counts from the cost records."""
+        """Aggregate cache hit/miss counts from the cost records.
+        
+        Returns per-model and per-route breakdown plus totals.
+        """
         try:
             with cost_store._lock:
+                # Totals (last 7 days)
                 row = cost_store._conn.execute(
                     "SELECT COUNT(*), SUM(CASE WHEN cache_hit = 1 THEN 1 ELSE 0 END) "
                     "FROM cost_records WHERE timestamp >= ?",
@@ -1517,11 +1521,57 @@ def create_console_app(
                 ).fetchone()
                 total = int(row[0] or 0)
                 hits = int(row[1] or 0)
+
+                # Per-model breakdown
+                models: dict[str, dict[str, int]] = {}
+                for r in cost_store._conn.execute(
+                    "SELECT model, COUNT(*), SUM(CASE WHEN cache_hit = 1 THEN 1 ELSE 0 END) "
+                    "FROM cost_records WHERE timestamp >= ? "
+                    "GROUP BY model ORDER BY COUNT(*) DESC LIMIT 20",
+                    (int(time.time()) - 7 * 86400,),
+                ):
+                    m_total = int(r[1] or 0)
+                    m_hits = int(r[2] or 0)
+                    models[str(r[0])] = {
+                        "total": m_total,
+                        "hits": m_hits,
+                        "misses": m_total - m_hits,
+                        "hit_rate": round(m_hits / m_total, 4) if m_total > 0 else 0.0,
+                    }
+
+                # Per-route breakdown
+                routes: dict[str, dict[str, int]] = {}
+                for r in cost_store._conn.execute(
+                    "SELECT route, COUNT(*), SUM(CASE WHEN cache_hit = 1 THEN 1 ELSE 0 END) "
+                    "FROM cost_records WHERE timestamp >= ? "
+                    "GROUP BY route ORDER BY COUNT(*) DESC LIMIT 10",
+                    (int(time.time()) - 7 * 86400,),
+                ):
+                    r_total = int(r[1] or 0)
+                    r_hits = int(r[2] or 0)
+                    routes[str(r[0] or "none")] = {
+                        "total": r_total,
+                        "hits": r_hits,
+                        "misses": r_total - r_hits,
+                        "hit_rate": round(r_hits / r_total, 4) if r_total > 0 else 0.0,
+                    }
+
+                # Tokens saved (prompt tokens that would have been sent)
+                saved = cost_store._conn.execute(
+                    "SELECT SUM(prompt_tokens) FROM cost_records "
+                    "WHERE cache_hit = 1 AND timestamp >= ?",
+                    (int(time.time()) - 7 * 86400,),
+                ).fetchone()
+                tokens_saved = int(saved[0] or 0)
+
                 return {
                     "total_requests": total,
                     "cache_hits": hits,
                     "cache_misses": total - hits,
                     "hit_rate": round(hits / total, 4) if total > 0 else 0.0,
+                    "tokens_saved": tokens_saved,
+                    "by_model": models,
+                    "by_route": routes,
                 }
         except Exception as exc:
             raise HTTPException(500, str(exc)) from exc
