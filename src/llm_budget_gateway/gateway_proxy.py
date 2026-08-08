@@ -732,7 +732,7 @@ class GatewayProxy:
         chain_budget = float(getattr(self._settings, "route_timeout_budget", 90.0))
         for index, candidate in enumerate(candidates):
             is_last = index + 1 >= len(candidates)
-            response_retried = False
+            response_retry_count = 0
             remaining = 0
             # Enforce the chain budget: after it is spent, only the last
             # candidate may still be attempted (with whatever time is left).
@@ -772,23 +772,30 @@ class GatewayProxy:
             # (capped by the global provider timeout). Only applies to
             # UI-managed routes; plane routes keep the global timeout.
             target_timeout: float | None = None
+            target_retries = 1  # default: one retry (back-compat with 5xx retry)
             if not from_plane:
                 try:
-                    to = int(
-                        next(
-                            (
-                                t.get("timeout_seconds")
-                                for t in route.get("targets", [])
-                                if str(t.get("model", "")) == candidate
-                            ),
-                            0,
-                        )
-                        or 0
+                    target_info = next(
+                        (
+                            t
+                            for t in route.get("targets", [])
+                            if str(t.get("model", "")) == candidate
+                        ),
+                        None,
                     )
+                    to = int(target_info.get("timeout_seconds") or 0) if target_info else 0
                     if to > 0:
                         target_timeout = min(
                             to, int(self._settings.provider_timeout)
                         )
+                    # Per-target retries: the UI exposes retries per target —
+                    # honor it (default 1 keeps the existing once-retry).
+                    tr = target_info.get("retries") if target_info else None
+                    if tr is not None:
+                        try:
+                            target_retries = max(0, int(tr))
+                        except (TypeError, ValueError):
+                            target_retries = 1
                 except (TypeError, ValueError):
                     target_timeout = None
             # Cap the per-target timeout by the remaining chain budget so a
@@ -807,6 +814,40 @@ class GatewayProxy:
                     candidate, outbound, timeout=target_timeout
                 )
             except ProviderTimeoutError:
+                # Timeout is often transient provider slowness (esp. opencode
+                # /zen endpoints) — retry the SAME model before falling back,
+                # honoring the target's retries setting (default 1). Only
+                # target_retries retries per candidate, then the normal
+                # cooldown + fallback.
+                while response_retry_count < target_retries:
+                    response_retry_count += 1
+                    logger.info(
+                        "route=%s model=%s timeout retry %d/%d request=%s",
+                        route_name,
+                        candidate,
+                        response_retry_count,
+                        target_retries,
+                        request_id,
+                    )
+                    try:
+                        response = await self.forward(
+                            candidate, outbound, timeout=target_timeout
+                        )
+                    except ProviderTimeoutError:
+                        if response_retry_count >= target_retries:
+                            if is_last:
+                                raise
+                            break
+                        continue
+                    except Exception:
+                        if is_last:
+                            raise
+                        break
+                    if int(response.status_code or 0) < 400:
+                        served = candidate
+                        break
+                    if int(response.status_code or 0) not in (502, 503, 504):
+                        break
                 if is_last:
                     raise
                 cooldown_seconds = (
@@ -913,20 +954,21 @@ class GatewayProxy:
                     fallback = "context_window_400"
                 continue
             # Transient 5xx (502/503/504) is usually momentary provider
-            # overload — retry the SAME model once before falling back, so a
-            # rare blip does not degrade the response or park the model in a
-            # long cooldown. Only one retry, then fall through to the normal
-            # fallback + short-cooldown path below.
+            # overload — retry the SAME model before falling back, honoring
+            # the target's retries setting. A rare blip should not degrade
+            # the response or park the model in a long cooldown.
             if (
                 int(response.status_code or 0) in (502, 503, 504)
-                and not response_retried
+                and response_retry_count < target_retries
             ):
-                response_retried = True
+                response_retry_count += 1
                 logger.info(
-                    "route=%s model=%s transient %s retrying once request=%s",
+                    "route=%s model=%s transient %s retry %d/%d request=%s",
                     route_name,
                     candidate,
                     response.status_code,
+                    response_retry_count,
+                    target_retries,
                     request_id,
                 )
                 try:

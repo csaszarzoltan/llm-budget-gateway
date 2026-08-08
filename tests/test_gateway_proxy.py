@@ -777,9 +777,10 @@ class TestCreateAppBehavior:
         )
         assert result.status_code == 200
         assert result.model == "@b/fallback"
-        # primary attempted first, then the fallback served it
+        # primary attempted, retried once (timeout retry), then fallback served it
         assert [c.args[0] for c in proxy.forward.call_args_list] == [
             "@a/primary",
+            "@a/primary",  # timeout retry (target retries default 1)
             "@b/fallback",
         ]
         # the timed-out primary was marked for cooldown
@@ -832,6 +833,8 @@ class TestCreateAppBehavior:
             {},
         )
         assert result.status_code == 502
+        # primary retried once (default retries=1), then raised as last target
+        assert len(proxy.forward.call_args_list) == 2
 
     @pytest.mark.asyncio
     async def test_product_route_400_context_error_falls_back(
@@ -1152,8 +1155,82 @@ class TestCreateAppBehavior:
         # The mid target is skipped by the budget; the last one serves.
         assert result.status_code == 200
         assert result.model == "@c/last"
-        # primary attempted, mid skipped, last served
+        # primary attempted, retried once (timeout retry), mid skipped by
+        # budget, last served
         assert [c.args[0] for c in proxy.forward.call_args_list] == [
+            "@a/primary",
             "@a/primary",
             "@c/last",
         ]
+
+    @pytest.mark.asyncio
+    async def test_product_route_timeout_honors_target_retries(
+        self, settings: Settings, mocker
+    ) -> None:
+        """A target with retries=2 is retried twice on timeout before
+        falling back to the next candidate."""
+        store = Mock()
+        store.published_route_by_name.return_value = {
+            "name": "hermes-default",
+            "targets": [
+                {
+                    "model": "@a/primary",
+                    "priority": 10,
+                    "timeout_seconds": 15,
+                    "retries": 2,
+                    "on_status_codes": [429, 500],
+                },
+                {
+                    "model": "@b/fallback",
+                    "priority": 20,
+                    "timeout_seconds": 30,
+                    "retries": 1,
+                    "on_status_codes": [429, 500],
+                },
+            ],
+        }
+        tracker = Mock()
+        tracker.model_in_cooldown.return_value = 0
+        tracker.build_record.return_value = SimpleNamespace(total_cost=0.0)
+        proxy = GatewayProxy(
+            settings=settings,
+            cost_tracker=tracker,
+            budget_enforcer=Mock(),
+            fallback_manager=FallbackManager([]),
+        )
+        proxy.attach_product_console(store)
+
+        forward_calls: list[str] = []
+
+        async def _forward(
+            model: str,
+            body: dict,
+            stream: bool = False,
+            timeout: float | None = None,
+        ):
+            forward_calls.append(model)
+            if model == "@a/primary":
+                raise ProviderTimeoutError(
+                    "upstream provider timed out after 15s"
+                )
+            return ProviderResponse(200, {}, {}, model, None, 5)
+
+        proxy.forward = AsyncMock(side_effect=_forward)  # type: ignore[method-assign]
+        result = await proxy.handle_chat_completion(
+            {
+                "model": "hermes-default",
+                "messages": [{"role": "user", "content": "hi"}],
+            },
+            "sk_test_abc",
+            {},
+        )
+        assert result.status_code == 200
+        assert result.model == "@b/fallback"
+        # primary attempted + retried twice (retries=2), then fallback served
+        assert forward_calls == [
+            "@a/primary",
+            "@a/primary",
+            "@a/primary",
+            "@b/fallback",
+        ]
+        assert tracker.set_model_cooldown.called
