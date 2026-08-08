@@ -55,7 +55,7 @@ class ProductConsoleStore:
         self.db = connection
         connection.executescript("""
 CREATE TABLE IF NOT EXISTS pc_providers(id TEXT PRIMARY KEY,name TEXT,slug TEXT UNIQUE,region TEXT,healthy INTEGER,models TEXT,created TEXT);
-CREATE TABLE IF NOT EXISTS pc_routes(id TEXT PRIMARY KEY,name TEXT UNIQUE,draft_version INTEGER,published_version INTEGER,status TEXT,targets TEXT,created TEXT);
+CREATE TABLE IF NOT EXISTS pc_routes(id TEXT PRIMARY KEY,name TEXT UNIQUE,draft_version INTEGER,published_version INTEGER,status TEXT,targets TEXT,created TEXT,metadata TEXT);
 CREATE TABLE IF NOT EXISTS pc_route_versions(route_id TEXT,version INTEGER,targets TEXT,created TEXT,PRIMARY KEY(route_id,version));
 CREATE TABLE IF NOT EXISTS pc_apps(id TEXT PRIMARY KEY,name TEXT,default_route TEXT,key_hash TEXT,created TEXT);
 CREATE TABLE IF NOT EXISTS pc_activity(id TEXT PRIMARY KEY,app_id TEXT,route TEXT,model TEXT,cost REAL,latency INTEGER,success INTEGER,reason TEXT,created TEXT);
@@ -177,7 +177,7 @@ CREATE TABLE IF NOT EXISTS pc_activity(id TEXT PRIMARY KEY,app_id TEXT,route TEX
         now = _now()
         payload = json.dumps(clean, sort_keys=True)
         self.db.execute(
-            "INSERT INTO pc_routes VALUES(?,?,1,NULL,'draft',?,?)",
+            "INSERT INTO pc_routes VALUES(?,?,1,NULL,'draft',?,?,'{}')",
             (rid, name, payload, now),
         )
         self.db.execute(

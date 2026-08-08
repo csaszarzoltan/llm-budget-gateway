@@ -26,7 +26,12 @@ from .config import Settings
 from .cost_estimation import CostEstimator
 from .cost_tracking import CostCalculator, CostStore, CostTracker, ModelPrice, PriceMap
 from .gateway_home import install_gateway_home
-from .gateway_proxy import GatewayProxy, ProviderResponse
+from .gateway_proxy import (
+    GatewayProxy,
+    ProviderResponse,
+    _body_has_images,
+    _model_supports_vision,
+)
 from .model_fallback import FallbackConfig, FallbackManager
 from .routing_control_plane import RoutingControlPlane
 
@@ -391,6 +396,12 @@ def create_app(settings: Settings | None = None) -> FastAPI:
             if "thinking" in reqs or "reasoning" in reqs:
                 caps["thinking"] = True
                 break
+        # Vision support: any target that can serve image content (same
+        # slug-based inference the route resolver uses for the vision gate)
+        # marks the route as vision-capable.
+        caps["vision"] = any(
+            _model_supports_vision(str(t.get("model", ""))) for t in targets
+        )
         return JSONResponse(caps)
 
     @app.get("/health")
