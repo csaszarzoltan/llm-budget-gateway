@@ -286,7 +286,12 @@ class TestWebhookDispatcher:
         client.post.assert_awaited_once()
         args, kwargs = client.post.await_args
         assert args[0] == "https://hooks.example.com/alert"
-        body = json.loads(kwargs["json"])
+        # The wire body is the envelope JSON object itself — passing a dict
+        # to json= (never a pre-dumped string, regression B4).
+        body = kwargs["json"]
+        assert isinstance(body, dict), (
+            f"json= must receive the envelope dict, got {type(body).__name__}"
+        )
         assert body["event"] == "budget.alert"
         assert body["payload"]["alert_rule_id"] == "rule-1"
         assert body["payload"]["current_spend"] == 95.0
@@ -307,7 +312,8 @@ class TestWebhookDispatcher:
             client=client,
         )
         await dispatcher.dispatch(make_event())
-        body = json.loads(client.post.await_args.kwargs["json"])
+        body = client.post.await_args.kwargs["json"]
+        assert isinstance(body, dict), "wire body must be the envelope dict (B4)"
         header = client.post.await_args.kwargs["headers"]["X-Signature-256"]
         assert header.startswith("sha256=")
         material = (
@@ -731,3 +737,171 @@ class TestEvaluateAlertsIntegration:
         ) as create_task:
             cp.evaluate_alerts("t1", dispatch=dispatcher)
             assert create_task.call_count >= 1
+
+
+# --------------------------------------------------------------------------
+# Regression — cooldown dedup must be race-condition safe (BLOCKER-3)
+# --------------------------------------------------------------------------
+
+
+class TestCooldownRaceSafety:
+    """Two concurrent dispatch() calls for the SAME rule inside the cooldown
+    window must result in exactly ONE adapter call.
+
+    Regression for BLOCKER-3: the check-then-set on ``_last_fired`` was not
+    atomic, so ``asyncio.gather`` of two dispatches both passed the cooldown
+    check and both fired. Reachable in production because ``evaluate_alerts``
+    fires dispatch via fire-and-forget background tasks.
+    """
+
+    @pytest.mark.asyncio
+    async def test_concurrent_dispatches_fire_once(self) -> None:
+        """Two concurrent dispatches of the same rule must dedup to ONE
+        adapter call even when the adapter yields (real network I/O)."""
+        calls = 0
+
+        class SuspendingAdapter:
+            async def dispatch(self, event) -> bool:
+                nonlocal calls
+                calls += 1
+                await asyncio.sleep(0)  # yield — lets the sibling interleave
+                return True
+
+        dispatcher = AlertDispatcher(
+            adapters={"webhook": SuspendingAdapter()},
+            cooldown_seconds=300,
+            clock=mock.Mock(return_value=1000.0),
+        )
+        results = await asyncio.gather(
+            dispatcher.dispatch(make_event()),
+            dispatcher.dispatch(make_event()),
+        )
+        assert results == [True, False]
+        assert calls == 1, (
+            "concurrent dispatches of the same rule must dedup to one "
+            f"adapter call, got {calls}"
+        )
+
+    @pytest.mark.asyncio
+    async def test_concurrent_dispatches_different_rules_both_fire(self) -> None:
+        """The lock must not block different rules: two different rules
+        dispatched concurrently both fire."""
+        calls = 0
+
+        class SuspendingAdapter:
+            async def dispatch(self, event) -> bool:
+                nonlocal calls
+                calls += 1
+                await asyncio.sleep(0)
+                return True
+
+        dispatcher = AlertDispatcher(
+            adapters={"webhook": SuspendingAdapter()},
+            cooldown_seconds=300,
+            clock=mock.Mock(return_value=1000.0),
+        )
+        results = await asyncio.gather(
+            dispatcher.dispatch(make_event(alert_rule_id="rule-a")),
+            dispatcher.dispatch(make_event(alert_rule_id="rule-b")),
+        )
+        assert results == [True, True]
+        assert calls == 2
+
+
+# --------------------------------------------------------------------------
+# Regression — wire body must be the envelope JSON object (BLOCKER-4)
+# --------------------------------------------------------------------------
+
+
+class TestWebhookWireBody:
+    """The transmitted body must be the envelope JSON OBJECT, and the
+    X-Signature-256 header must verify against the transmitted envelope.
+
+    Regression for BLOCKER-4: json.dumps() was passed to ``json=``, so the
+    wire body was a JSON string literal wrapping the envelope (double
+    encoding) and the signature header no longer signed the transmitted
+    bytes. Verified through a REAL httpx client with a capture transport.
+    """
+
+    @pytest.mark.asyncio
+    async def test_real_httpx_client_wire_body_is_envelope_object(self) -> None:
+        import httpx
+
+        captured = {}
+
+        class CaptureTransport(httpx.AsyncBaseTransport):
+            async def handle_async_request(
+                self, request: httpx.Request
+            ) -> httpx.Response:
+                captured["body"] = request.content
+                captured["headers"] = dict(request.headers)
+                return httpx.Response(200, json={"ok": True})
+
+        secret = "s3cret"
+        event = make_event()
+        dispatcher = WebhookDispatcher(
+            url="https://hooks.example.com/alert",
+            secret=secret,
+            client=httpx.AsyncClient(transport=CaptureTransport()),
+            clock=lambda: 1000,
+        )
+        ok = await dispatcher.dispatch(event)
+        assert ok is True
+
+        body = json.loads(captured["body"].decode("utf-8"))
+        assert isinstance(body, dict), (
+            "wire body must parse as a JSON object (not a string literal "
+            "wrapping the envelope)"
+        )
+        assert body["event"] == "budget.alert"
+        assert body["payload"]["alert_rule_id"] == "rule-1"
+
+        # The signature header must verify against the transmitted envelope.
+        # (httpx normalizes header names to lowercase on the wire.)
+        header = captured["headers"].get(
+            "X-Signature-256", captured["headers"].get("x-signature-256", "")
+        )
+        assert header, "X-Signature-256 header missing from captured request"
+        assert header == SignedWebhook.build(
+            secret, body["event"], body["payload"], body["timestamp"]
+        )["signature"]
+        assert SignedWebhook.verify(secret, body) is True
+
+    @pytest.mark.asyncio
+    async def test_signature_verifies_against_serialized_wire_body(self) -> None:
+        """HMAC must sign the transmitted bytes: rebuilding the envelope from
+        the wire body and verifying must match the sent header."""
+        import httpx
+
+        captured = {}
+
+        class CaptureTransport(httpx.AsyncBaseTransport):
+            async def handle_async_request(
+                self, request: httpx.Request
+            ) -> httpx.Response:
+                captured["body"] = request.content
+                captured["headers"] = dict(request.headers)
+                return httpx.Response(200, json={"ok": True})
+
+        secret = "s3cret"
+        dispatcher = WebhookDispatcher(
+            url="https://hooks.example.com/alert",
+            secret=secret,
+            client=httpx.AsyncClient(transport=CaptureTransport()),
+            clock=lambda: 1000,
+        )
+        await dispatcher.dispatch(make_event(current_spend=42.0))
+
+        wire = json.loads(captured["body"].decode("utf-8"))
+        assert isinstance(wire, dict)
+        expected = SignedWebhook.build(
+            secret,
+            wire["event"],
+            wire["payload"],
+            wire["timestamp"],
+        )["signature"]
+        header = captured["headers"].get(
+            "X-Signature-256", captured["headers"].get("x-signature-256", "")
+        )
+        assert header, "X-Signature-256 header missing from captured request"
+        assert header == expected

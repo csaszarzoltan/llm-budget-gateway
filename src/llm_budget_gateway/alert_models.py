@@ -36,7 +36,10 @@ class AlertRule(BaseModel):
     threshold: float = Field(ge=0.0, le=1.0)
     channel: AlertChannel
     config: dict = Field(default_factory=dict)
-    cooldown_seconds: int = 300
+    # ge=0: a negative cooldown would silently disable dedup in the
+    # dispatch engine (``if cooldown_seconds > 0``). 0 is valid and
+    # documents "dedup disabled".
+    cooldown_seconds: int = Field(default=300, ge=0)
     enabled: bool = True
     state: str = "ready"
 

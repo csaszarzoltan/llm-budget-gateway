@@ -39,8 +39,17 @@ _CHANNEL_REQUIRED_FIELDS: dict[str, list[str]] = {
 
 
 def _init_db(db_path: str) -> sqlite3.Connection:
-    """Open (or create) the SQLite DB and ensure schema exists."""
-    conn = sqlite3.connect(db_path, check_same_thread=False)
+    """Open (or create) the SQLite DB and ensure schema exists.
+
+    Uses ``isolation_level=None`` (autocommit mode) matching the repo's
+    ControlPlane convention: every write is durable immediately, so a
+    fresh connection / process restart sees committed rows. Without it,
+    INSERTs stay in an uncommitted transaction invisible to other
+    connections (BLOCKER-1).
+    """
+    conn = sqlite3.connect(
+        db_path, check_same_thread=False, isolation_level=None
+    )
     conn.row_factory = sqlite3.Row
     conn.execute("PRAGMA journal_mode=WAL")
     conn.executescript("""

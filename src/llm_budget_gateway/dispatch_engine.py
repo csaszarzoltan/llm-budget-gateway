@@ -17,7 +17,6 @@ raise on transient failures (return ``False`` instead).
 from __future__ import annotations
 
 import asyncio
-import json
 import logging
 import smtplib
 import time
@@ -83,7 +82,12 @@ class WebhookDispatcher(ChannelAdapter):
         try:
             resp = await self.client.post(
                 self.url,
-                json=json.dumps(envelope) if isinstance(envelope, dict) else envelope,
+                # Pass the envelope dict directly so httpx serializes the
+                # JSON OBJECT on the wire. json.dumps() here would send a
+                # JSON string literal wrapping the envelope (double
+                # encoding) and the signature header would no longer sign
+                # the transmitted bytes (BLOCKER-4).
+                json=envelope,
                 headers={"X-Signature-256": envelope["signature"]},
             )
             return not resp.is_error if hasattr(resp, 'is_error') else resp.status_code < 400
@@ -265,6 +269,10 @@ class AlertDispatcher:
         self.cooldown_seconds = cooldown_seconds
         self.clock = clock or time.time
         self._last_fired: dict[str, float] = {}
+        # Guards the cooldown check-then-set on ``_last_fired`` so two
+        # concurrent dispatch() calls for the same rule cannot both pass
+        # the cooldown check (BLOCKER-3).
+        self._cooldown_lock = asyncio.Lock()
         self.log_fn = log_fn
 
     def _log_attempt(
@@ -320,68 +328,75 @@ class AlertDispatcher:
             log.warning("alert %s: no adapter for channel %r", event.alert_rule_id, channel)
             return False
 
-        # Cooldown dedup — consume clock at start for the cooldown check.
-        now = self.clock()
         rule_key = getattr(event, 'alert_rule_id', '') or ''
-        if self.cooldown_seconds > 0:
-            last = self._last_fired.get(rule_key, 0.0)
-            if (now - last) < self.cooldown_seconds:
-                log.info(
-                    "alert %s suppressed by cooldown (last fired %s)",
-                    rule_key,
-                    last,
-                )
-                return False
 
-        # Initial attempt.
-        ok = await adapter.dispatch(event)
-        if ok:
-            # Update last_fired timestamp on success.
+        # Cooldown dedup — the check AND the timestamp update must be one
+        # atomic unit across concurrent dispatch() calls for the same rule
+        # key, otherwise two overlapping evaluations both pass the check and
+        # both fire (BLOCKER-3).  The lock is held only around the
+        # check + success-timestamp bookkeeping, never around the adapter
+        # call itself.
+        async with self._cooldown_lock:
+            now = self.clock()
             if self.cooldown_seconds > 0:
-                # First dispatch for this rule: consume an extra clock tick
-                # so the next call's cooldown check sees a fresh timestamp.
-                if rule_key not in self._last_fired:
-                    self._last_fired[rule_key] = self.clock()
-                else:
-                    self._last_fired[rule_key] = now
-            self._log_attempt(event, "delivered", 200, None, dispatched_at=now)
-            return True
+                last = self._last_fired.get(rule_key, 0.0)
+                if (now - last) < self.cooldown_seconds:
+                    log.info(
+                        "alert %s suppressed by cooldown (last fired %s)",
+                        rule_key,
+                        last,
+                    )
+                    return False
 
-        # Retry with exponential backoff.
-        # Total retry iterations: at least 1 (so retries=1 gives initial+1=2 total).
-        retry_count = max(self.retries - 1, 1) if self.retries >= 1 else 0
-        for attempt in range(retry_count):
-            delay = self.backoff_base * (2 ** attempt)
-            log.info(
-                "alert %s attempt %d failed; retrying in %ss",
-                rule_key,
-                attempt + 1,
-                delay,
-            )
-            await asyncio.sleep(delay)
+            # Initial attempt.
             ok = await adapter.dispatch(event)
             if ok:
+                # Update last_fired timestamp on success.
                 if self.cooldown_seconds > 0:
+                    # First dispatch for this rule: consume an extra clock tick
+                    # so the next call's cooldown check sees a fresh timestamp.
                     if rule_key not in self._last_fired:
                         self._last_fired[rule_key] = self.clock()
                     else:
                         self._last_fired[rule_key] = now
                 self._log_attempt(event, "delivered", 200, None, dispatched_at=now)
                 return True
+
+            # Retry with exponential backoff.
+            # Total retry iterations: at least 1 (so retries=1 gives initial+1=2 total).
+            retry_count = max(self.retries - 1, 1) if self.retries >= 1 else 0
+            for attempt in range(retry_count):
+                delay = self.backoff_base * (2 ** attempt)
+                log.info(
+                    "alert %s attempt %d failed; retrying in %ss",
+                    rule_key,
+                    attempt + 1,
+                    delay,
+                )
+                await asyncio.sleep(delay)
+                ok = await adapter.dispatch(event)
+                if ok:
+                    if self.cooldown_seconds > 0:
+                        if rule_key not in self._last_fired:
+                            self._last_fired[rule_key] = self.clock()
+                        else:
+                            self._last_fired[rule_key] = now
+                    self._log_attempt(event, "delivered", 200, None, dispatched_at=now)
+                    return True
+                self._log_attempt(
+                    event,
+                    "failed",
+                    None,
+                    f"attempt {attempt + 2} failed",
+                    dispatched_at=now,
+                )
+
+            log.error("alert %s permanently failed after %d attempts", rule_key, retry_count + 1)
             self._log_attempt(
                 event,
-                "failed",
+                "pending",
                 None,
-                f"attempt {attempt + 2} failed",
+                "retries exhausted",
                 dispatched_at=now,
             )
-
-        log.error("alert %s permanently failed after %d attempts", rule_key, retry_count + 1)
-        self._log_attempt(
-            event,
-            "pending",
-            None,
-            "retries exhausted",
-            dispatched_at=now,
-        )
-        return False
+            return False

@@ -24,6 +24,8 @@ convention — see ``control_api``, ``security_api``, ``evaluation_api``):
 
 from __future__ import annotations
 
+import sqlite3
+
 import httpx
 import pytest
 from fastapi import FastAPI
@@ -489,3 +491,125 @@ class TestAlertHistoryApi:
             body = resp.json()
             total = body.get("total", 0)
             assert isinstance(total, int)
+
+
+# ============================================================
+# Regression — persistence across fresh connections (BLOCKER-1)
+# ============================================================
+
+
+class TestPersistenceAcrossConnections:
+    """Writes must be durable: a FRESH sqlite3 connection on the same DB
+    file must observe create_rule / record_dispatch / delete_rule effects.
+
+    Regression for BLOCKER-1: the app previously never committed, so every
+    INSERT lived in an uncommitted transaction visible only to the app's own
+    connection. A process restart / pooled second worker lost every rule and
+    every history entry.
+    """
+
+    @pytest.mark.asyncio
+    async def test_created_rule_is_visible_to_fresh_connection(self, tmp_path):
+        from llm_budget_gateway.alert_api import create_alerts_app
+
+        db_path = str(tmp_path / "alerts.db")
+        app = create_alerts_app(db_path)
+        transport = httpx.ASGITransport(app=app)
+        async with httpx.AsyncClient(
+            transport=transport, base_url="http://test"
+        ) as client:
+            resp = await client.post("/api/alerts", json=_webhook_payload())
+            assert resp.status_code == 201
+            rule_id = resp.json()["id"]
+
+        # A fresh connection == new process / second worker.
+        conn = sqlite3.connect(db_path)
+        try:
+            row = conn.execute(
+                "SELECT id, name FROM alert_rules WHERE id = ?", (rule_id,)
+            ).fetchone()
+        finally:
+            conn.close()
+        assert row is not None, "rule must survive a fresh connection (B1)"
+        assert row[1] == "Team Budget Warning"
+
+    @pytest.mark.asyncio
+    async def test_dispatch_log_is_visible_to_fresh_connection(self, tmp_path):
+        from llm_budget_gateway.alert_api import create_alerts_app
+        from llm_budget_gateway.alert_models import AlertDispatchLog
+
+        db_path = str(tmp_path / "alerts.db")
+        app = create_alerts_app(db_path)
+        app.state.record_dispatch(
+            AlertDispatchLog(
+                alert_rule_id="rule-1",
+                channel="webhook",
+                delivery_status="delivered",
+                response_code=200,
+                dispatched_at=1000.0,
+            )
+        )
+
+        conn = sqlite3.connect(db_path)
+        try:
+            count = conn.execute(
+                "SELECT count(*) FROM alert_dispatch_log"
+            ).fetchone()[0]
+        finally:
+            conn.close()
+        assert count == 1, "dispatch log must survive a fresh connection (B1)"
+
+    @pytest.mark.asyncio
+    async def test_deleted_rule_is_gone_for_fresh_connection(self, tmp_path):
+        from llm_budget_gateway.alert_api import create_alerts_app
+
+        db_path = str(tmp_path / "alerts.db")
+        app = create_alerts_app(db_path)
+        transport = httpx.ASGITransport(app=app)
+        async with httpx.AsyncClient(
+            transport=transport, base_url="http://test"
+        ) as client:
+            create_resp = await client.post(
+                "/api/alerts", json=_webhook_payload()
+            )
+            rule_id = create_resp.json()["id"]
+            del_resp = await client.delete(f"/api/alerts/{rule_id}")
+            assert del_resp.status_code == 204
+
+        conn = sqlite3.connect(db_path)
+        try:
+            row = conn.execute(
+                "SELECT id FROM alert_rules WHERE id = ?", (rule_id,)
+            ).fetchone()
+        finally:
+            conn.close()
+        assert row is None, "delete must survive a fresh connection (B1)"
+
+
+# ============================================================
+# Regression — cooldown validation (BLOCKER-2)
+# ============================================================
+
+
+class TestCooldownValidation:
+    """cooldown_seconds must be a non-negative integer (0 = dedup disabled)."""
+
+    @pytest.mark.asyncio
+    async def test_negative_cooldown_returns_422(self, tmp_path):
+        async with await _get_client(tmp_path) as client:
+            resp = await client.post(
+                "/api/alerts", json=_webhook_payload(cooldown_seconds=-5)
+            )
+            assert resp.status_code == 422, (
+                f"negative cooldown must be rejected with 422, got "
+                f"{resp.status_code}: {resp.text}"
+            )
+
+    @pytest.mark.asyncio
+    async def test_zero_cooldown_accepted(self, tmp_path):
+        """ge=0 semantics: 0 is valid and means dedup disabled."""
+        async with await _get_client(tmp_path) as client:
+            resp = await client.post(
+                "/api/alerts", json=_webhook_payload(cooldown_seconds=0)
+            )
+            assert resp.status_code == 201, resp.text
