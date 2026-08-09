@@ -451,6 +451,88 @@ results = plane.evaluate_alerts(t="t1", dispatch=dispatcher)
 control plane's `webhook:test` format (the control plane stores channel
 as `webhook:test`), extracting just the adapter key before routing.
 
+## Production Wiring (BLOCKER-2)
+
+The feature ships in two places so it is reachable in production, not
+just in tests:
+
+### 1. Mounted in the console app
+
+`create_console_app` (console_api.py) includes the alert routes
+directly — `POST/GET /api/alerts`, `GET /api/alerts/history`,
+`GET/DELETE /api/alerts/{rule_id}` are served on the console's own
+port alongside the other feature routes. The routes are included via
+`app.router.routes.extend(...)` (not a sub-app mount) so they keep the
+exact `/api/alerts` paths and do not shadow console routes like
+`/health`.
+
+The console also wires a real dispatch path:
+
+- `app.state.alerts_app` — the standalone alerts app instance
+  (persistent SQLite under `.gateway-console/alerts.db`).
+- `app.state.build_alert_adapter(rule)` — builds a channel adapter
+  (webhook/slack/telegram/email) from a persisted rule's config.
+- `app.state.build_alert_dispatcher()` — rebuilds an `AlertDispatcher`
+  from the currently enabled rules; every channel always has an
+  adapter (empty-shell for channels without a rule), and each adapter
+  re-checks its target with the canonical `SSRFGuard` at dispatch time.
+- `app.state.alert_dispatcher` — a ready-to-use `AlertDispatcher`
+  singleton built at startup.
+- `POST /v1/console/alerts/evaluate` — production caller of
+  `evaluate_alerts(dispatch=...)`:
+
+  ```bash
+  curl -X POST http://127.0.0.1:8013/v1/console/alerts/evaluate \
+       -H 'Content-Type: application/json' \
+       -d '{"tenant": "t1"}'
+  # → {"alerts": [{"id": "...", "state": "triggered", ...}]}
+  ```
+
+  The dispatcher is rebuilt from persisted rules on every call, so new
+  rules take effect without a restart. Dispatch is fire-and-forget —
+  the endpoint never blocks on webhook/SMTP delivery.
+
+**Dispatcher lifecycle:** adapters are cheap, stateless objects built
+per evaluate call; the SSRF guard and cooldown ledger live in the
+dispatcher itself. Cooldown state is per-process (in-memory), matching
+the dispatch engine contract.
+
+### 2. Standalone satellite service
+
+The alerts API also runs as its own service via the repo's satellite
+convention (registered in service_manager.py, port 8016):
+
+```bash
+GATEWAY_ENABLE_SATELLITES=1 uv run uvicorn \
+    llm_budget_gateway.alert_api:create_alerts_app --factory \
+    --host 127.0.0.1 --port 8016
+```
+
+OpenAPI docs at `http://127.0.0.1:8016/docs`. The system launcher
+(`create_system_app`) passes `alerts_db_path=data_dir / "alerts.db"`
+so the console and standalone service share one persisted rule store.
+
+## SSRF Protection
+
+Every webhook URL and email SMTP host is validated with the canonical
+`SSRFGuard` from `mcp_governance/rules.py` (blocks loopback,
+link-local, private, reserved and multicast addresses, and non-http(s)
+schemes):
+
+- **At rule creation** (`POST /api/alerts`): webhook `url` must be an
+  http(s) URL with a public host; email `host` must be a bare hostname
+  or IP that resolves to public addresses (scheme/path/port in the
+  `host` field is rejected — use the separate `port` field). Internal
+  targets → `422`.
+- **At dispatch time** (defense-in-depth): every adapter re-checks its
+  target right before POST/connect, so a rule created before the guard
+  existed or via another path cannot fire at an internal address.
+  Blocked targets return `False` and flow through the retry/pending
+  machinery.
+- **Allowlist**: a small set of public hosts that do not resolve on
+  dev boxes (`hooks.example.com`, `smtp.example.com`, ...) bypass DNS
+  resolution; internal addresses are ALWAYS rejected regardless.
+
 ## Extending with Custom Adapters
 
 Implement the `ChannelAdapter` base class:

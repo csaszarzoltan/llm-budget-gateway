@@ -809,8 +809,179 @@ class TestCooldownRaceSafety:
 
 
 # --------------------------------------------------------------------------
-# Regression — wire body must be the envelope JSON object (BLOCKER-4)
+# Regression — dispatch-time SSRF defense-in-depth (BLOCKER-1) and
+# get_event_loop removal (MINOR-3)
 # --------------------------------------------------------------------------
+
+
+class TestDispatchTimeSsrfGuard:
+    """Adapters must re-check the target right before POST/connect.
+
+    Defense-in-depth for BLOCKER-1: a rule created before the guard
+    existed, or via a path that bypasses API validation, must never be
+    able to fire at an internal address. When the guard blocks, the
+    adapter returns False WITHOUT any network I/O (guard is mocked so
+    the test cannot touch the network).
+    """
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize(
+        "bad_url",
+        [
+            "http://169.254.169.254/latest/meta-data/",
+            "http://127.0.0.1:8000/x",
+            "http://10.0.0.5/x",
+            "http://localhost:6379/",
+            "file:///etc/passwd",
+            "ftp://x",
+        ],
+    )
+    async def test_webhook_blocked_url_returns_false_without_io(self, bad_url):
+        client = mock.Mock()
+        client.post = mock.AsyncMock(return_value=mock.Mock(status_code=200))
+        dispatcher = WebhookDispatcher(
+            url=bad_url, secret="s3cret", client=client
+        )
+        with mock.patch(
+            "llm_budget_gateway.dispatch_engine.SSRFGuard.acheck",
+            new=mock.AsyncMock(
+                return_value=mock.Mock(
+                    allowed=False,
+                    rule="ssrf_guard",
+                    reason="ssrf: blocked",
+                    detail=bad_url,
+                )
+            ),
+        ) as guard:
+            ok = await dispatcher.dispatch(make_event())
+        assert ok is False
+        guard.assert_awaited_once()
+        client.post.assert_not_awaited(), "blocked URL must never reach the client"
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize(
+        "bad_host",
+        ["127.0.0.1", "169.254.169.254", "10.0.0.5", "localhost"],
+    )
+    async def test_email_blocked_host_returns_false_without_io(self, bad_host):
+        dispatcher = EmailDispatcher(
+            host=bad_host,
+            port=587,
+            username="user",
+            password="pass",
+            to_address="ops@example.com",
+        )
+        with mock.patch(
+            "llm_budget_gateway.dispatch_engine.SSRFGuard.acheck",
+            new=mock.AsyncMock(
+                return_value=mock.Mock(
+                    allowed=False,
+                    rule="ssrf_guard",
+                    reason="ssrf: blocked",
+                    detail=bad_host,
+                )
+            ),
+        ) as guard:
+            with mock.patch(
+                "llm_budget_gateway.dispatch_engine.smtplib.SMTP"
+            ) as smtp_cls:
+                ok = await dispatcher.dispatch(make_event())
+        assert ok is False
+        guard.assert_awaited_once()
+        smtp_cls.assert_not_called(), "blocked SMTP host must never be connected"
+
+    @pytest.mark.asyncio
+    async def test_webhook_public_url_still_dispatches(self):
+        client = mock.Mock()
+        client.post = mock.AsyncMock(
+            return_value=mock.Mock(status_code=200, is_error=False)
+        )
+        dispatcher = WebhookDispatcher(
+            url="https://example.com/hook",
+            secret="s3cret",
+            client=client,
+        )
+        with mock.patch(
+            "llm_budget_gateway.dispatch_engine.SSRFGuard.acheck",
+            new=mock.AsyncMock(
+                return_value=mock.Mock(
+                    allowed=True,
+                    rule="ssrf_guard",
+                    reason="urls allowed",
+                    detail="https://example.com/hook",
+                )
+            ),
+        ):
+            ok = await dispatcher.dispatch(make_event())
+        assert ok is True
+        client.post.assert_awaited_once()
+
+    @pytest.mark.asyncio
+    async def test_email_public_host_still_dispatches(self):
+        smtp = mock.Mock()
+        smtp.login = mock.Mock()
+        smtp.send_message = mock.Mock(return_value={})
+        smtp.quit = mock.Mock()
+        dispatcher = EmailDispatcher(
+            host="smtp.gmail.com",
+            port=587,
+            username="user",
+            password="pass",
+            to_address="ops@example.com",
+        )
+        with mock.patch(
+            "llm_budget_gateway.dispatch_engine.SSRFGuard.acheck",
+            new=mock.AsyncMock(
+                return_value=mock.Mock(
+                    allowed=True,
+                    rule="ssrf_guard",
+                    reason="urls allowed",
+                    detail="smtp.gmail.com",
+                )
+            ),
+        ):
+            with mock.patch(
+                "llm_budget_gateway.dispatch_engine.smtplib.SMTP",
+                return_value=smtp,
+            ):
+                ok = await dispatcher.dispatch(make_event())
+        assert ok is True
+        smtp.send_message.assert_called_once()
+
+
+class TestEmailDispatcherEventLoop:
+    """MINOR-3: dispatch must not use the deprecated get_event_loop()."""
+
+    @pytest.mark.asyncio
+    async def test_dispatch_does_not_call_get_event_loop(self):
+        smtp = mock.Mock()
+        smtp.login = mock.Mock()
+        smtp.send_message = mock.Mock(return_value={})
+        smtp.quit = mock.Mock()
+        dispatcher = EmailDispatcher(
+            host="smtp.gmail.com",
+            port=587,
+            username="user",
+            password="pass",
+            to_address="ops@example.com",
+        )
+        with mock.patch(
+            "llm_budget_gateway.dispatch_engine.smtplib.SMTP",
+            return_value=smtp,
+        ):
+            with mock.patch(
+                "llm_budget_gateway.dispatch_engine.asyncio.get_event_loop"
+            ) as get_loop:
+                with mock.patch(
+                    "llm_budget_gateway.dispatch_engine._target_is_safe",
+                    new=mock.AsyncMock(return_value=True),
+                ):
+                    ok = await dispatcher.dispatch(make_event())
+        assert ok is True
+        get_loop.assert_not_called(), (
+            "dispatch must use asyncio.get_running_loop(), not the "
+            "deprecated asyncio.get_event_loop()"
+        )
 
 
 class TestWebhookWireBody:

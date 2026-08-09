@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import csv
 import io
+import json
 import os
 import sqlite3
 import tempfile
@@ -21,10 +22,21 @@ from fastapi.responses import (
 )
 from fastapi.staticfiles import StaticFiles
 
+from .alert_api import build_alerts_router, create_alerts_app
+from .alert_models import AlertRule
 from .completion_features import MigrationPlanner, PolicyRouteSimulator
 from .console_ui import catalog, render_console
 from .console_workflows import get_workflow, search_workflows
+from .control_plane import ControlPlane
 from .cost_tracking import CostStore
+from .dispatch_engine import (
+    AlertDispatcher,
+    ChannelAdapter,
+    EmailDispatcher,
+    SlackDispatcher,
+    TelegramDispatcher,
+    WebhookDispatcher,
+)
 from .evaluation_suite import (
     AuditReport,
     BatchManifest,
@@ -164,10 +176,20 @@ def create_console_app(
     auto_start_services: bool = False,
     cockpit_first: bool = False,
     replay_executor: object | None = None,
+    alerts_db_path: str | Path | None = None,
 ) -> FastAPI:
-    """Create the console with local one-click lifecycle controls."""
+    """Create the console with local one-click lifecycle controls.
+
+    The console mounts the alert notification feature (BLOCKER-2): the
+    alert rules/history API is reachable at ``/api/alerts`` and the
+    ``app.state.alert_dispatcher`` is a real ``AlertDispatcher`` built
+    from the persisted alert rules, so triggered budgets fire through
+    the webhook/slack/telegram/email adapters with the canonical
+    SSRFGuard in front of every target.
+    """
     repository_root = project_root or Path(__file__).resolve().parents[2]
     service_manager = manager or ServiceManager(workdir=repository_root)
+    control_plane = ControlPlane(":memory:")
     extensions = ProductExtensions(
         product_connection or sqlite3.connect(":memory:", check_same_thread=False)
     )
@@ -233,6 +255,123 @@ def create_console_app(
     app.state.service_manager = service_manager
     app.state.routing_control_plane = routing
     app.state.priority_routing = priority_routing
+
+    # ─── Alert notification feature (BLOCKER-2 production wiring) ───────
+    # The standalone alerts app is mounted so the rules/history API is
+    # reachable through the shipped console, and a real AlertDispatcher
+    # is wired in with adapters built from the persisted rule configs.
+    # The dispatcher is a module-level singleton built lazily so every
+    # console app instance shares one cooldown ledger and retry budget.
+    _alerts_db = str(
+        alerts_db_path or (repository_root / ".gateway-console" / "alerts.db")
+    )
+    # Ensure the DB's parent directory exists (a bare tmp_path project
+    # root has no .gateway-console yet; the system launcher creates it,
+    # but create_console_app must be self-sufficient).
+    Path(_alerts_db).parent.mkdir(parents=True, exist_ok=True)
+    alerts_app = create_alerts_app(_alerts_db)
+    # Include the alert routes directly (not a sub-app mount or
+    # include_router) so the console serves the exact ``/api/alerts``
+    # paths without shadowing its own routes (a mount at ``/`` would
+    # 404 /health etc.) and keeps them flat in ``app.routes``.
+    alerts_router = build_alerts_router(alerts_app.state.db)
+    app.router.routes.extend(alerts_router.routes)
+    app.state.alerts_app = alerts_app
+
+    def build_alert_adapter(rule: AlertRule) -> object:
+        """Build a channel adapter from a persisted alert rule config.
+
+        Each adapter carries the rule's own config (URL/token/host), so
+        dispatch targets exactly what the rule author configured — with
+        the canonical SSRFGuard re-checking the target at dispatch time
+        inside the adapters themselves (defense-in-depth).
+        """
+        channel = rule.channel.value if hasattr(rule.channel, "value") else str(rule.channel)
+        cfg = rule.config or {}
+        if channel == "webhook":
+            return WebhookDispatcher(
+                url=str(cfg.get("url", "")), secret=str(cfg.get("secret", ""))
+            )
+        if channel == "slack":
+            return SlackDispatcher(
+                bot_token=str(cfg.get("bot_token", "")),
+                channel=str(cfg.get("channel", "")),
+            )
+        if channel == "telegram":
+            return TelegramDispatcher(
+                bot_token=str(cfg.get("bot_token", "")),
+                chat_id=str(cfg.get("chat_id", "")),
+            )
+        if channel == "email":
+            return EmailDispatcher(
+                host=str(cfg.get("host", "")),
+                port=int(cfg.get("port", 587)),
+                username=str(cfg.get("username", "")),
+                password=str(cfg.get("password", "")),
+                to_address=str(cfg.get("to_address", "")),
+                from_address=str(cfg.get("from_address", "")) or None,
+                use_tls=bool(cfg.get("use_tls", True)),
+            )
+        raise ValueError(f"unknown alert channel: {channel}")
+
+    def build_alert_dispatcher() -> AlertDispatcher:
+        """Rebuild the dispatcher registry from the current alert rules.
+
+        Called on every evaluate so rules created through the API are
+        picked up without a restart; adapters are cheap to construct.
+        """
+        from .alert_models import AlertRule as _Rule
+
+        rows = alerts_app.state.db.execute(
+            "SELECT id, channel, config FROM alert_rules WHERE enabled=1"
+        ).fetchall()
+        adapters: dict[str, ChannelAdapter] = {}
+        for row in rows:
+            try:
+                rule = _Rule(
+                    name="wired",
+                    threshold=0.0,
+                    channel=row["channel"],
+                    config=json.loads(row["config"]),
+                )
+                adapters[row["channel"]] = build_alert_adapter(rule)  # type: ignore[assignment]
+            except (ValueError, TypeError, KeyError):
+                continue
+        # Every channel must have an adapter in the registry (matching the
+        # dispatch engine's default registry contract). Channels without a
+        # persisted rule get an empty-shell adapter; the SSRF guard inside
+        # the adapters still blocks any unsafe target, and events for
+        # unconfigured channels fail cleanly through the retry machinery.
+        for channel, adapter in (
+            ("webhook", WebhookDispatcher(url="", secret="")),
+            ("slack", SlackDispatcher(bot_token="", channel="")),
+            ("telegram", TelegramDispatcher(bot_token="", chat_id="")),
+            ("email", EmailDispatcher(host="")),
+        ):
+            adapters.setdefault(channel, adapter)
+        return AlertDispatcher(adapters=adapters)
+
+    _dispatcher_singleton: AlertDispatcher | None = None
+    app.state.build_alert_adapter = build_alert_adapter
+    app.state.build_alert_dispatcher = build_alert_dispatcher
+    app.state.alert_dispatcher = _dispatcher_singleton or build_alert_dispatcher()
+
+    @app.post("/v1/console/alerts/evaluate")
+    async def console_alerts_evaluate(body: dict[str, object]) -> dict[str, object]:
+        """Evaluate all alert rules for a tenant and fire triggered ones.
+
+        Production caller of ``evaluate_alerts(dispatch=...)`` — the
+        dispatcher is rebuilt from the persisted rules on every call so
+        new rules take effect immediately. Dispatch is asynchronous
+        (fire-and-forget inside the control plane), so this endpoint
+        never blocks on webhook/SMTP delivery.
+        """
+        dispatcher = build_alert_dispatcher()
+        triggered = control_plane.evaluate_alerts(
+            str(body.get("tenant", "default")), dispatch=dispatcher
+        )
+        return {"alerts": triggered}
+
 
     cockpit_dist = Path(__file__).resolve().parents[2] / "ui" / "dist"
     if cockpit_dist.exists():

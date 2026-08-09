@@ -137,6 +137,13 @@ SERVICES = (
     ServiceDefinition(
         "scale", "Scale", "llm_budget_gateway.scale_api:create_scale_app", 8015, "/docs"
     ),
+    ServiceDefinition(
+        "alerts",
+        "Budget Alerts",
+        "llm_budget_gateway.alert_api:create_alerts_app",
+        8016,
+        "/docs",
+    ),
 )
 
 

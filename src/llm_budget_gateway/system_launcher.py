@@ -66,6 +66,7 @@ def create_system_app(
             root / "gateway.db", check_same_thread=False
         ),
         credential_key_path=data_dir / "provider-master.key",
+        alerts_db_path=data_dir / "alerts.db",
         auto_start_services=True,
         cockpit_first=True,
     )

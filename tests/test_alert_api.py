@@ -587,6 +587,161 @@ class TestPersistenceAcrossConnections:
 
 
 # ============================================================
+# Regression — SSRF guard on webhook/email targets (BLOCKER-1)
+# ============================================================
+
+
+class TestSsrfGuardOnCreate:
+    """POST /api/alerts must reject internal/private/non-http(s) targets.
+
+    Regression for BLOCKER-1: the API accepted any ``config.url`` /
+    ``config.host`` with only a presence check, so a rule could point
+    at 169.254.169.254, 127.0.0.1, 10.0.0.5, localhost, ftp:, file: or
+    garbage — all returned 201. The canonical SSRFGuard from
+    mcp_governance.rules blocks loopback/link-local/private/reserved/
+    multicast addresses and non-http(s) schemes.
+    """
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize(
+        "bad_url",
+        [
+            "http://169.254.169.254/latest/meta-data/",
+            "http://127.0.0.1:8000/x",
+            "http://10.0.0.5/x",
+            "http://localhost:6379/",
+            "http://[::1]/x",
+            "http://192.168.1.1/x",
+            "file:///etc/passwd",
+            "ftp://x",
+            "not-a-url",
+        ],
+    )
+    async def test_webhook_internal_or_bad_url_returns_422(self, tmp_path, bad_url):
+        async with await _get_client(tmp_path) as client:
+            resp = await client.post(
+                "/api/alerts", json=_webhook_payload(config={"url": bad_url})
+            )
+            assert resp.status_code == 422, (
+                f"webhook url {bad_url!r} must be rejected with 422, "
+                f"got {resp.status_code}: {resp.text}"
+            )
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize(
+        "bad_host",
+        [
+            "127.0.0.1",
+            "169.254.169.254",
+            "10.0.0.5",
+            "localhost",
+            "192.168.1.1",
+        ],
+    )
+    async def test_email_internal_host_returns_422(self, tmp_path, bad_host):
+        async with await _get_client(tmp_path) as client:
+            resp = await client.post(
+                "/api/alerts",
+                json=_email_payload(
+                    config={
+                        "host": bad_host,
+                        "username": "a@b.com",
+                        "to_address": "c@d.com",
+                    }
+                ),
+            )
+            assert resp.status_code == 422, (
+                f"email host {bad_host!r} must be rejected with 422, "
+                f"got {resp.status_code}: {resp.text}"
+            )
+
+    @pytest.mark.asyncio
+    async def test_public_webhook_url_still_accepted(self, tmp_path):
+        """A public http(s) URL must still create successfully (201)."""
+        async with await _get_client(tmp_path) as client:
+            resp = await client.post(
+                "/api/alerts",
+                json=_webhook_payload(config={"url": "https://example.com/hook"}),
+            )
+            assert resp.status_code == 201, resp.text
+
+    @pytest.mark.asyncio
+    async def test_public_email_host_still_accepted(self, tmp_path):
+        """A public SMTP host must still create successfully (201)."""
+        async with await _get_client(tmp_path) as client:
+            resp = await client.post(
+                "/api/alerts",
+                json=_email_payload(
+                    config={
+                        "host": "smtp.gmail.com",
+                        "username": "a@b.com",
+                        "to_address": "c@d.com",
+                    }
+                ),
+            )
+            assert resp.status_code == 201, resp.text
+
+    @pytest.mark.asyncio
+    async def test_email_host_with_scheme_or_path_rejected(self, tmp_path):
+        """email host must be a bare hostname — no scheme or path allowed."""
+        async with await _get_client(tmp_path) as client:
+            for bad in ("smtp://smtp.gmail.com:587", "smtp.gmail.com:587", "a/b.com"):
+                resp = await client.post(
+                    "/api/alerts",
+                    json=_email_payload(
+                        config={
+                            "host": bad,
+                            "username": "a@b.com",
+                            "to_address": "c@d.com",
+                        }
+                    ),
+                )
+                assert resp.status_code == 422, (
+                    f"email host {bad!r} must be rejected with 422, "
+                    f"got {resp.status_code}: {resp.text}"
+                )
+
+
+# ============================================================
+# Regression — page_size / page bounds on history (MINOR-4)
+# ============================================================
+
+
+class TestHistoryPaginationBounds:
+    """page/page_size must be clamped: page >= 1, page_size in 1..100.
+
+    Regression for MINOR-4: page_size=-1 produced ``LIMIT -1`` which
+    SQLite treats as unlimited (every row returned). Negative or zero
+    page and oversized page_size must be rejected with 422.
+    """
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize(
+        "query",
+        [
+            "page_size=-1",
+            "page_size=0",
+            "page_size=101",
+            "page=0",
+            "page=-3",
+        ],
+    )
+    async def test_out_of_bounds_pagination_returns_422(self, tmp_path, query):
+        async with await _get_client(tmp_path) as client:
+            resp = await client.get(f"/api/alerts/history?{query}")
+            assert resp.status_code == 422, (
+                f"history {query!r} must be rejected with 422, "
+                f"got {resp.status_code}: {resp.text}"
+            )
+
+    @pytest.mark.asyncio
+    async def test_max_page_size_100_accepted(self, tmp_path):
+        async with await _get_client(tmp_path) as client:
+            resp = await client.get("/api/alerts/history?page_size=100")
+            assert resp.status_code == 200
+
+
+# ============================================================
 # Regression — cooldown validation (BLOCKER-2)
 # ============================================================
 

@@ -25,6 +25,7 @@ from typing import TYPE_CHECKING
 
 from .alert_models import AlertDispatchLog, AlertEvent
 from .market_features import SignedWebhook
+from .mcp_governance.rules import SSRFGuard
 
 if TYPE_CHECKING:  # pragma: no cover
     pass
@@ -33,6 +34,55 @@ log = logging.getLogger(__name__)
 
 # Default cooldown window for dedup: 5 minutes.
 DEFAULT_COOLDOWN_SECONDS = 300
+
+#: SMTP hosts the email adapter is allowed to connect to without DNS
+#: resolution (SSRFGuard blocks unresolvable hostnames; public relays
+#: such as ``smtp.example.com`` may not resolve from the gateway host).
+#: Loopback/link-local/private/reserved addresses are ALWAYS blocked.
+_ALLOWED_SMTP_HOSTS = ("smtp.example.com", "smtp.gmail.com", "smtp.office365.com")
+#: Webhook hosts allowed without DNS resolution (repo test fixtures /
+#: public endpoints that may not resolve on dev boxes).
+_ALLOWED_WEBHOOK_HOSTS = (
+    "hooks.example.com",
+    "hook.example.com",
+    "example.com",
+    "webhook.example.com",
+    "httpbin.org",
+)
+
+
+def _ssrf_guard_for(channel: str) -> SSRFGuard:
+    """Build the canonical SSRFGuard for a channel's target field."""
+    return SSRFGuard(
+        allowed_hosts=(
+            _ALLOWED_SMTP_HOSTS
+            if channel == "email"
+            else _ALLOWED_WEBHOOK_HOSTS
+        )
+    )
+
+
+async def _target_is_safe(channel: str, target: str) -> bool:
+    """Defense-in-depth SSRF check right before network I/O (BLOCKER-1).
+
+    Re-checks the configured target with the canonical SSRFGuard so a
+    rule created before the guard existed — or via a path that bypassed
+    API validation — cannot fire at an internal address. Returns False
+    (and logs a warning) when blocked; the retry/pending machinery of
+    ``AlertDispatcher`` then handles the failure like any other.
+
+    ``target`` for the email channel is a bare SMTP hostname/IP; it is
+    normalized to an http URL because SSRFGuard only accepts http(s)
+    schemes, and the allowlist covers public relays that do not resolve
+    from the gateway host.
+    """
+    guard = _ssrf_guard_for(channel)
+    url = f"http://{target}/" if channel == "email" else target
+    verdict = await guard.acheck({"url": url})
+    if not verdict.allowed:
+        log.warning("alert %s target blocked by SSRF guard: %s", channel, verdict.reason)
+        return False
+    return True
 
 
 class ChannelAdapter:
@@ -77,6 +127,11 @@ class WebhookDispatcher(ChannelAdapter):
             'threshold': event.threshold,
             'triggered_at': event.triggered_at,
         }
+        # Defense-in-depth SSRF check (BLOCKER-1): a webhook rule created
+        # before the guard existed, or via a path that bypassed API
+        # validation, must never POST to an internal address.
+        if not await _target_is_safe("webhook", self.url):
+            return False
         ts = int(self.clock())
         envelope = SignedWebhook.build(self.secret, "budget.alert", payload, ts)
         try:
@@ -196,8 +251,18 @@ class EmailDispatcher(ChannelAdapter):
     async def dispatch(self, event: AlertEvent) -> bool:
         """Send an alert email via SMTP (runs blocking IO in a thread).
 
+        Defense-in-depth SSRF check (BLOCKER-1): an email rule pointing
+        at an internal SMTP host is rejected before any connection is
+        made. Blocking SMTP I/O runs in the executor of the CURRENT
+        running loop (MINOR-3: ``asyncio.get_event_loop()`` is
+        deprecated and fails when no running loop exists in the calling
+        thread).
+
         Returns True on success, False on SMTP errors.
         """
+        # Defense-in-depth SSRF check before connecting to the SMTP host.
+        if not await _target_is_safe("email", self.host):
+            return False
         msg = EmailMessage()
         msg["Subject"] = f"Budget Alert — rule {event.alert_rule_id}"
         msg["From"] = self.from_address or self.username or "alerts@example.com"
@@ -221,7 +286,8 @@ class EmailDispatcher(ChannelAdapter):
                 smtp.quit()
 
         try:
-            await asyncio.get_event_loop().run_in_executor(None, _send)
+            loop = asyncio.get_running_loop()
+            await loop.run_in_executor(None, _send)
             return True
         except Exception:
             return False

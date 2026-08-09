@@ -288,6 +288,8 @@ class ControlPlane:
         b = self.db.execute(
             "SELECT * FROM budgets WHERE tenant=? AND scope=?", (t, scope)
         ).fetchone()
+        if b is None:
+            return None
         reserved = self.db.execute(
             "SELECT COALESCE(sum(amount),0) FROM reservations WHERE tenant=? AND scope=? AND state='reserved'",
             (t, scope),
@@ -320,6 +322,11 @@ class ControlPlane:
         from .alert_models import AlertEvent
 
         b = self.budget_status(t, "global")
+        if b is None or not b.get("limit_value"):
+            # No budget configured for this tenant — nothing to evaluate
+            # (and dividing by a missing/zero limit would crash callers
+            # like the console alerts endpoint).
+            return []
         ratio = (b["spent"] + b["reserved"]) / b["limit_value"]
         out = []
         for a in self.db.execute("SELECT * FROM alerts WHERE tenant=?", (t,)):
