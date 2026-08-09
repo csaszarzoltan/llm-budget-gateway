@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import csv
 import hashlib
 import io
@@ -16,6 +17,35 @@ from dataclasses import dataclass
 
 class PermissionDenied(Exception):
     pass
+
+
+def _fire_and_forget(coro) -> None:
+    """Schedule ``coro`` on the running event loop without awaiting it.
+
+    The coroutine is started eagerly (up to its first real suspension) so
+    that fast dispatch paths complete immediately, then the remainder runs
+    as a background task.  This keeps ``evaluate_alerts`` non-blocking while
+    guaranteeing the dispatch begins promptly.  Falls back to a plain
+    ``create_task`` on interpreters without an eager task factory.
+
+    Args:
+        coro: The coroutine to run in the background.
+    """
+    try:
+        loop = asyncio.get_running_loop()
+    except RuntimeError:
+        # No running loop — nothing to schedule on.
+        return
+    eager = getattr(asyncio, "eager_task_factory", None)
+    if eager is None:
+        asyncio.create_task(coro)
+        return
+    previous = loop.get_task_factory()
+    loop.set_task_factory(eager)
+    try:
+        asyncio.create_task(coro)
+    finally:
+        loop.set_task_factory(previous)
 
 
 class PolicyDenied(Exception):
@@ -273,7 +303,22 @@ class ControlPlane:
         )
         return aid
 
-    def evaluate_alerts(self, t):
+    def evaluate_alerts(self, t, dispatch=None):
+        """Evaluate all alert rules for a tenant and optionally dispatch triggered ones.
+
+        Args:
+            t: Tenant ID.
+            dispatch: Optional ``AlertDispatcher``. When provided and a rule
+                is triggered, an ``AlertEvent`` is built and dispatched
+                asynchronously via ``asyncio.create_task()`` — never blocks
+                the caller.
+
+        Returns:
+            List of alert dicts with ``state`` (``"triggered"`` or ``"ready"``)
+            and ``ratio`` fields added.
+        """
+        from .alert_models import AlertEvent
+
         b = self.budget_status(t, "global")
         ratio = (b["spent"] + b["reserved"]) / b["limit_value"]
         out = []
@@ -281,6 +326,18 @@ class ControlPlane:
             state = "triggered" if ratio >= a["threshold"] else "ready"
             self.db.execute("UPDATE alerts SET state=? WHERE id=?", (state, a["id"]))
             out.append(dict(a) | {"state": state, "ratio": ratio})
+            if dispatch is not None and state == "triggered":
+                raw_channel = a["channel"]
+                channel = raw_channel.split(":")[0] if ":" in raw_channel else raw_channel
+                event = AlertEvent(
+                    alert_rule_id=a["id"],
+                    channel=channel,
+                    scope="global",
+                    current_spend=b["spent"] + b["reserved"],
+                    threshold=a["threshold"],
+                    triggered_at=self.clock(),
+                )
+                _fire_and_forget(dispatch.dispatch(event))
         return out
 
     def export_spend_csv(self, t, role):
