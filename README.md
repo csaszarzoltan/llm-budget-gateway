@@ -72,6 +72,7 @@ cd ui && npm test && npm run build
 - **Usage:** request, cost, latency, and success summaries
 - **Safety:** Runaway Cost Firewall, Provider Compatibility Lab, and Explain-and-Fix Incident Timeline
 - **Intelligence:** PII redaction, exact-response cache, anomaly detection and cost-aware routing (integrated into the proxy path, opt-in per request)
+- **Alerts:** Budget alert notification dispatch — webhook (HMAC-signed), Slack, Telegram, and email channels with cooldown dedup and retry
 - **Prompts:** immutable versioned prompt registry with deterministic A/B assignment
 - **Quality:** rule-based output evaluation, release gates, batch manifests and audit reports
 - **Advanced:** services, nested traces, governance, security, supply chain, and API access
@@ -104,6 +105,7 @@ restore the legacy standalone services.
 - [Provider connections](docs/provider-connections-13.2.md)
 - [Proxy setup](docs/proxy-setup.md)
 - [Budget configuration](docs/budget-configuration.md)
+- [Alert notifications](docs/alert-notifications.md)
 - [MCP governance](docs/mcp-governance.md)
 - [Market research](research-findings.md)
 - [Changelog](CHANGELOG.md)
