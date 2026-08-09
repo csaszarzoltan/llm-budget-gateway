@@ -1,4 +1,4 @@
-## [Unreleased]
+## [14.2.0] - 2026-08-09
 
 ### Features
 - **Budget alert notification dispatch** — define alert rules via CRUD API, route triggered alerts to webhook (HMAC-SHA256 signed), Slack, Telegram, or email channels with cooldown dedup and exponential-backoff retry; full dispatch history for audit

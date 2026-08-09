@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "llm-budget-gateway"
-version = "14.1.0"
+version = "14.2.0"
 description = "LLM budget gateway: OpenAI-compatible proxy with budget enforcement and automatic model fallback"
 readme = "README.md"
 requires-python = ">=3.11"
