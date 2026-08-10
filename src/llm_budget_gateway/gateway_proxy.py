@@ -1047,6 +1047,7 @@ class GatewayProxy:
                             "body": body_text[:800],
                         }
                     ),
+                    count_strike=not transient,
                 )
             except Exception:
                 logger.exception(

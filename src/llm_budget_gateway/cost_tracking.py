@@ -56,9 +56,17 @@ CREATE TABLE IF NOT EXISTS model_cooldowns (
     model TEXT NOT NULL,
     until_ts INTEGER NOT NULL,
     reason TEXT,
+    strikes INTEGER NOT NULL DEFAULT 0,
     PRIMARY KEY (route, model)
 )
 """
+
+
+#: Default dynamic cooldown ladder (seconds) when no Settings is wired in.
+#: Mirrors Settings.cooldown_ladder so CostStore works standalone (tests).
+_DEFAULT_COOLDOWN_LADDER = [
+    60, 300, 900, 3600, 7200, 14400, 28800, 43200, 64800, 86400,
+]
 
 
 @dataclass
@@ -188,10 +196,22 @@ class CostStore:
     """
 
     def __init__(
-        self, db_path: str | None = None, connection: sqlite3.Connection | None = None
+        self,
+        db_path: str | None = None,
+        connection: sqlite3.Connection | None = None,
+        cooldown_ladder: list[int] | None = None,
+        cooldown_dynamic: bool = True,
     ) -> None:
         self._db_path = db_path or ""
         self._lock = threading.Lock()
+        #: Dynamic cooldown escalation ladder in seconds (1m → … → 1d).
+        #: Overridable per-store; defaults mirror Settings.cooldown_ladder.
+        self.cooldown_ladder: list[int] = list(
+            cooldown_ladder or _DEFAULT_COOLDOWN_LADDER
+        )
+        #: When False, set_model_cooldown applies the fixed ``seconds``
+        #: (static mode, pre-ladder behaviour); default True = dynamic.
+        self.cooldown_dynamic: bool = cooldown_dynamic
         self._conn = connection or sqlite3.connect(
             db_path or ":memory:", check_same_thread=False
         )
@@ -201,6 +221,7 @@ class CostStore:
             self._conn.execute(_CREATE_TABLE)
             self._conn.execute(_CREATE_COOLDOWN_TABLE)
             self._migrate_legacy_schema()
+            self._migrate_cooldown_schema()
             # Additive migrations for pre-existing databases.
             try:
                 self._conn.execute(
@@ -254,6 +275,24 @@ class CostStore:
                 self._conn.execute(
                     f"ALTER TABLE cost_records ADD COLUMN {column} {definition}"
                 )
+
+    def _migrate_cooldown_schema(self) -> None:
+        """Add the ``strikes`` column to pre-existing model_cooldowns rows.
+
+        Older builds created the table without strikes (dynamic cooldown
+        ladder). ``CREATE TABLE IF NOT EXISTS`` does not alter existing
+        tables, so add the column idempotently; existing rows default to 0.
+        """
+        existing = {
+            row[1]
+            for row in self._conn.execute("PRAGMA table_info(model_cooldowns)")
+        }
+        if "strikes" not in existing:
+            self._conn.execute(
+                "ALTER TABLE model_cooldowns ADD COLUMN strikes "
+                "INTEGER NOT NULL DEFAULT 0"
+            )
+            self._conn.commit()
 
     def insert(self, record: UsageRecord) -> None:
         """Persist one usage record (upsert on request_id)."""
@@ -462,8 +501,23 @@ class CostStore:
         model: str,
         seconds: int = 3600,
         reason: str = "",
+        count_strike: bool = True,
     ) -> None:
-        """Mark ``model`` as unavailable inside ``route`` for ``seconds``.
+        """Mark ``model`` as unavailable inside ``route``.
+
+        Dynamic escalation: each failure increments the strike count and the
+        cooldown duration follows the ladder (1m → 5m → 15m → … → 1d),
+        capped at the ladder max. ``seconds`` acts as a floor for callers
+        that want a minimum (e.g. transient 5xx), but the ladder wins for
+        repeated failures. A successful call (``record_success``) resets
+        strikes to zero so a healthy model starts from the bottom again.
+
+        ``count_strike=False`` parks the model for exactly ``seconds``
+        without escalating (used for transient 5xx blips that should recover
+        fast instead of climbing the ladder).
+
+        If ``self.cooldown_dynamic`` is False, the ladder is ignored and the
+        fixed ``seconds`` is used (static mode, pre-ladder behaviour).
 
         The route-scoped key means one route failing over from a model does
         not penalise another route that relies on the same model. Used by the
@@ -471,12 +525,60 @@ class CostStore:
         fallback chain is not walked again for every request while a model's
         daily quota is exhausted.
         """
-        until = int(time.time()) + max(1, int(seconds))
+        if not self.cooldown_dynamic:
+            until = int(time.time()) + max(1, int(seconds))
+            with self._lock:
+                self._conn.execute(
+                    "INSERT OR REPLACE INTO model_cooldowns "
+                    "(route, model, until_ts, reason, strikes) VALUES (?, ?, ?, ?, ?)",
+                    (route, model, until, reason, 0),
+                )
+                self._conn.commit()
+            return
+
+        ladder = self.cooldown_ladder or _DEFAULT_COOLDOWN_LADDER
         with self._lock:
+            row = self._conn.execute(
+                "SELECT strikes FROM model_cooldowns "
+                "WHERE route = ? AND model = ?",
+                (route, model),
+            ).fetchone()
+            strikes = (
+                (int(row[0]) + 1)
+                if (row and count_strike)
+                else (1 if count_strike else (int(row[0]) if row else 0))
+            )
+            idx = min(strikes - 1, len(ladder) - 1) if strikes else 0
+            duration = max(1, int(seconds), int(ladder[idx]) if strikes else int(seconds))
+            until = int(time.time()) + duration
             self._conn.execute(
                 "INSERT OR REPLACE INTO model_cooldowns "
-                "(route, model, until_ts, reason) VALUES (?, ?, ?, ?)",
-                (route, model, until, reason),
+                "(route, model, until_ts, reason, strikes) VALUES (?, ?, ?, ?, ?)",
+                (route, model, until, reason, strikes),
+            )
+            self._conn.commit()
+
+    def cooldown_strikes(self, route: str, model: str) -> int:
+        """Return the current strike count for (route, model); 0 = none."""
+        with self._lock:
+            row = self._conn.execute(
+                "SELECT strikes FROM model_cooldowns "
+                "WHERE route = ? AND model = ?",
+                (route, model),
+            ).fetchone()
+        return int(row[0]) if row else 0
+
+    def record_success(self, route: str, model: str) -> None:
+        """A successful call resets the cooldown ladder strikes to zero.
+
+        Called by the proxy after a model serves a request with status < 400
+        so a model that recovers starts from the bottom of the ladder again
+        instead of being parked for escalating durations forever.
+        """
+        with self._lock:
+            self._conn.execute(
+                "DELETE FROM model_cooldowns WHERE route = ? AND model = ?",
+                (route, model),
             )
             self._conn.commit()
 
@@ -507,7 +609,7 @@ class CostStore:
         now = int(time.time())
         with self._lock:
             rows = self._conn.execute(
-                "SELECT route, model, until_ts, reason FROM model_cooldowns "
+                "SELECT route, model, until_ts, reason, strikes FROM model_cooldowns "
                 "WHERE until_ts > ? ORDER BY until_ts ASC",
                 (now,),
             ).fetchall()
@@ -518,6 +620,7 @@ class CostStore:
                 "until": int(r[2]),
                 "remaining_seconds": int(r[2]) - now,
                 "reason": r[3],
+                "strikes": int(r[4] or 0),
             }
             for r in rows
         ]
@@ -673,7 +776,7 @@ class CostStore:
                     (route, model),
                 ).fetchone()
                 cd = self._conn.execute(
-                    "SELECT until_ts, reason FROM model_cooldowns "
+                    "SELECT until_ts, reason, strikes FROM model_cooldowns "
                     "WHERE route = ? AND model = ?",
                     (route, model),
                 ).fetchone()
@@ -687,6 +790,7 @@ class CostStore:
                     "cooldown_reason": (
                         cd[1] if cd and int(cd[0]) > now else None
                     ),
+                    "strikes": int(cd[2] or 0) if cd else 0,
                 }
             served = self._conn.execute(
                 "SELECT model, timestamp FROM cost_records "
@@ -817,14 +921,29 @@ class CostTracker:
         return self._store.route_status(route, models)
 
     def set_model_cooldown(
-        self, route: str, model: str, seconds: int = 3600, reason: str = ""
+        self,
+        route: str,
+        model: str,
+        seconds: int = 3600,
+        reason: str = "",
+        count_strike: bool = True,
     ) -> None:
         """Mark ``model`` unavailable inside ``route`` (route-scoped)."""
-        self._store.set_model_cooldown(route, model, seconds, reason)
+        self._store.set_model_cooldown(
+            route, model, seconds, reason, count_strike=count_strike
+        )
 
     def model_in_cooldown(self, route: str, model: str) -> int:
         """Remaining cooldown seconds for (route, model); 0 = live."""
         return self._store.model_in_cooldown(route, model)
+
+    def cooldown_strikes(self, route: str, model: str) -> int:
+        """Current dynamic-ladder strike count for (route, model)."""
+        return self._store.cooldown_strikes(route, model)
+
+    def record_success(self, route: str, model: str) -> None:
+        """Reset the cooldown ladder for a model that served successfully."""
+        self._store.record_success(route, model)
 
     def active_cooldowns(self) -> list[dict[str, object]]:
         """Not-yet-expired cooldowns for the UI."""

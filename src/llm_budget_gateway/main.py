@@ -75,7 +75,11 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         }
     )
     calculator = CostCalculator(price_map)
-    store = CostStore(_sqlite_path(settings.database_url))
+    store = CostStore(
+        _sqlite_path(settings.database_url),
+        cooldown_ladder=settings.cooldown_ladder,
+        cooldown_dynamic=settings.cooldown_dynamic,
+    )
     tracker = CostTracker(store=store, calculator=calculator)
 
     try:

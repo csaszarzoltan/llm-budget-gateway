@@ -201,7 +201,10 @@ class TestCostCalculatorInterface:
 class TestCostStoreInterface:
     def test_init_signature(self) -> None:
         sig = inspect.signature(CostStore.__init__)
-        assert list(sig.parameters) == ["self", "db_path", "connection"]
+        assert list(sig.parameters) == [
+            "self", "db_path", "connection", "cooldown_ladder",
+            "cooldown_dynamic",
+        ]
 
     def test_insert_signature(self) -> None:
         sig = inspect.signature(CostStore.insert)
@@ -221,8 +224,11 @@ class TestCostStoreInterface:
     def test_set_model_cooldown_signature(self) -> None:
         sig = inspect.signature(CostStore.set_model_cooldown)
         params = list(sig.parameters)
-        assert params == ["self", "route", "model", "seconds", "reason"]
+        assert params == [
+            "self", "route", "model", "seconds", "reason", "count_strike",
+        ]
         assert sig.parameters["seconds"].default == 3600
+        assert sig.parameters["count_strike"].default is True
 
     def test_model_in_cooldown_signature(self) -> None:
         sig = inspect.signature(CostStore.model_in_cooldown)
@@ -540,6 +546,51 @@ class TestCostStoreBehavior:
         assert {e["model"] for e in entries} == {"m1", "m2"}
         assert all(e["remaining_seconds"] > 0 for e in entries)
         assert all(e["route"] == "r1" for e in entries)
+        # strikes exposed for the UI
+        assert all("strikes" in e for e in entries)
+
+    def test_cooldown_strikes_escalate_ladder(self, store: CostStore) -> None:
+        """Repeated failures escalate the cooldown via the ladder:
+        1m → 5m → 15m (config ladder overrides the fixed seconds)."""
+        store.set_model_cooldown("r", "m", seconds=0, reason="http_429")
+        first = store.model_in_cooldown("r", "m")
+        assert 1 <= first <= 60, f"first cooldown should be ~1m, got {first}"
+        store.set_model_cooldown("r", "m", seconds=0, reason="http_429")
+        second = store.model_in_cooldown("r", "m")
+        assert second > first, f"second should escalate, got {second} <= {first}"
+        assert second <= 300
+        store.set_model_cooldown("r", "m", seconds=0, reason="http_429")
+        third = store.model_in_cooldown("r", "m")
+        assert third > second
+        assert third <= 900
+
+    def test_cooldown_strikes_reset_on_success(self, store: CostStore) -> None:
+        """A successful call resets strikes back to zero."""
+        store.set_model_cooldown("r", "m", seconds=0, reason="http_429")
+        store.set_model_cooldown("r", "m", seconds=0, reason="http_429")
+        assert store.cooldown_strikes("r", "m") >= 2
+        store.record_success("r", "m")
+        assert store.cooldown_strikes("r", "m") == 0
+        assert store.model_in_cooldown("r", "m") == 0
+
+    def test_cooldown_ladder_caps_at_max(self, store: CostStore) -> None:
+        """Many failures cap at the ladder max (1 day), never beyond."""
+        for _ in range(20):
+            store.set_model_cooldown("r", "m", seconds=0, reason="http_429")
+        remaining = store.model_in_cooldown("r", "m")
+        assert remaining <= 86400
+
+    def test_static_mode_ignores_ladder(self, store: CostStore) -> None:
+        """With cooldown_dynamic=False the fixed seconds win (static mode)."""
+        store.cooldown_dynamic = False
+        store.set_model_cooldown("r", "m", seconds=120, reason="http_429")
+        first = store.model_in_cooldown("r", "m")
+        assert 1 <= first <= 120
+        store.set_model_cooldown("r", "m", seconds=120, reason="http_429")
+        second = store.model_in_cooldown("r", "m")
+        # static mode: same fixed duration, no escalation
+        assert second == first or second <= 120
+        assert store.cooldown_strikes("r", "m") == 0
 
 
 class TestCostTrackerBehavior:
