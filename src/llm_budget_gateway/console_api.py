@@ -1259,9 +1259,10 @@ def create_console_app(
         except KeyError as exc:
             raise HTTPException(404, "unknown route") from exc
         models = [str(t.get("model", "")) for t in route.get("targets", [])]
+        targets = route.get("targets", [])
         return {
             "route": route["name"],
-            "status": cost_store.route_status(route["name"], models),
+            "status": cost_store.route_status(route["name"], models, targets=targets),
         }
 
     @app.delete("/v1/product/routes/{route_id}/cooldowns")

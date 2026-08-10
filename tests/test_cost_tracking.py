@@ -825,3 +825,43 @@ def test_route_status_and_cooldown_reset(store: CostStore) -> None:
     st3 = store.route_status("hermes-default", ["other-model"])
     assert st3["models"]["other-model"]["cooldown_remaining"] == 0
     assert st3["models"]["other-model"]["cooldown_reason"] is None
+
+
+def test_route_status_outside_schedule_not_cooldown(store: CostStore) -> None:
+    """Models outside their timezone window are flagged, not put on cooldown."""
+    from datetime import UTC, datetime
+    from zoneinfo import ZoneInfo
+
+    model = "@xiaomi/mimo-v2.5"
+    # A window that ended an hour ago in the target timezone.
+    now = datetime.now(UTC)
+    tz = ZoneInfo("America/New_York")
+    local = now.astimezone(tz)
+    end_hour = (local.hour - 1) % 24
+    start_hour = (local.hour - 2) % 24
+    targets = [
+        {
+            "model": model,
+            "timezone": "America/New_York",
+            "start": f"{start_hour:02d}:00",
+            "end": f"{end_hour:02d}:00",
+        }
+    ]
+    st = store.route_status("hermes-default", [model], targets=targets)
+    info = st["models"][model]
+    assert info["outside_schedule"] is True
+    assert info["cooldown_remaining"] == 0
+    assert info["cooldown_reason"] == "outside_schedule"
+
+    # A window that includes now → not flagged.
+    targets2 = [
+        {
+            "model": model,
+            "timezone": "America/New_York",
+            "start": f"{(local.hour - 1) % 24:02d}:00",
+            "end": f"{(local.hour + 1) % 24:02d}:00",
+        }
+    ]
+    st2 = store.route_status("hermes-default", [model], targets=targets2)
+    assert st2["models"][model]["outside_schedule"] is False
+    assert st2["models"][model]["cooldown_remaining"] == 0

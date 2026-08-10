@@ -12,7 +12,9 @@ import logging
 import sqlite3
 import threading
 import time
+from datetime import UTC, datetime
 from dataclasses import dataclass
+from zoneinfo import ZoneInfo
 
 from .budget_enforcement import BudgetScope
 from .cost_attribution import CostAttributionStore
@@ -756,7 +758,7 @@ class CostStore:
         }
 
     def route_status(
-        self, route: str, models: list[str]
+        self, route: str, models: list[str], targets: list[dict[str, object]] | None = None,
     ) -> dict[str, object]:
         """Per-target last-call + cooldown status for a route's model list.
 
@@ -764,8 +766,36 @@ class CostStore:
         each model entry carries ``last_called_at`` (epoch), ``last_status``
         and ``cooldown_remaining`` (seconds; 0 = live) plus the cooldown
         reason while active.
+
+        When *targets* is provided (each with ``timezone``, ``start``,
+        ``end``), models that are currently outside their schedule window
+        are reported as ``outside_schedule`` with ``cooldown_remaining: 0``
+        — they are not on cooldown, just not eligible right now.
         """
         now = int(time.time())
+        now_dt = datetime.now(UTC)
+        # Build a set of models that are currently outside their schedule.
+        outside_schedule: set[str] = set()
+        if targets:
+            for t in models:
+                for tgt in targets:
+                    if str(tgt.get("model")) != t:
+                        continue
+                    try:
+                        local = now_dt.astimezone(ZoneInfo(str(tgt.get("timezone", "UTC"))))
+                    except (ValueError, KeyError):
+                        continue
+                    clock = local.strftime("%H:%M")
+                    start = str(tgt.get("start", "00:00"))
+                    end = str(tgt.get("end", "23:59"))
+                    inside = (
+                        start <= clock < end
+                        if start < end
+                        else clock >= start or clock < end
+                    )
+                    if not inside:
+                        outside_schedule.add(t)
+                    break
         per_model: dict[str, object] = {}
         with self._lock:
             for model in models:
@@ -775,6 +805,16 @@ class CostStore:
                     "ORDER BY timestamp DESC LIMIT 1",
                     (route, model),
                 ).fetchone()
+                if model in outside_schedule:
+                    per_model[model] = {
+                        "last_called_at": int(last[0]) if last else None,
+                        "last_status": last[1] if last else None,
+                        "cooldown_remaining": 0,
+                        "cooldown_reason": "outside_schedule",
+                        "outside_schedule": True,
+                        "strikes": 0,
+                    }
+                    continue
                 cd = self._conn.execute(
                     "SELECT until_ts, reason, strikes FROM model_cooldowns "
                     "WHERE route = ? AND model = ?",
@@ -790,6 +830,7 @@ class CostStore:
                     "cooldown_reason": (
                         cd[1] if cd and int(cd[0]) > now else None
                     ),
+                    "outside_schedule": False,
                     "strikes": int(cd[2] or 0) if cd else 0,
                 }
             served = self._conn.execute(
@@ -915,10 +956,10 @@ class CostTracker:
         self._store.clear_cooldown(route, model)
 
     def route_status(
-        self, route: str, models: list[str]
+        self, route: str, models: list[str], targets: list[dict[str, object]] | None = None,
     ) -> dict[str, object]:
         """Per-target last-call + cooldown status for a route's model list."""
-        return self._store.route_status(route, models)
+        return self._store.route_status(route, models, targets=targets)
 
     def set_model_cooldown(
         self,
