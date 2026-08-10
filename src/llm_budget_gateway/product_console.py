@@ -650,6 +650,12 @@ def _targets(items: list[dict[str, Any]]) -> list[dict[str, Any]]:
             if not isinstance(cdyn, bool):
                 raise ValueError("cooldown_dynamic must be boolean")
             item["cooldown_dynamic"] = cdyn
+        # enabled: per-target manual enable/disable (default True)
+        en = item.get("enabled")
+        if en is not None:
+            if not isinstance(en, bool):
+                raise ValueError("enabled must be boolean")
+            item["enabled"] = en
         clean.append(item)
     return sorted(clean, key=lambda x: x["priority"])
 

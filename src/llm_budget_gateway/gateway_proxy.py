@@ -1238,6 +1238,9 @@ class GatewayProxy:
                 start <= clock < end if start < end else clock >= start or clock < end
             )
             reason = None if inside else "outside_schedule"
+            # Manual enable/disable toggle — if explicitly False, exclude from chain
+            if reason is None and target.get("enabled") is False:
+                reason = "disabled"
             # required_capabilities = capabilities the CLIENT must declare
             # (e.g. "tools", "structured_output") — the request is ineligible
             # when it does not declare one the target demands.
