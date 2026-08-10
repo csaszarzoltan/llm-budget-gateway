@@ -861,11 +861,13 @@ class GatewayProxy:
                         break
                 if is_last:
                     raise
-                cooldown_seconds = (
-                    int(target_cooldowns.get(candidate, 3600))
+                cooldown_info = (
+                    target_cooldowns.get(candidate, {"seconds": 3600, "dynamic": True})
                     if target_cooldowns
-                    else 3600
+                    else {"seconds": 3600, "dynamic": True}
                 )
+                cooldown_seconds = int(cooldown_info.get("seconds", 3600))
+                count_strike = cooldown_info.get("dynamic", True)
                 try:
                     self._cost_tracker.set_model_cooldown(
                         route_name,
@@ -877,6 +879,7 @@ class GatewayProxy:
                                 "seconds": int(target_timeout or 0),
                             }
                         ),
+                        count_strike=count_strike,
                     )
                 except Exception:
                     logger.exception(
@@ -896,11 +899,13 @@ class GatewayProxy:
             except Exception as exc:
                 if is_last:
                     raise
-                cooldown_seconds = (
-                    int(target_cooldowns.get(candidate, 3600))
+                cooldown_info = (
+                    target_cooldowns.get(candidate, {"seconds": 3600, "dynamic": True})
                     if target_cooldowns
-                    else 3600
+                    else {"seconds": 3600, "dynamic": True}
                 )
+                cooldown_seconds = int(cooldown_info.get("seconds", 3600))
+                count_strike = cooldown_info.get("dynamic", True)
                 try:
                     self._cost_tracker.set_model_cooldown(
                         route_name,
@@ -913,6 +918,7 @@ class GatewayProxy:
                                 "body": getattr(exc, "body", "")[:500],
                             }
                         ),
+                        count_strike=count_strike,
                     )
                 except Exception:
                     logger.exception(
@@ -1009,9 +1015,12 @@ class GatewayProxy:
                 if int(response.status_code or 0) < 400:
                     served = candidate
                     break
-            cooldown_seconds = 3600
-            if target_cooldowns:
-                cooldown_seconds = int(target_cooldowns.get(candidate, 3600))
+            cooldown_info = (
+                target_cooldowns.get(candidate, {"seconds": 3600, "dynamic": True})
+                if target_cooldowns
+                else {"seconds": 3600, "dynamic": True}
+            )
+            cooldown_seconds = int(cooldown_info.get("seconds", 3600))
             # Transient 5xx (502/503/504) usually means the provider is
             # momentarily overloaded, not that the model is unusable — a
             # short cooldown (or none) lets the model come back quickly
@@ -1047,7 +1056,7 @@ class GatewayProxy:
                             "body": body_text[:800],
                         }
                     ),
-                    count_strike=not transient,
+                    count_strike=not transient and cooldown_info.get("dynamic", True),
                 )
             except Exception:
                 logger.exception(
@@ -1288,7 +1297,10 @@ class GatewayProxy:
             "fallback_statuses": sorted(statuses),
             "fallback_reason": None if not excluded else "outside_schedule",
             "target_cooldowns": {
-                str(t["model"]): int(t.get("cooldown_seconds", 3600))
+                str(t["model"]): {
+                    "seconds": int(t.get("cooldown_seconds", 3600)),
+                    "dynamic": t.get("cooldown_dynamic", True),
+                }
                 for t in ordered
             },
         }

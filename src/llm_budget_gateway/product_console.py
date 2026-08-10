@@ -644,6 +644,12 @@ def _targets(items: list[dict[str, Any]]) -> list[dict[str, Any]]:
                 item["context_length"] = ctx_len_int
             except (ValueError, TypeError):
                 raise ValueError("context_length must be a positive integer")
+        # cooldown_dynamic: per-target dynamic ladder toggle (default True)
+        cdyn = item.get("cooldown_dynamic")
+        if cdyn is not None:
+            if not isinstance(cdyn, bool):
+                raise ValueError("cooldown_dynamic must be boolean")
+            item["cooldown_dynamic"] = cdyn
         clean.append(item)
     return sorted(clean, key=lambda x: x["priority"])
 
