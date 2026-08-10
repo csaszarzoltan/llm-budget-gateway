@@ -845,6 +845,17 @@ class GatewayProxy:
                         break
                     if int(response.status_code or 0) < 400:
                         served = candidate
+                        # Success resets the dynamic cooldown ladder.
+                        try:
+                            self._cost_tracker.record_success(
+                                route_name, candidate
+                            )
+                        except Exception:
+                            logger.exception(
+                                "cooldown reset failed route=%s model=%s",
+                                route_name,
+                                candidate,
+                            )
                         break
                     if int(response.status_code or 0) not in (502, 503, 504):
                         break
@@ -938,6 +949,18 @@ class GatewayProxy:
                             str(response.body)[:400],
                         )
                     served = candidate
+                    # Success resets the dynamic cooldown ladder for this
+                    # model so a recovered provider starts from 1m again.
+                    try:
+                        self._cost_tracker.record_success(
+                            route_name, candidate
+                        )
+                    except Exception:
+                        logger.exception(
+                            "cooldown reset failed route=%s model=%s",
+                            route_name,
+                            candidate,
+                        )
                     break
                 # Some providers report context-window overflow as 400 with a
                 # context-length error body instead of 413/422. Walk to the
