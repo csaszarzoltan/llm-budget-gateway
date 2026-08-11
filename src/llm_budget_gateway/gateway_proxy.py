@@ -818,7 +818,9 @@ class GatewayProxy:
                 # /zen endpoints) — retry the SAME model before falling back,
                 # honoring the target's retries setting (default 1). Only
                 # target_retries retries per candidate, then the normal
-                # cooldown + fallback.
+                # cooldown + fallback. An exponential backoff between retries
+                # lets a short provider blip recover instead of burning all
+                # retries into the same outage.
                 while response_retry_count < target_retries:
                     response_retry_count += 1
                     logger.info(
@@ -829,6 +831,14 @@ class GatewayProxy:
                         target_retries,
                         request_id,
                     )
+                    if response_retry_count > 1:
+                        await asyncio.sleep(
+                            min(
+                                self._settings.retry_backoff_seconds
+                                * (2 ** (response_retry_count - 2)),
+                                self._settings.retry_backoff_max_seconds,
+                            )
+                        )
                     try:
                         response = await self.forward(
                             candidate, outbound, timeout=target_timeout
@@ -859,6 +869,8 @@ class GatewayProxy:
                         break
                     if int(response.status_code or 0) not in (502, 503, 504):
                         break
+                if served == candidate:
+                    break  # the retry succeeded — keep this candidate
                 if is_last:
                     raise
                 cooldown_info = (
@@ -982,12 +994,17 @@ class GatewayProxy:
                 if index + 1 < len(candidates):
                     fallback = "context_window_400"
                 continue
-            # Transient 5xx (502/503/504) is usually momentary provider
-            # overload — retry the SAME model before falling back, honoring
-            # the target's retries setting. A rare blip should not degrade
-            # the response or park the model in a long cooldown.
-            if (
-                int(response.status_code or 0) in (502, 503, 504)
+            # Transient failures (502/503/504 overload + 429 rate limit) are
+            # usually momentary provider blips — retry the SAME model before
+            # falling back, honoring the target's retries setting (which now
+            # works as a full retry count, not a single attempt). A rare
+            # blip should not degrade the response or park the model in a
+            # long cooldown. Exponential backoff between attempts gives the
+            # provider a moment to recover (429 rate limits often clear in
+            # 1-3s on free endpoints).
+            transient_codes = {502, 503, 504, 429}
+            while (
+                int(response.status_code or 0) in transient_codes
                 and response_retry_count < target_retries
             ):
                 response_retry_count += 1
@@ -999,6 +1016,13 @@ class GatewayProxy:
                     response_retry_count,
                     target_retries,
                     request_id,
+                )
+                await asyncio.sleep(
+                    min(
+                        self._settings.retry_backoff_seconds
+                        * (2 ** (response_retry_count - 1)),
+                        self._settings.retry_backoff_max_seconds,
+                    )
                 )
                 try:
                     response = await self.forward(
@@ -1015,6 +1039,8 @@ class GatewayProxy:
                 if int(response.status_code or 0) < 400:
                     served = candidate
                     break
+            if served == candidate:
+                break  # the transient retry succeeded — keep this candidate
             cooldown_info = (
                 target_cooldowns.get(candidate, {"seconds": 3600, "dynamic": True})
                 if target_cooldowns
@@ -1026,8 +1052,10 @@ class GatewayProxy:
             # short cooldown (or none) lets the model come back quickly
             # instead of being parked for the target's full cooldown
             # (e.g. 600s), which is what the UI "cooldown" would do. Rate
-            # limits (429) and hard client errors keep the full cooldown.
-            transient = int(response.status_code or 0) in (502, 503, 504)
+            # limits (429) are usually per-minute windows on free tiers —
+            # also transient. Only hard client errors keep the full
+            # cooldown.
+            transient = int(response.status_code or 0) in (502, 503, 504, 429)
             if transient:
                 cooldown_seconds = min(cooldown_seconds, 60)
             try:

@@ -1088,6 +1088,140 @@ class TestCreateAppBehavior:
 
 
     @pytest.mark.asyncio
+    async def test_retry_backoff_sleeps_between_attempts(
+        self, settings: Settings, mocker
+    ) -> None:
+        """Retries of the same target must wait between attempts (exponential
+        backoff) so a short provider blip gets a chance to recover instead of
+        burning all retries into the same outage."""
+        store = Mock()
+        store.published_route_by_name.return_value = {
+            "name": "hermes-default",
+            "targets": [
+                {
+                    "model": "@a/primary",
+                    "priority": 10,
+                    "timeout_seconds": 15,
+                    "retries": 3,
+                    "on_status_codes": [429, 500, 503],
+                },
+            ],
+        }
+        tracker = Mock()
+        tracker.model_in_cooldown.return_value = 0
+        tracker.build_record.return_value = SimpleNamespace(total_cost=0.0)
+        proxy = GatewayProxy(
+            settings=settings,
+            cost_tracker=tracker,
+            budget_enforcer=Mock(),
+            fallback_manager=FallbackManager([]),
+        )
+        proxy.attach_product_console(store)
+
+        async def _forward(
+            model: str,
+            body: dict,
+            stream: bool = False,
+            timeout: float | None = None,
+        ):
+            return ProviderResponse(
+                503, {"error": {"message": "overloaded"}}, {}, model, None, 5
+            )
+
+        proxy.forward = AsyncMock(side_effect=_forward)  # type: ignore[method-assign]
+        sleeps: list[float] = []
+        real_sleep = asyncio.sleep
+
+        async def _sleep(secs: float) -> None:
+            sleeps.append(secs)
+            await real_sleep(0)  # don't actually wait in tests
+
+        mocker.patch("llm_budget_gateway.gateway_proxy.asyncio.sleep", side_effect=_sleep)
+        result = await proxy.handle_chat_completion(
+            {
+                "model": "hermes-default",
+                "messages": [{"role": "user", "content": "hi"}],
+            },
+            "sk_test_abc",
+            {},
+        )
+        # single target, 3 retries → 503 surfaces after all retries
+        assert result.status_code == 503
+        # backoff waits: 1s then 2s then 4s (base 1s, exponential, capped 10s)
+        assert sleeps == [1.0, 2.0, 4.0]
+
+    @pytest.mark.asyncio
+    async def test_retry_429_rate_limit_with_backoff(
+        self, settings: Settings, mocker
+    ) -> None:
+        """A 429 rate limit (opencode-go scenario) must be retried with
+        backoff instead of going straight to cooldown — free-tier rate
+        windows often clear in 1-3 seconds."""
+        store = Mock()
+        store.published_route_by_name.return_value = {
+            "name": "hermes-default",
+            "targets": [
+                {
+                    "model": "@a/primary",
+                    "priority": 10,
+                    "timeout_seconds": 15,
+                    "retries": 2,
+                    "on_status_codes": [429, 500, 503],
+                },
+            ],
+        }
+        tracker = Mock()
+        tracker.model_in_cooldown.return_value = 0
+        tracker.build_record.return_value = SimpleNamespace(total_cost=0.0)
+        proxy = GatewayProxy(
+            settings=settings,
+            cost_tracker=tracker,
+            budget_enforcer=Mock(),
+            fallback_manager=FallbackManager([]),
+        )
+        proxy.attach_product_console(store)
+
+        calls = []
+
+        async def _forward(
+            model: str,
+            body: dict,
+            stream: bool = False,
+            timeout: float | None = None,
+        ):
+            calls.append(model)
+            if len(calls) <= 2:
+                return ProviderResponse(
+                    429, {"error": {"message": "rate limited"}}, {}, model, None, 5
+                )
+            return ProviderResponse(200, {}, {}, model, None, 5)
+
+        proxy.forward = AsyncMock(side_effect=_forward)  # type: ignore[method-assign]
+        sleeps: list[float] = []
+        real_sleep = asyncio.sleep
+
+        async def _sleep(secs: float) -> None:
+            sleeps.append(secs)
+            await real_sleep(0)
+
+        mocker.patch("llm_budget_gateway.gateway_proxy.asyncio.sleep", side_effect=_sleep)
+        result = await proxy.handle_chat_completion(
+            {
+                "model": "hermes-default",
+                "messages": [{"role": "user", "content": "hi"}],
+            },
+            "sk_test_abc",
+            {},
+        )
+        # 429 → 429 → 200: retried twice, then served
+        assert result.status_code == 200
+        assert calls == ["@a/primary", "@a/primary", "@a/primary"]
+        # backoff: 1s then 2s
+        assert sleeps == [1.0, 2.0]
+        # a success after retry must NOT set a cooldown
+        assert not tracker.set_model_cooldown.called
+
+    @pytest.mark.asyncio
     async def test_route_chain_budget_skips_mid_targets(
         self, settings: Settings, mocker
     ) -> None:

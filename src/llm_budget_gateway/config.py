@@ -50,5 +50,15 @@ class Settings(BaseSettings):
     #: is ignored and every failure applies the same fixed cooldown.
     #: Env ``GATEWAY_COOLDOWN_DYNAMIC`` (default ``true``).
     cooldown_dynamic: bool = True
+    #: Base seconds to wait between retries of the same target. The wait
+    #: grows exponentially with the retry count (1s → 2s → 4s → 8s …)
+    #: capped at ``retry_backoff_max_seconds``. A short provider blip
+    #: (opencode free endpoints often drop for 1-3s) gets a chance to
+    #: recover before the model is parked in a cooldown. Env
+    #: ``GATEWAY_RETRY_BACKOFF_SECONDS``.
+    retry_backoff_seconds: float = 1.0
+    #: Upper bound for the exponential retry backoff. Env
+    #: ``GATEWAY_RETRY_BACKOFF_MAX_SECONDS``.
+    retry_backoff_max_seconds: float = 10.0
 
     model_config = SettingsConfigDict(env_prefix="GATEWAY_")
