@@ -158,6 +158,25 @@ def _pad_reasoning_content(messages: Any) -> None:
             msg["reasoning_content"] = " "
 
 
+def _strip_tool_choice_for_thinking(payload: dict[str, Any] | None) -> None:
+    """Drop ``tool_choice`` for reasoning-echo thinking models (in place).
+
+    Console Go (opencode.ai zen/go) and other DeepSeek/Kimi/MiMo thinking
+    endpoints reject an explicit ``tool_choice`` with HTTP 400
+    ("Thinking mode does not support this tool_choice"). The reasoning model
+    decides tool calls on its own from the ``tools`` list, so the explicit
+    choice is both unsupported and unnecessary — we drop it while keeping
+    ``tools`` intact. Only applied when the model is a thinking family.
+    """
+    if not isinstance(payload, dict):
+        return
+    if "tool_choice" not in payload:
+        return
+    if not _model_needs_reasoning_echo(payload.get("model", "")):
+        return
+    payload.pop("tool_choice", None)
+
+
 def _normalize_tool_name(name: Any) -> str:
     """Replace characters forbidden by strict upstream tool-name patterns.
 
@@ -723,6 +742,9 @@ class DirectProviderClient:
         # routing via a route name (not the model name) may strip it.
         if _model_needs_reasoning_echo(payload.get("model", "")):
             _pad_reasoning_content(payload.get("messages"))
+            # Reasoning models decide tool calls on their own — an explicit
+            # tool_choice is rejected (HTTP 400) by thinking endpoints.
+            _strip_tool_choice_for_thinking(payload)
         # Gemini thought_signature: re-attach stored signatures so replayed
         # function calls are not rejected with HTTP 400.
         self._restore_thought_signatures(payload.get("messages"))
@@ -784,6 +806,7 @@ class DirectProviderClient:
         # DeepSeek/Kimi/MiMo thinking mode: pad assistant turns (see forward).
         if _model_needs_reasoning_echo(payload.get("model", "")):
             _pad_reasoning_content(payload.get("messages"))
+            _strip_tool_choice_for_thinking(payload)
         # Gemini thought_signature: re-attach stored signatures (see forward).
         self._restore_thought_signatures(payload.get("messages"))
         # Strict upstreams (Console Go) reject ':' in tool names — rewrite
@@ -870,6 +893,7 @@ class DirectProviderClient:
             payload.update(endpoint.extra_body)
         if _model_needs_reasoning_echo(payload.get("model", "")):
             _pad_reasoning_content(payload.get("messages"))
+            _strip_tool_choice_for_thinking(payload)
         self._restore_thought_signatures(payload.get("messages"))
         tool_name_map = _collect_tool_name_map(payload)
         chunks: list[dict[str, Any]] = []

@@ -410,6 +410,60 @@ class TestForwardStream:
         assert captured["body"]["stream"] is True
         await client.aclose()
 
+    @pytest.mark.asyncio
+    async def test_thinking_model_strips_tool_choice_keeps_tools(self, monkeypatch):
+        """Thinking models (deepseek) must not receive an explicit tool_choice.
+
+        Console Go rejects tool_choice on reasoning models with HTTP 400
+        ("Thinking mode does not support this tool_choice"); the gateway drops
+        it while keeping the tools list so the model decides on its own.
+        """
+        monkeypatch.setenv("OPENCODE_GO_API_KEY", "sk-go-123")
+        captured = {}
+
+        def handler(request: httpx.Request) -> httpx.Response:
+            captured["body"] = json.loads(request.content)
+            return _ok_handler(request)
+
+        client = _client(handler)
+        status, _, served = await client.forward(
+            "@opencode-go/deepseek-v4-flash",
+            {
+                "messages": [{"role": "user", "content": "hi"}],
+                "tools": [{"type": "function", "function": {"name": "f", "parameters": {"type": "object", "properties": {}}}}],
+                "tool_choice": "auto",
+            },
+        )
+        assert status == 200
+        assert "tool_choice" not in captured["body"]
+        assert captured["body"]["tools"]
+        assert captured["body"]["model"] == "deepseek-v4-flash"
+        await client.aclose()
+
+    @pytest.mark.asyncio
+    async def test_non_thinking_model_keeps_tool_choice(self, monkeypatch):
+        """A non-thinking model keeps its explicit tool_choice."""
+        monkeypatch.setenv("GOOGLE_API_KEY", "sk-gemini-123")
+        captured = {}
+
+        def handler(request: httpx.Request) -> httpx.Response:
+            captured["body"] = json.loads(request.content)
+            return _ok_handler(request)
+
+        client = _client(handler)
+        status, _, served = await client.forward(
+            "gemini-2.0-flash",
+            {
+                "messages": [{"role": "user", "content": "hi"}],
+                "tools": [{"type": "function", "function": {"name": "f", "parameters": {"type": "object", "properties": {}}}}],
+                "tool_choice": "auto",
+            },
+        )
+        assert status == 200
+        assert captured["body"]["tool_choice"] == "auto"
+        assert served
+        await client.aclose()
+
 
     @pytest.mark.asyncio
     async def test_user_agent_emulation_header_sent(self, monkeypatch):
