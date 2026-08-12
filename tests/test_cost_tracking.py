@@ -793,6 +793,48 @@ def test_usage_missing_flag(store: CostStore) -> None:
     assert flags["error"] is False
 
 
+def test_usage_by_period_bucket_stats(store: CostStore) -> None:
+    """Bucket-level stats: success/failed/latency_sum aggregated per period,
+    so the UI can show Total requests / Success rate / Average latency for
+    the selected period instead of global product.usage() numbers."""
+    import time as _t
+
+    now = int(_t.time())
+    base = {
+        "request_id": "r1", "api_key": "k", "user_id": None, "team": None,
+        "model": "nemotron", "provider": "p", "prompt_tokens": 100,
+        "completion_tokens": 50, "total_tokens": 150, "input_cost": 0.0,
+        "output_cost": 0.0, "total_cost": 0.001, "latency_ms": 10,
+        "status": "success", "timestamp": now, "route": "hermes-default",
+    }
+    # 3 success (latency 10/20/30) + 1 error (latency 500) ugyanabban a bucketben
+    rows = [
+        {**base, "request_id": "s1", "latency_ms": 10},
+        {**base, "request_id": "s2", "latency_ms": 20},
+        {**base, "request_id": "s3", "latency_ms": 30},
+        {**base, "request_id": "e1", "status": "error", "latency_ms": 500},
+    ]
+    for r in rows:
+        store.insert(UsageRecord(**r))
+    day = store.usage_by_period(period="day", days=1)
+    # csak egy bucket (ma)
+    assert len(day["days"]) == 1
+    b = day["days"][0]
+    assert b["requests"] == 4
+    assert b["success"] == 3
+    assert b["failed"] == 1
+    assert b["latency_sum"] == 60  # 10+20+30 (csak success) — error latenciája nem számít
+    # model szinten is ott van
+    m = b["models"][0]
+    assert m["success"] == 3
+    assert m["failed"] == 1
+    assert m["latency_sum"] == 60
+    # route szinten is
+    r = b["routes"][0]
+    assert r["success"] == 3
+    assert r["failed"] == 1
+
+
 def test_route_status_and_cooldown_reset(store: CostStore) -> None:
     """route_status reports last call + cooldown; clear_cooldown resets."""
     import time as _t

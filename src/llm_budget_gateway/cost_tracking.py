@@ -670,7 +670,10 @@ class CostStore:
                 f"""
                 SELECT strftime('{fmt}', timestamp, 'unixepoch') AS bucket, model,
                        route, SUM(prompt_tokens), SUM(completion_tokens),
-                       SUM(total_tokens), COUNT(*), SUM(total_cost)
+                       SUM(total_tokens), COUNT(*), SUM(total_cost),
+                       SUM(CASE WHEN status='success' THEN 1 ELSE 0 END),
+                       SUM(CASE WHEN status='success' THEN latency_ms ELSE 0 END),
+                       SUM(CASE WHEN status!='success' THEN 1 ELSE 0 END)
                 FROM cost_records
                 WHERE timestamp >= ?
                 GROUP BY bucket, model, route
@@ -697,7 +700,7 @@ class CostStore:
             ).fetchall()
         by_bucket: dict[str, list[dict[str, object]]] = {}
         by_bucket_route: dict[str, list[dict[str, object]]] = {}
-        for bucket, model, rte, pt, ct, tt, reqs, cost in bucket_rows:
+        for bucket, model, rte, pt, ct, tt, reqs, cost, succ, lat_ok, failed in bucket_rows:
             by_bucket.setdefault(bucket, []).append(
                 {
                     "model": model,
@@ -705,6 +708,9 @@ class CostStore:
                     "completion_tokens": int(ct or 0),
                     "total_tokens": int(tt or 0),
                     "requests": int(reqs or 0),
+                    "success": int(succ or 0),
+                    "failed": int(failed or 0),
+                    "latency_sum": int(lat_ok or 0),
                     "cost_usd": round(float(cost or 0.0), 6),
                 }
             )
@@ -713,6 +719,9 @@ class CostStore:
                     "route": rte or "",
                     "total_tokens": int(tt or 0),
                     "requests": int(reqs or 0),
+                    "success": int(succ or 0),
+                    "failed": int(failed or 0),
+                    "latency_sum": int(lat_ok or 0),
                     "cost_usd": round(float(cost or 0.0), 6),
                 }
             )
@@ -721,6 +730,10 @@ class CostStore:
                 "date": bucket,
                 "models": by_bucket[bucket],
                 "routes": by_bucket_route[bucket],
+                "requests": sum(int(m["requests"]) for m in by_bucket[bucket]),  # type: ignore[arg-type]
+                "success": sum(int(m["success"]) for m in by_bucket[bucket]),  # type: ignore[arg-type]
+                "failed": sum(int(m["failed"]) for m in by_bucket[bucket]),  # type: ignore[arg-type]
+                "latency_sum": sum(int(m["latency_sum"]) for m in by_bucket[bucket]),  # type: ignore[arg-type]
             }
             for bucket in sorted(by_bucket)
         ]
