@@ -1151,12 +1151,14 @@ class TestCreateAppBehavior:
         assert sleeps == [1.0, 2.0, 4.0]
 
     @pytest.mark.asyncio
-    async def test_retry_429_rate_limit_with_backoff(
+    async def test_429_goes_straight_to_cooldown_no_retry(
         self, settings: Settings, mocker
     ) -> None:
-        """A 429 rate limit (opencode-go scenario) must be retried with
-        backoff instead of going straight to cooldown — free-tier rate
-        windows often clear in 1-3 seconds."""
+        """A 429 rate limit (opencode-go scenario) must NOT be retried — the
+        model goes straight to cooldown and the flow moves to the next
+        candidate. Retrying a 429 only burns more requests into the same
+        quota window and keeps the flow stuck on a model that cannot serve
+        right now."""
         store = Mock()
         store.published_route_by_name.return_value = {
             "name": "hermes-default",
@@ -1166,6 +1168,13 @@ class TestCreateAppBehavior:
                     "priority": 10,
                     "timeout_seconds": 15,
                     "retries": 2,
+                    "on_status_codes": [429, 500, 503],
+                },
+                {
+                    "model": "@b/fallback",
+                    "priority": 20,
+                    "timeout_seconds": 15,
+                    "retries": 1,
                     "on_status_codes": [429, 500, 503],
                 },
             ],
@@ -1190,19 +1199,16 @@ class TestCreateAppBehavior:
             timeout: float | None = None,
         ):
             calls.append(model)
-            if len(calls) <= 2:
-                return ProviderResponse(
-                    429, {"error": {"message": "rate limited"}}, {}, model, None, 5
-                )
-            return ProviderResponse(200, {}, {}, model, None, 5)
+            return ProviderResponse(
+                429, {"error": {"message": "rate limited"}}, {}, model, None, 5
+            )
 
         proxy.forward = AsyncMock(side_effect=_forward)  # type: ignore[method-assign]
         sleeps: list[float] = []
-        real_sleep = asyncio.sleep
 
         async def _sleep(secs: float) -> None:
             sleeps.append(secs)
-            await real_sleep(0)
+            await asyncio.sleep(0)
 
         mocker.patch("llm_budget_gateway.gateway_proxy.asyncio.sleep", side_effect=_sleep)
         result = await proxy.handle_chat_completion(
@@ -1213,13 +1219,16 @@ class TestCreateAppBehavior:
             "sk_test_abc",
             {},
         )
-        # 429 → 429 → 200: retried twice, then served
-        assert result.status_code == 200
-        assert calls == ["@a/primary", "@a/primary", "@a/primary"]
-        # backoff: 1s then 2s
-        assert sleeps == [1.0, 2.0]
-        # a success after retry must NOT set a cooldown
-        assert not tracker.set_model_cooldown.called
+        # 429 → NO same-model retry: primary gets cooldown, chain moves to fallback
+        assert calls == ["@a/primary", "@b/fallback"]
+        # no backoff sleeps at all
+        assert sleeps == []
+        # primary got the transient (<=60s) cooldown
+        cooldown_calls = tracker.set_model_cooldown.call_args_list
+        assert cooldown_calls
+        primary_cooldown = cooldown_calls[0][0]
+        assert primary_cooldown[1] == "@a/primary"
+        assert primary_cooldown[2] <= 60
 
     @pytest.mark.asyncio
     async def test_route_chain_budget_skips_mid_targets(

@@ -164,13 +164,11 @@ async def test_proxy_fails_over_route_chain_on_transient_status() -> None:
         plane,
         now=lambda: datetime(2026, 8, 4, 21, 30, tzinfo=ZoneInfo("Europe/Zurich")),
     )
-    # 429 on the primary (with default retries=1) → retry once → still 429 →
-    # fall back to gemini-flash which succeeds.
+    # 429 on the primary → NO same-model retry (rate limits are never
+    # retried): straight to cooldown, fall back to gemini-flash which
+    # succeeds.
     proxy.forward = AsyncMock(
         side_effect=[
-            ProviderResponse(
-                429, {"error": {"message": "rate limited"}}, {}, "gpt-mini", None, 5
-            ),
             ProviderResponse(
                 429, {"error": {"message": "rate limited"}}, {}, "gpt-mini", None, 5
             ),
@@ -185,8 +183,7 @@ async def test_proxy_fails_over_route_chain_on_transient_status() -> None:
     assert result.status_code == 200
     assert [call.args[0] for call in proxy.forward.await_args_list] == [
         "gpt-mini",
-        "gpt-mini",  # one retry of the same model (default retries=1)
-        "gemini-flash",
+        "gemini-flash",  # no same-model retry: 429 → cooldown → fallback
     ]
     assert result.headers["X-Gateway-Serving-Model"] == "gemini-flash"
     assert result.headers["X-Gateway-Fallback"] == "provider_status_429"

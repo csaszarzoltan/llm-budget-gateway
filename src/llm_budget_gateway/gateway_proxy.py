@@ -994,15 +994,20 @@ class GatewayProxy:
                 if index + 1 < len(candidates):
                     fallback = "context_window_400"
                 continue
-            # Transient failures (502/503/504 overload + 429 rate limit) are
-            # usually momentary provider blips — retry the SAME model before
-            # falling back, honoring the target's retries setting (which now
-            # works as a full retry count, not a single attempt). A rare
-            # blip should not degrade the response or park the model in a
-            # long cooldown. Exponential backoff between attempts gives the
-            # provider a moment to recover (429 rate limits often clear in
-            # 1-3s on free endpoints).
-            transient_codes = {502, 503, 504, 429}
+            # Transient failures (502/503/504 overload) are usually momentary
+            # provider blips — retry the SAME model before falling back,
+            # honoring the target's retries setting (which now works as a
+            # full retry count, not a single attempt). A rare blip should
+            # not degrade the response or park the model in a long cooldown.
+            # Exponential backoff between attempts gives the provider a
+            # moment to recover.
+            #
+            # 429 rate limits are NOT retried: a rate-limited model in the
+            # flow goes straight to cooldown and the chain moves to the next
+            # candidate. Retrying a 429 only burns more requests into the
+            # same quota window and keeps the flow stuck on a model that
+            # cannot serve right now.
+            transient_codes = {502, 503, 504}
             while (
                 int(response.status_code or 0) in transient_codes
                 and response_retry_count < target_retries
@@ -1052,8 +1057,10 @@ class GatewayProxy:
             # short cooldown (or none) lets the model come back quickly
             # instead of being parked for the target's full cooldown
             # (e.g. 600s), which is what the UI "cooldown" would do. Rate
-            # limits (429) are usually per-minute windows on free tiers —
-            # also transient. Only hard client errors keep the full
+            # limits (429) also get the short cooldown: the model is parked
+            # just long enough to step out of the per-minute quota window,
+            # and the flow has already moved on to the next candidate (429
+            # is never retried). Only hard client errors keep the full
             # cooldown.
             transient = int(response.status_code or 0) in (502, 503, 504, 429)
             if transient:
