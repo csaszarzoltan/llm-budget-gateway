@@ -652,15 +652,7 @@ class CostStore:
 
         ``page``/``page_size`` paginate the ``calls`` list.
         """
-        if period == "hour":
-            fmt = "%Y-%m-%d %H:00"
-            since = int(time.time()) - days * 3600
-        elif period == "month":
-            fmt = "%Y-%m"
-            since = int(time.time()) - days * 30 * 86400
-        else:
-            fmt = "%Y-%m-%d"
-            since = int(time.time()) - days * 86400
+        fmt, since = self._period_window(period, days)
         page = max(1, int(page))
         page_size = max(1, min(int(page_size), 1000))
         offset = (page - 1) * page_size
@@ -697,6 +689,32 @@ class CostStore:
                 """,
                 (since, page_size, offset),
             ).fetchall()
+        by_bucket, by_bucket_route = self._shape_bucket_rows(bucket_rows)
+        buckets_out = self._shape_buckets_out(by_bucket, by_bucket_route)
+        calls = (
+            [c for c in call_rows if c[2] == route] if route else list(call_rows)
+        )
+        return {
+            "days": buckets_out,
+            "calls": [self._shape_call_row(r) for r in calls],
+            "total_calls": int(total_calls),
+        }
+
+    @staticmethod
+    def _period_window(period: str, days: int) -> tuple[str, int]:
+        """Map a period label to a strftime format and since-epoch cutoff."""
+        now = int(time.time())
+        if period == "hour":
+            return "%Y-%m-%d %H:00", now - days * 3600
+        if period == "month":
+            return "%Y-%m", now - days * 30 * 86400
+        return "%Y-%m-%d", now - days * 86400
+
+    @staticmethod
+    def _shape_bucket_rows(
+        bucket_rows: list[tuple[object, ...]],
+    ) -> tuple[dict[str, list[dict[str, object]]], dict[str, list[dict[str, object]]]]:
+        """Split aggregated bucket rows into per-model and per-route views."""
         by_bucket: dict[str, list[dict[str, object]]] = {}
         by_bucket_route: dict[str, list[dict[str, object]]] = {}
         for bucket, model, rte, pt, ct, tt, reqs, cost, succ, lat_ok, failed in bucket_rows:
@@ -724,7 +742,15 @@ class CostStore:
                     "cost_usd": round(float(cost or 0.0), 6),
                 }
             )
-        buckets_out = [
+        return by_bucket, by_bucket_route
+
+    @staticmethod
+    def _shape_buckets_out(
+        by_bucket: dict[str, list[dict[str, object]]],
+        by_bucket_route: dict[str, list[dict[str, object]]],
+    ) -> list[dict[str, object]]:
+        """Flatten per-bucket models/routes into the UI-facing day list."""
+        return [
             {
                 "date": bucket,
                 "models": by_bucket[bucket],
@@ -736,36 +762,30 @@ class CostStore:
             }
             for bucket in sorted(by_bucket)
         ]
-        calls = (
-            [c for c in call_rows if c[2] == route] if route else list(call_rows)
-        )
+
+    @staticmethod
+    def _shape_call_row(r: tuple[object, ...]) -> dict[str, object]:
+        """Shape one raw cost_records row into the API call object."""
         return {
-            "days": buckets_out,
-            "calls": [
-                {
-                    "request_id": r[0],
-                    "model": r[1],
-                    "route": r[2],
-                    "prompt_tokens": int(r[3] or 0),
-                    "completion_tokens": int(r[4] or 0),
-                    "total_tokens": int(r[5] or 0),
-                    "total_cost": round(float(r[6] or 0.0), 6),
-                    "status": r[7],
-                    "timestamp": int(r[8] or 0),
-                    "latency_ms": int(r[9] or 0),
-                    "status_code": int(r[10]) if r[10] is not None else None,
-                    "reasoning_tokens": int(r[11] or 0),
-                    "client_id": r[12],
-                    "client_profile": r[13],
-                    "cache_hit": bool(r[14]),
-                    "usage_missing": bool(
-                        r[7] == "success" and int(r[5] or 0) == 0
-                    ),
-                    "conversation_id": r[15],
-                }
-                for r in calls
-            ],
-            "total_calls": int(total_calls),
+            "request_id": r[0],
+            "model": r[1],
+            "route": r[2],
+            "prompt_tokens": int(r[3] or 0),
+            "completion_tokens": int(r[4] or 0),
+            "total_tokens": int(r[5] or 0),
+            "total_cost": round(float(r[6] or 0.0), 6),
+            "status": r[7],
+            "timestamp": int(r[8] or 0),
+            "latency_ms": int(r[9] or 0),
+            "status_code": int(r[10]) if r[10] is not None else None,
+            "reasoning_tokens": int(r[11] or 0),
+            "client_id": r[12],
+            "client_profile": r[13],
+            "cache_hit": bool(r[14]),
+            "usage_missing": bool(
+                r[7] == "success" and int(r[5] or 0) == 0
+            ),
+            "conversation_id": r[15],
         }
 
     def route_status(
