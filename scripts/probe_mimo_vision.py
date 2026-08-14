@@ -5,14 +5,15 @@ and streams it through the SAME direct transport the gateway uses (provider_dire
 """
 from __future__ import annotations
 
-import base64
-import io
 import sys
 from pathlib import Path
 
 import httpx
 
-from llm_budget_gateway.provider_connections import CredentialVault, ProviderConnectionStore
+from llm_budget_gateway.provider_connections import (
+    CredentialVault,
+    ProviderConnectionStore,
+)
 
 REPO = Path.home() / "llm-budget-gateway"
 data_dir = REPO / ".gateway-console"
@@ -63,7 +64,7 @@ for slug in ("opencode-go", "opencode-go2"):
             for line in r.iter_lines():
                 if line and line.startswith("data:"):
                     lines.append(line[5:].strip())
-            first = next((l for l in lines if l and l != "[DONE]"), "")
+            first = next((line for line in lines if line and line != "[DONE]"), "")
             print(f"  -> 200 VISION OK; chunks={len(lines)}; first-chunk={first[:120]}")
         else:
             text = r.read().decode("utf-8", errors="replace")

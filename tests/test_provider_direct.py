@@ -6,7 +6,6 @@ import json
 
 import httpx
 import pytest
-
 from llm_budget_gateway.provider_direct import (
     DirectProviderClient,
     ProviderConfigError,

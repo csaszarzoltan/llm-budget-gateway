@@ -881,11 +881,10 @@ class TestDispatchTimeSsrfGuard:
                     detail=bad_host,
                 )
             ),
-        ) as guard:
-            with mock.patch(
-                "llm_budget_gateway.dispatch_engine.smtplib.SMTP"
-            ) as smtp_cls:
-                ok = await dispatcher.dispatch(make_event())
+        ) as guard, mock.patch(
+            "llm_budget_gateway.dispatch_engine.smtplib.SMTP"
+        ) as smtp_cls:
+            ok = await dispatcher.dispatch(make_event())
         assert ok is False
         guard.assert_awaited_once()
         smtp_cls.assert_not_called(), "blocked SMTP host must never be connected"
@@ -939,12 +938,11 @@ class TestDispatchTimeSsrfGuard:
                     detail="smtp.gmail.com",
                 )
             ),
+        ), mock.patch(
+            "llm_budget_gateway.dispatch_engine.smtplib.SMTP",
+            return_value=smtp,
         ):
-            with mock.patch(
-                "llm_budget_gateway.dispatch_engine.smtplib.SMTP",
-                return_value=smtp,
-            ):
-                ok = await dispatcher.dispatch(make_event())
+            ok = await dispatcher.dispatch(make_event())
         assert ok is True
         smtp.send_message.assert_called_once()
 
@@ -968,15 +966,13 @@ class TestEmailDispatcherEventLoop:
         with mock.patch(
             "llm_budget_gateway.dispatch_engine.smtplib.SMTP",
             return_value=smtp,
+        ), mock.patch(
+            "llm_budget_gateway.dispatch_engine.asyncio.get_event_loop"
+        ) as get_loop, mock.patch(
+            "llm_budget_gateway.dispatch_engine._target_is_safe",
+            new=mock.AsyncMock(return_value=True),
         ):
-            with mock.patch(
-                "llm_budget_gateway.dispatch_engine.asyncio.get_event_loop"
-            ) as get_loop:
-                with mock.patch(
-                    "llm_budget_gateway.dispatch_engine._target_is_safe",
-                    new=mock.AsyncMock(return_value=True),
-                ):
-                    ok = await dispatcher.dispatch(make_event())
+            ok = await dispatcher.dispatch(make_event())
         assert ok is True
         get_loop.assert_not_called(), (
             "dispatch must use asyncio.get_running_loop(), not the "

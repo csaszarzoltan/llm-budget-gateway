@@ -1,6 +1,8 @@
 import sqlite3
 from pathlib import Path
+
 import uvicorn
+
 from llm_budget_gateway.console_api import create_console_app
 from llm_budget_gateway.service_manager import ServiceManager
 

@@ -11,9 +11,9 @@ Normative interface: analysis/analysis-brief.md §4 P0-1.
 
 from __future__ import annotations
 
+import asyncio
 import inspect
 import json
-import asyncio
 from dataclasses import fields, is_dataclass
 from types import SimpleNamespace
 from unittest.mock import AsyncMock, Mock
@@ -1211,7 +1211,7 @@ class TestCreateAppBehavior:
             await asyncio.sleep(0)
 
         mocker.patch("llm_budget_gateway.gateway_proxy.asyncio.sleep", side_effect=_sleep)
-        result = await proxy.handle_chat_completion(
+        await proxy.handle_chat_completion(
             {
                 "model": "hermes-default",
                 "messages": [{"role": "user", "content": "hi"}],

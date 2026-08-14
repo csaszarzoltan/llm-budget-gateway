@@ -6,9 +6,9 @@ import sqlite3
 
 import httpx
 import pytest
+from llm_budget_gateway.replay_execution import LocalReplayExecutor, ReplayRequest
 
 from llm_budget_gateway.console_api import create_console_app
-from llm_budget_gateway.replay_execution import LocalReplayExecutor, ReplayRequest
 
 
 @pytest.mark.asyncio

@@ -2,11 +2,7 @@
 
 from __future__ import annotations
 
-import asyncio
 import sqlite3
-
-import httpx
-import pytest
 
 from llm_budget_gateway.provider_direct import DirectProviderClient
 

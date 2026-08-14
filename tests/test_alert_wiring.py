@@ -22,9 +22,9 @@ from __future__ import annotations
 
 import httpx
 import pytest
+from llm_budget_gateway.dispatch_engine import AlertDispatcher
 
 from llm_budget_gateway.console_api import create_console_app
-from llm_budget_gateway.dispatch_engine import AlertDispatcher
 
 
 class TestAlertsMountedInConsoleApp:

@@ -2,7 +2,6 @@
 served by vision-capable models, inferred from the model slug (zero-config),
 so a 400 ``unknown variant image_url`` can never burn the fallback chain."""
 
-import asyncio
 
 import pytest
 

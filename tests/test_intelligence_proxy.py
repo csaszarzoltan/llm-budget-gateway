@@ -1,17 +1,22 @@
 """Integrated intelligence: cache hit, PII redaction, cost-aware routing in the proxy path."""
-import json
-import sqlite3
-import tempfile
-from pathlib import Path
 from unittest.mock import MagicMock
 
 import pytest
 
 from llm_budget_gateway.budget_enforcement import BudgetEnforcer
 from llm_budget_gateway.config import Settings
-from llm_budget_gateway.cost_tracking import CostCalculator, CostStore, CostTracker, PriceMap
+from llm_budget_gateway.cost_tracking import (
+    CostCalculator,
+    CostStore,
+    CostTracker,
+    PriceMap,
+)
 from llm_budget_gateway.gateway_proxy import GatewayProxy
-from llm_budget_gateway.market_features import ExactResponseCache, PIIRedactor, CostAwareRouter
+from llm_budget_gateway.market_features import (
+    CostAwareRouter,
+    ExactResponseCache,
+    PIIRedactor,
+)
 from llm_budget_gateway.model_fallback import FallbackManager
 
 
