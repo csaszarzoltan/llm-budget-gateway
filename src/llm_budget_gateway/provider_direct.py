@@ -582,68 +582,90 @@ class DirectProviderClient:
                 sig = self._thought_signatures_by_fn.get(
                     (fn_name.replace(":", "_"), arguments)
                 )
-        if sig is None and self._sig_db is not None:
-            try:
-                with self._sig_lock:
+        if sig is None:
+            sig = self._sig_lookup_raw(tc_id, fn_name, arguments)
+        if sig is None:
+            sig = self._sig_lookup_json(tc_id, fn_name, arguments)
+        return sig
+
+    def _sig_lookup_raw(self, tc_id: str, fn_name: str, arguments: str) -> str | None:
+        """Persisted-store lookup by exact id / fn+arguments match.
+
+        Returns the matching signature (caching it in memory) or None when
+        there is no hit. Mirrors the memory-index logic: the rewritten
+        (underscore) tool-name variant is tried for colon-form names.
+        """
+        if self._sig_db is None:
+            return None
+        try:
+            with self._sig_lock:
+                row = self._sig_db.execute(
+                    "SELECT signature FROM thought_signatures WHERE id=?",
+                    (tc_id,),
+                ).fetchone()
+                if row is None and fn_name and arguments:
                     row = self._sig_db.execute(
-                        "SELECT signature FROM thought_signatures WHERE id=?",
-                        (tc_id,),
+                        "SELECT signature FROM thought_signatures"
+                        " WHERE fn_name=? AND arguments=?"
+                        " ORDER BY created_at DESC LIMIT 1",
+                        (fn_name, arguments),
                     ).fetchone()
-                    if row is None and fn_name and arguments:
+                    if row is None and ":" in fn_name:
                         row = self._sig_db.execute(
                             "SELECT signature FROM thought_signatures"
                             " WHERE fn_name=? AND arguments=?"
                             " ORDER BY created_at DESC LIMIT 1",
-                            (fn_name, arguments),
+                            (fn_name.replace(":", "_"), arguments),
                         ).fetchone()
-                        if row is None and ":" in fn_name:
-                            row = self._sig_db.execute(
-                                "SELECT signature FROM thought_signatures"
-                                " WHERE fn_name=? AND arguments=?"
-                                " ORDER BY created_at DESC LIMIT 1",
-                                (fn_name.replace(":", "_"), arguments),
-                            ).fetchone()
-                if row is not None:
-                    sig = str(row[0])
-                    if tc_id:
-                        self._thought_signatures[tc_id] = sig
-                    if fn_name and arguments:
-                        self._thought_signatures_by_fn[(fn_name, arguments)] = sig
-            except sqlite3.Error:
-                logger.exception("failed to read thought_signature")
-        # JSON-normalized fallback: the arguments string is a JSON object,
-        # and clients (Hermes) may reserialize it with different spacing or
-        # key order than the provider echoed ({"board": "default"} vs
-        # {"board":"default"}). A raw string match then misses even though
-        # the semantic payload is identical. Compare parsed JSON instead.
-        if sig is None and fn_name and arguments and self._sig_db is not None:
-            try:
-                parsed = json.loads(arguments)
-            except (TypeError, ValueError):
-                parsed = None
-            if isinstance(parsed, (dict, list)):
+            if row is not None:
+                sig = str(row[0])
+                if tc_id:
+                    self._thought_signatures[tc_id] = sig
+                if fn_name and arguments:
+                    self._thought_signatures_by_fn[(fn_name, arguments)] = sig
+                return sig
+        except sqlite3.Error:
+            logger.exception("failed to read thought_signature")
+        return None
+
+    def _sig_lookup_json(self, tc_id: str, fn_name: str, arguments: str) -> str | None:
+        """JSON-normalized fallback: compare parsed argument payloads.
+
+        Clients (Hermes) may reserialize the arguments string with different
+        spacing or key order than the provider echoed ({"board": "default"}
+        vs {"board":"default"}). A raw string match then misses even though
+        the semantic payload is identical — compare parsed JSON instead.
+        """
+        if not (fn_name and arguments and self._sig_db is not None):
+            return None
+        try:
+            parsed = json.loads(arguments)
+        except (TypeError, ValueError):
+            return None
+        if not isinstance(parsed, (dict, list)):
+            return None
+        try:
+            with self._sig_lock:
+                rows = self._sig_db.execute(
+                    "SELECT fn_name, arguments, signature FROM thought_signatures"
+                    " WHERE fn_name IN (?, ?)"
+                    " ORDER BY created_at DESC LIMIT 50",
+                    (fn_name, fn_name.replace(":", "_") if ":" in fn_name else fn_name),
+                ).fetchall()
+            for _db_fn, db_args, db_sig in rows:
                 try:
-                    with self._sig_lock:
-                        rows = self._sig_db.execute(
-                            "SELECT fn_name, arguments, signature FROM thought_signatures"
-                            " WHERE fn_name IN (?, ?)"
-                            " ORDER BY created_at DESC LIMIT 50",
-                            (fn_name, fn_name.replace(":", "_") if ":" in fn_name else fn_name),
-                        ).fetchall()
-                    for _db_fn, db_args, db_sig in rows:
-                        try:
-                            if json.loads(db_args) == parsed:
-                                sig = str(db_sig)
-                                if tc_id:
-                                    self._thought_signatures[tc_id] = sig
-                                if fn_name and arguments:
-                                    self._thought_signatures_by_fn[(fn_name, arguments)] = sig
-                                break
-                        except (TypeError, ValueError):
-                            continue
-                except sqlite3.Error:
-                    logger.exception("failed to read thought_signature (json fallback)")
-        return sig
+                    if json.loads(db_args) == parsed:
+                        sig = str(db_sig)
+                        if tc_id:
+                            self._thought_signatures[tc_id] = sig
+                        if fn_name and arguments:
+                            self._thought_signatures_by_fn[(fn_name, arguments)] = sig
+                        return sig
+                except (TypeError, ValueError):
+                    continue
+        except sqlite3.Error:
+            logger.exception("failed to read thought_signature (json fallback)")
+        return None
 
     def _restore_thought_signatures(self, messages: Any) -> None:
         """Re-attach stored Gemini thought_signatures to assistant turns."""
