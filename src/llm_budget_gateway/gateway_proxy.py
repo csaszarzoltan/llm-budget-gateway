@@ -458,80 +458,118 @@ class GatewayProxy:
         take precedence; the logical routing plane (admin API) is the fallback
         for routes created outside the UI.
         """
+        plan = self._resolve_route_plan(body, api_key, headers)
+        if "error" in plan:
+            return self._error_response(
+                plan["error"]["status"],
+                plan["error"]["message"],
+                plan["error"]["model"],
+            )
+        (
+            alias,
+            metadata,
+            capabilities,
+            route,
+            from_plane,
+            candidates,
+            fallback,
+            fallback_statuses,
+            target_cooldowns,
+            route_name,
+            client_id,
+            client_profile,
+            conversation_id,
+        ) = self._plan_fields(plan)
+        outbound, cache_state, sticky = await self._prepare_route_request(
+            body, headers, metadata, candidates, fallback, route_name, api_key,
+            request_id, client_id, client_profile,
+        )
+        if cache_state.get("hit") is not None:
+            return cache_state["hit"]
+        candidates = cache_state["candidates"]
+        fallback = cache_state["fallback"]
+        session_id = sticky["session_id"]
+        sticky_model = sticky["model"]
+        response, served, fallback, chain_started = await self._run_candidate_chain(
+            candidates=candidates,
+            outbound=outbound,
+            route=route,
+            route_name=route_name,
+            from_plane=from_plane,
+            fallback_statuses=fallback_statuses,
+            target_cooldowns=target_cooldowns,
+            fallback=fallback,
+            request_id=request_id,
+        )
+        return await self._finalize_route_response(
+            response=response,
+            body=body,
+            api_key=api_key,
+            headers=headers,
+            metadata=metadata,
+            request_id=request_id,
+            alias=alias,
+            route=route,
+            route_name=route_name,
+            from_plane=from_plane,
+            session_id=session_id,
+            sticky_model=sticky_model,
+            outbound=outbound,
+            want_cache=cache_state["want_cache"],
+            client_id=client_id,
+            client_profile=client_profile,
+            conversation_id=conversation_id,
+            fallback=fallback,
+            served=served,
+            chain_started=chain_started,
+        )
+
+    @staticmethod
+    def _plan_fields(plan: dict) -> tuple:
+        """Unpack a route plan into positional fields (keeps caller tidy)."""
+        return (
+            plan["alias"],
+            plan["metadata"],
+            plan["capabilities"],
+            plan["route"],
+            plan["from_plane"],
+            plan["candidates"],
+            plan["fallback"],
+            plan["fallback_statuses"],
+            plan["target_cooldowns"],
+            plan["route_name"],
+            plan["client_id"],
+            plan["client_profile"],
+            plan["conversation_id"],
+        )
+
+    def _resolve_route_plan(
+        self, body: dict, api_key: str, headers: dict
+    ) -> dict:
+        """Resolve the target route + candidate chain for an application key.
+
+        Profile-aware routing (X-Hermes-Profile / metadata.profile) may
+        override the body model; UI-managed routes (product console) take
+        precedence over the logical routing plane. Returns a dict carrying
+        the resolved candidates and request context, or an ``error`` key
+        when the route cannot be served.
+        """
         plane = self._routing_control_plane
         alias = str(body.get("model", ""))
         if not alias:
-            return self._error_response(404, f"unknown route: {alias}", alias)
+            return {"error": {"status": 404, "message": f"unknown route: {alias}", "model": alias}}
         metadata = body.get("metadata", {})
-        # Profile-aware routing: a client (Hermes) can request a specific
-        # route per profile via X-Hermes-Profile or X-Gateway-Route header
-        # (or metadata.profile). The header wins over the body model name,
-        # so one client key can drive multiple routes without editing
-        # configs — e.g. hermes-coding → coding route, hermes-research →
-        # research route.
-        profile_route = ""
-        for hdr in ("x-hermes-profile", "x-gateway-route"):
-            val = headers.get(hdr) if isinstance(headers, dict) else None
-            if val:
-                profile_route = str(val).strip()
-                break
-        if not profile_route:
-            profile_route = str(metadata.get("profile", "") or "").strip()
-        if profile_route and profile_route != alias:
-            # Only override when the named route actually exists — otherwise
-            # fall through to the body model (which may be a valid alias).
-            store = self._product_console
-            exists = False
-            if store is not None:
-                try:
-                    exists = store.published_route_by_name(profile_route) is not None
-                except Exception:
-                    exists = False
-            if exists:
-                alias = profile_route
-        # Conversation tracking: an optional X-Gateway-Conversation header
-        # (or metadata.conversation_id) tags every request of one client
-        # conversation so usage can be aggregated per conversation.
         metadata = metadata if isinstance(metadata, dict) else {}
-        conversation_id = ""
-        for hdr in ("x-gateway-conversation", "x-conversation-id"):
-            val = headers.get(hdr) if isinstance(headers, dict) else None
-            if val:
-                conversation_id = str(val).strip()
-                break
-        if not conversation_id:
-            conversation_id = str(
-                metadata.get("conversation_id", "") or ""
-            ).strip()
-        conversation_id = conversation_id or None
-        # Client identity: any client may send these to tag who originated
-        # the request (e.g. hermes profile names, custom app names).
-        client_id = str(metadata.get("client_id", "")) or None
+        profile_route = self._profile_route_override(headers, metadata, alias)
+        if profile_route is not None:
+            alias = profile_route
+        conversation_id = self._conversation_id_from(headers, metadata)
+        client_id = self._client_id_from(metadata, api_key)
         client_profile = str(metadata.get("client_profile", "")) or None
-        capabilities = []
-        if body.get("tools"):
-            capabilities.append("tools")
-        if body.get("response_format"):
-            capabilities.append("structured_output")
-        for value in metadata.get("capabilities", []):
-            if isinstance(value, str) and value not in capabilities:
-                capabilities.append(value)
+        capabilities = self._capabilities_from(body, metadata)
 
         # 1) UI-managed route (Routes tab, targets model) — user-editable.
         store = self._product_console
-        # When omitted, the gateway falls back to the registered application
-        # name so every request is attributed — no client modification needed.
-        if not client_id:
-            # Try pc_apps first (UI-created applications).
-            if store is not None:
-                try:
-                    app_info = store.authenticate_application(str(api_key))
-                    client_id = str(app_info.get("name", ""))
-                except Exception:
-                    pass
-            # Fallback: control-plane / gateway keys → use key prefix + short ID
-            if not client_id:
-                client_id = f"gw-{str(api_key)[-8:]}" if api_key else "anonymous"
         route = None
         from_plane = False
         if store is not None:
@@ -542,7 +580,13 @@ class GatewayProxy:
         if route is not None:
             decision = self._resolve_targets(route, capabilities, body=body)
             if decision is None:
-                return self._error_response(422, "no eligible route target", alias)
+                return {
+                    "error": {
+                        "status": 422,
+                        "message": "no eligible route target",
+                        "model": alias,
+                    }
+                }
             candidates = decision["candidates"]
             fallback_statuses = decision["fallback_statuses"]
             fallback = decision.get("fallback_reason") or "none"
@@ -568,7 +612,13 @@ class GatewayProxy:
                     capabilities=capabilities,
                 )
             except (KeyError, RuntimeError, TypeError, ValueError):
-                return self._error_response(404, f"unknown route: {alias}", alias)
+                return {
+                    "error": {
+                        "status": 404,
+                        "message": f"unknown route: {alias}",
+                        "model": alias,
+                    }
+                }
             candidates = list(decision.get("candidate_models", []))
             selected = str(decision["selected_model"])
             if selected in candidates:
@@ -578,9 +628,124 @@ class GatewayProxy:
             fallback_statuses = decision.get("fallback_statuses", [])
             target_cooldowns = {}
             route_name = alias
-        response = None
-        served: str | None = None
+        return {
+            "alias": alias,
+            "metadata": metadata,
+            "capabilities": capabilities,
+            "route": route,
+            "from_plane": from_plane,
+            "candidates": candidates,
+            "fallback": fallback,
+            "fallback_statuses": fallback_statuses,
+            "target_cooldowns": target_cooldowns,
+            "route_name": route_name,
+            "client_id": client_id,
+            "client_profile": client_profile,
+            "conversation_id": conversation_id,
+        }
+
+    def _profile_route_override(
+        self, headers: dict, metadata: dict, alias: str
+    ) -> str | None:
+        """Return a profile-requested route when it exists, else None.
+
+        A client (Hermes) can request a specific route per profile via
+        X-Hermes-Profile or X-Gateway-Route header (or metadata.profile).
+        The header wins over the body model name, so one client key can
+        drive multiple routes without editing configs. Only overrides when
+        the named route actually exists — otherwise fall through to the
+        body model (which may be a valid alias).
+        """
+        profile_route = ""
+        for hdr in ("x-hermes-profile", "x-gateway-route"):
+            val = headers.get(hdr) if isinstance(headers, dict) else None
+            if val:
+                profile_route = str(val).strip()
+                break
+        if not profile_route:
+            profile_route = str(metadata.get("profile", "") or "").strip()
+        if not profile_route or profile_route == alias:
+            return None
+        store = self._product_console
+        if store is not None:
+            try:
+                if store.published_route_by_name(profile_route) is not None:
+                    return profile_route
+            except Exception:
+                return None
+        return None
+
+    def _conversation_id_from(self, headers: dict, metadata: dict) -> str | None:
+        """Extract the conversation tag from header or metadata, or None."""
+        conversation_id = ""
+        for hdr in ("x-gateway-conversation", "x-conversation-id"):
+            val = headers.get(hdr) if isinstance(headers, dict) else None
+            if val:
+                conversation_id = str(val).strip()
+                break
+        if not conversation_id:
+            conversation_id = str(
+                metadata.get("conversation_id", "") or ""
+            ).strip()
+        return conversation_id or None
+
+    def _client_id_from(self, metadata: dict, api_key: str) -> str:
+        """Resolve the client identity tag for attribution.
+
+        Any client may send client_id to tag who originated the request
+        (e.g. hermes profile names, custom app names). When omitted, the
+        gateway falls back to the registered application name so every
+        request is attributed — no client modification needed. Last resort:
+        control-plane / gateway keys use key prefix + short ID.
+        """
+        client_id = str(metadata.get("client_id", "")) or None
+        store = self._product_console
+        if not client_id and store is not None:
+            # Try pc_apps first (UI-created applications).
+            try:
+                app_info = store.authenticate_application(str(api_key))
+                client_id = str(app_info.get("name", ""))
+            except Exception:
+                pass
+        if not client_id:
+            client_id = f"gw-{str(api_key)[-8:]}" if api_key else "anonymous"
+        return client_id
+
+    def _capabilities_from(self, body: dict, metadata: dict) -> list[str]:
+        """Collect requested capabilities from body + metadata."""
+        capabilities = []
+        if body.get("tools"):
+            capabilities.append("tools")
+        if body.get("response_format"):
+            capabilities.append("structured_output")
+        for value in metadata.get("capabilities", []):
+            if isinstance(value, str) and value not in capabilities:
+                capabilities.append(value)
+        return capabilities
+    async def _prepare_route_request(
+        self,
+        body: dict,
+        headers: dict,
+        metadata: dict,
+        candidates: list[str],
+        fallback: str,
+        route_name: str,
+        api_key: str,
+        request_id: str,
+        client_id: str | None,
+        client_profile: str | None,
+    ) -> tuple:
+        """Pre-flight the request: outbound body, cache/redaction/cost-aware
+        routing, sticky-session binding.
+
+        Returns (outbound, cache_state, sticky) where cache_state carries
+        candidates/fallback/want_cache/served plus an early cache-hit
+        response under "hit" (None when no hit).
+        """
         outbound = {k: v for k, v in body.items() if k != "metadata"}
+        served: str | None = None
+        want_cache = False
+
         # Thinking / reasoning support: when the client sends metadata.thinking
         # or metadata.reasoning_effort, forward them to the provider in the
         # request body. Different providers use different field names — the
@@ -589,6 +754,21 @@ class GatewayProxy:
             outbound["thinking"] = metadata["thinking"]
         if metadata.get("reasoning_effort"):
             outbound["reasoning_effort"] = metadata["reasoning_effort"]
+        # Sticky session: while a conversation's model stays healthy (not in
+        # cooldown), keep serving it instead of re-walking the whole chain.
+        # Computed up-front so a cache-hit early-return can report it.
+        session_id = self._extract_session_id(body)
+        sticky_model = None
+        if session_id:
+            sticky_model = self._get_sticky(session_id)
+            if sticky_model is not None and (
+                sticky_model not in candidates
+                or self._cost_tracker.model_in_cooldown(route_name, sticky_model)
+            ):
+                sticky_model = None
+        if sticky_model is not None:
+            candidates = [sticky_model]
+            fallback = "sticky_session"
         # Integrated intelligence — exact-response cache: an identical
         # request (same route + payload) served recently is answered from
         # the cache instead of burning tokens. Opt-in per request via
@@ -611,47 +791,32 @@ class GatewayProxy:
             try:
                 cached = self._intel_cache.get("default", outbound)
                 if cached is not None:
-                    resp = ProviderResponse(
-                        status_code=200,
-                        body=cached,
-                        headers={"X-Gateway-Cache-Hit": "1", "X-Gateway-Route": route_name},
-                        latency_ms=0,
-                        model=str(served or cached.get("model", "")),
-                        usage=None,
+                    resp = self._cache_hit_response(
+                        cached, served, route_name
                     )
                     # Record the cache hit so the Usage page shows it
-                    scope = BudgetScope(kind="key", key=str(api_key))
-                    cache_record = UsageRecord(
+                    await self._record_cache_hit(
+                        resp=resp,
                         request_id=request_id,
-                        api_key=str(api_key),
-                        user_id=None, team=None,
-                        model=str(served or cached.get("model", "")),
-                        provider="direct",
-                        prompt_tokens=0, completion_tokens=0, total_tokens=0,
-                        reasoning_tokens=0,
-                        input_cost=0.0, output_cost=0.0, reasoning_cost=0.0,
-                        total_cost=0.0,
-                        latency_ms=0,
-                        status="success",
-                        timestamp=int(time.time()),
-                        route=route_name,
+                        api_key=api_key,
+                        metadata=metadata,
+                        headers=headers,
+                        route_name=route_name,
                         client_id=client_id,
                         client_profile=client_profile,
-                        cache_hit=True,
+                        served=served,
                     )
-                    cache_record.customer_id = self._cost_tracker.resolve_customer_id(
-                        metadata=metadata, headers=headers, client_id=client_id
+                    return (
+                        outbound,
+                        {
+                            "candidates": candidates,
+                            "fallback": fallback,
+                            "want_cache": want_cache,
+                            "served": served,
+                            "hit": resp,
+                        },
+                        {"session_id": session_id, "model": sticky_model},
                     )
-                    try:
-                        result = self._cost_tracker.record(cache_record)
-                        if inspect.isawaitable(result):
-                            await result
-                    except Exception:
-                        pass
-                    logger.info(
-                        "request=%s route=%s cache-hit", request_id, route_name
-                    )
-                    return resp
             except Exception:
                 logger.exception("cache lookup failed request=%s", request_id)
         # Integrated intelligence — PII redaction: when the client asks
@@ -701,20 +866,6 @@ class GatewayProxy:
                     fallback = "cost_aware"
             except Exception:
                 logger.exception("cost-aware routing failed request=%s", request_id)
-        # Sticky session: while a conversation's model stays healthy (not in
-        # cooldown), keep serving it instead of re-walking the whole chain.
-        session_id = self._extract_session_id(body)
-        sticky_model = None
-        if session_id:
-            sticky_model = self._get_sticky(session_id)
-            if sticky_model is not None and (
-                sticky_model not in candidates
-                or self._cost_tracker.model_in_cooldown(route_name, sticky_model)
-            ):
-                sticky_model = None
-        if sticky_model is not None:
-            candidates = [sticky_model]
-            fallback = "sticky_session"
         logger.info(
             "request=%s route=%s candidates=%s sticky=%s",
             request_id,
@@ -722,6 +873,93 @@ class GatewayProxy:
             ",".join(candidates),
             sticky_model or "-",
         )
+        return (
+            outbound,
+            {
+                "candidates": candidates,
+                "fallback": fallback,
+                "want_cache": want_cache,
+                "served": served,
+                "hit": None,
+            },
+            {"session_id": session_id, "model": sticky_model},
+        )
+
+    def _cache_hit_response(
+        self, cached: dict, served: str | None, route_name: str
+    ) -> ProviderResponse:
+        """Build the ProviderResponse for an exact-response cache hit."""
+        return ProviderResponse(
+            status_code=200,
+            body=cached,
+            headers={"X-Gateway-Cache-Hit": "1", "X-Gateway-Route": route_name},
+            latency_ms=0,
+            model=str(served or cached.get("model", "")),
+            usage=None,
+        )
+
+    async def _record_cache_hit(
+        self,
+        *,
+        resp: ProviderResponse,
+        request_id: str,
+        api_key: str,
+        metadata: dict,
+        headers: dict,
+        route_name: str,
+        client_id: str | None,
+        client_profile: str | None,
+        served: str | None,
+    ) -> None:
+        """Record a cache hit so the Usage page shows it. Best-effort."""
+        cache_record = UsageRecord(
+            request_id=request_id,
+            api_key=str(api_key),
+            user_id=None, team=None,
+            model=str(served or resp.body.get("model", "")) if isinstance(resp.body, dict) else str(served or ""),
+            provider="direct",
+            prompt_tokens=0, completion_tokens=0, total_tokens=0,
+            reasoning_tokens=0,
+            input_cost=0.0, output_cost=0.0, reasoning_cost=0.0,
+            total_cost=0.0,
+            latency_ms=0,
+            status="success",
+            timestamp=int(time.time()),
+            route=route_name,
+            client_id=client_id,
+            client_profile=client_profile,
+            cache_hit=True,
+        )
+        cache_record.customer_id = self._cost_tracker.resolve_customer_id(
+            metadata=metadata, headers=headers, client_id=client_id
+        )
+        try:
+            result = self._cost_tracker.record(cache_record)
+            if inspect.isawaitable(result):
+                await result
+        except Exception:
+            pass
+        logger.info("request=%s route=%s cache-hit", request_id, route_name)
+
+    async def _run_candidate_chain(
+        self,
+        *,
+        candidates: list[str],
+        outbound: dict,
+        route: dict,
+        route_name: str,
+        from_plane: bool,
+        fallback_statuses: list[int],
+        target_cooldowns: dict,
+        fallback: str,
+        request_id: str,
+    ) -> tuple:
+        """Walk the candidate chain with retries, cooldowns and fallbacks.
+
+        Enforces the total fallback-chain deadline, per-target timeout and
+        retry counts, transient 5xx/429 handling and dynamic cooldown
+        bookkeeping. Returns (response, served, fallback, chain_started).
+        """
         # Total fallback-chain deadline: the sum of per-target timeouts can
         # exceed the client's own timeout (Hermes ~60-90s), so a chain of
         # cooldown skips + slow timeouts ends with the client giving up
@@ -730,9 +968,10 @@ class GatewayProxy:
         # candidates and try the last one with the leftover time.
         chain_started = time.perf_counter()
         chain_budget = float(getattr(self._settings, "route_timeout_budget", 90.0))
+        response = None
+        served: str | None = None
         for index, candidate in enumerate(candidates):
             is_last = index + 1 >= len(candidates)
-            response_retry_count = 0
             remaining = 0
             # Enforce the chain budget: after it is spent, only the last
             # candidate may still be attempted (with whatever time is left).
@@ -771,33 +1010,9 @@ class GatewayProxy:
             # Per-target timeout: a target's timeout_seconds is enforced here
             # (capped by the global provider timeout). Only applies to
             # UI-managed routes; plane routes keep the global timeout.
-            target_timeout: float | None = None
-            target_retries = 1  # default: one retry (back-compat with 5xx retry)
-            if not from_plane:
-                try:
-                    target_info = next(
-                        (
-                            t
-                            for t in route.get("targets", [])
-                            if str(t.get("model", "")) == candidate
-                        ),
-                        None,
-                    )
-                    to = int(target_info.get("timeout_seconds") or 0) if target_info else 0
-                    if to > 0:
-                        target_timeout = min(
-                            to, int(self._settings.provider_timeout)
-                        )
-                    # Per-target retries: the UI exposes retries per target —
-                    # honor it (default 1 keeps the existing once-retry).
-                    tr = target_info.get("retries") if target_info else None
-                    if tr is not None:
-                        try:
-                            target_retries = max(0, int(tr))
-                        except (TypeError, ValueError):
-                            target_retries = 1
-                except (TypeError, ValueError):
-                    target_timeout = None
+            target_timeout, target_retries = self._target_timeout_and_retries(
+                route, candidate, from_plane
+            )
             # Cap the per-target timeout by the remaining chain budget so a
             # single target cannot burn the whole budget (a 120-180s target
             # would still blow past the client timeout).
@@ -821,62 +1036,22 @@ class GatewayProxy:
                 # cooldown + fallback. An exponential backoff between retries
                 # lets a short provider blip recover instead of burning all
                 # retries into the same outage.
-                while response_retry_count < target_retries:
-                    response_retry_count += 1
-                    logger.info(
-                        "route=%s model=%s timeout retry %d/%d request=%s",
-                        route_name,
-                        candidate,
-                        response_retry_count,
-                        target_retries,
-                        request_id,
-                    )
-                    if response_retry_count > 1:
-                        await asyncio.sleep(
-                            min(
-                                self._settings.retry_backoff_seconds
-                                * (2 ** (response_retry_count - 2)),
-                                self._settings.retry_backoff_max_seconds,
-                            )
-                        )
-                    try:
-                        response = await self.forward(
-                            candidate, outbound, timeout=target_timeout
-                        )
-                    except ProviderTimeoutError:
-                        if response_retry_count >= target_retries:
-                            if is_last:
-                                raise
-                            break
-                        continue
-                    except Exception:
-                        if is_last:
-                            raise
-                        break
-                    if int(response.status_code or 0) < 400:
-                        served = candidate
-                        # Success resets the dynamic cooldown ladder.
-                        try:
-                            self._cost_tracker.record_success(
-                                route_name, candidate
-                            )
-                        except Exception:
-                            logger.exception(
-                                "cooldown reset failed route=%s model=%s",
-                                route_name,
-                                candidate,
-                            )
-                        break
-                    if int(response.status_code or 0) not in (502, 503, 504):
-                        break
-                if served == candidate:
+                response, retry_succeeded = await self._retry_on_timeout(
+                    candidate=candidate,
+                    outbound=outbound,
+                    route_name=route_name,
+                    target_retries=target_retries,
+                    target_timeout=target_timeout,
+                    is_last=is_last,
+                    request_id=request_id,
+                )
+                if retry_succeeded:
+                    served = candidate
                     break  # the retry succeeded — keep this candidate
                 if is_last:
                     raise
-                cooldown_info = (
-                    target_cooldowns.get(candidate, {"seconds": 3600, "dynamic": True})
-                    if target_cooldowns
-                    else {"seconds": 3600, "dynamic": True}
+                cooldown_info = self._cooldown_info_for(
+                    target_cooldowns, candidate
                 )
                 cooldown_seconds = int(cooldown_info.get("seconds", 3600))
                 count_strike = cooldown_info.get("dynamic", True)
@@ -911,10 +1086,8 @@ class GatewayProxy:
             except Exception as exc:
                 if is_last:
                     raise
-                cooldown_info = (
-                    target_cooldowns.get(candidate, {"seconds": 3600, "dynamic": True})
-                    if target_cooldowns
-                    else {"seconds": 3600, "dynamic": True}
+                cooldown_info = self._cooldown_info_for(
+                    target_cooldowns, candidate
                 )
                 cooldown_seconds = int(cooldown_info.get("seconds", 3600))
                 count_strike = cooldown_info.get("dynamic", True)
@@ -1007,49 +1180,21 @@ class GatewayProxy:
             # candidate. Retrying a 429 only burns more requests into the
             # same quota window and keeps the flow stuck on a model that
             # cannot serve right now.
-            transient_codes = {502, 503, 504}
-            while (
-                int(response.status_code or 0) in transient_codes
-                and response_retry_count < target_retries
-            ):
-                response_retry_count += 1
-                logger.info(
-                    "route=%s model=%s transient %s retry %d/%d request=%s",
-                    route_name,
-                    candidate,
-                    response.status_code,
-                    response_retry_count,
-                    target_retries,
-                    request_id,
-                )
-                await asyncio.sleep(
-                    min(
-                        self._settings.retry_backoff_seconds
-                        * (2 ** (response_retry_count - 1)),
-                        self._settings.retry_backoff_max_seconds,
-                    )
-                )
-                try:
-                    response = await self.forward(
-                        candidate, outbound, timeout=target_timeout
-                    )
-                except ProviderTimeoutError:
-                    if is_last:
-                        raise
-                    continue
-                except Exception:
-                    if is_last:
-                        raise
-                    continue
-                if int(response.status_code or 0) < 400:
-                    served = candidate
-                    break
-            if served == candidate:
+            response, transient_succeeded = await self._retry_transient(
+                response=response,
+                candidate=candidate,
+                outbound=outbound,
+                route_name=route_name,
+                target_retries=target_retries,
+                target_timeout=target_timeout,
+                is_last=is_last,
+                request_id=request_id,
+            )
+            if transient_succeeded:
+                served = candidate
                 break  # the transient retry succeeded — keep this candidate
-            cooldown_info = (
-                target_cooldowns.get(candidate, {"seconds": 3600, "dynamic": True})
-                if target_cooldowns
-                else {"seconds": 3600, "dynamic": True}
+            cooldown_info = self._cooldown_info_for(
+                target_cooldowns, candidate
             )
             cooldown_seconds = int(cooldown_info.get("seconds", 3600))
             # Transient 5xx (502/503/504) usually means the provider is
@@ -1100,6 +1245,200 @@ class GatewayProxy:
             if index + 1 < len(candidates):
                 fallback = f"provider_status_{response.status_code}"
         assert response is not None
+        return response, served, fallback, chain_started
+
+    async def _retry_on_timeout(
+        self,
+        *,
+        candidate: str,
+        outbound: dict,
+        route_name: str,
+        target_retries: int,
+        target_timeout: float | None,
+        is_last: bool,
+        request_id: str,
+    ) -> tuple:
+        """Retry the SAME model after a provider timeout.
+
+        Returns (response, succeeded): succeeded is True when a retry
+        produced a <400 response. Raises when the last candidate keeps
+        failing.
+        """
+        response_retry_count = 0
+        response: ProviderResponse | None = None
+        while response_retry_count < target_retries:
+            response_retry_count += 1
+            logger.info(
+                "route=%s model=%s timeout retry %d/%d request=%s",
+                route_name,
+                candidate,
+                response_retry_count,
+                target_retries,
+                request_id,
+            )
+            if response_retry_count > 1:
+                await asyncio.sleep(
+                    min(
+                        self._settings.retry_backoff_seconds
+                        * (2 ** (response_retry_count - 2)),
+                        self._settings.retry_backoff_max_seconds,
+                    )
+                )
+            try:
+                response = await self.forward(
+                    candidate, outbound, timeout=target_timeout
+                )
+            except ProviderTimeoutError:
+                if response_retry_count >= target_retries:
+                    if is_last:
+                        raise
+                    break
+                continue
+            except Exception:
+                if is_last:
+                    raise
+                break
+            if int(response.status_code or 0) < 400:
+                # Success resets the dynamic cooldown ladder.
+                try:
+                    self._cost_tracker.record_success(route_name, candidate)
+                except Exception:
+                    logger.exception(
+                        "cooldown reset failed route=%s model=%s",
+                        route_name,
+                        candidate,
+                    )
+                return response, True
+            if int(response.status_code or 0) not in (502, 503, 504):
+                break
+        return response, False
+
+    async def _retry_transient(
+        self,
+        *,
+        response: ProviderResponse,
+        candidate: str,
+        outbound: dict,
+        route_name: str,
+        target_retries: int,
+        target_timeout: float | None,
+        is_last: bool,
+        request_id: str,
+    ) -> tuple:
+        """Retry transient 5xx (502/503/504) on the SAME model.
+
+        429 rate limits are NOT retried: a rate-limited model goes straight
+        to cooldown and the chain moves to the next candidate. Returns
+        (response, succeeded).
+        """
+        response_retry_count = 0
+        transient_codes = {502, 503, 504}
+        while (
+            int(response.status_code or 0) in transient_codes
+            and response_retry_count < target_retries
+        ):
+            response_retry_count += 1
+            logger.info(
+                "route=%s model=%s transient %s retry %d/%d request=%s",
+                route_name,
+                candidate,
+                response.status_code,
+                response_retry_count,
+                target_retries,
+                request_id,
+            )
+            await asyncio.sleep(
+                min(
+                    self._settings.retry_backoff_seconds
+                    * (2 ** (response_retry_count - 1)),
+                    self._settings.retry_backoff_max_seconds,
+                )
+            )
+            try:
+                response = await self.forward(
+                    candidate, outbound, timeout=target_timeout
+                )
+            except ProviderTimeoutError:
+                if is_last:
+                    raise
+                continue
+            except Exception:
+                if is_last:
+                    raise
+                continue
+            if int(response.status_code or 0) < 400:
+                return response, True
+        return response, False
+
+    def _target_timeout_and_retries(
+        self, route: dict, candidate: str, from_plane: bool
+    ) -> tuple:
+        """Per-target timeout (capped by the global provider timeout) and
+        retry count. Plane routes keep the global timeout + one retry."""
+        target_timeout: float | None = None
+        target_retries = 1  # default: one retry (back-compat with 5xx retry)
+        if not from_plane:
+            try:
+                target_info = next(
+                    (
+                        t
+                        for t in route.get("targets", [])
+                        if str(t.get("model", "")) == candidate
+                    ),
+                    None,
+                )
+                to = int(target_info.get("timeout_seconds") or 0) if target_info else 0
+                if to > 0:
+                    target_timeout = min(
+                        to, int(self._settings.provider_timeout)
+                    )
+                # Per-target retries: the UI exposes retries per target —
+                # honor it (default 1 keeps the existing once-retry).
+                tr = target_info.get("retries") if target_info else None
+                if tr is not None:
+                    try:
+                        target_retries = max(0, int(tr))
+                    except (TypeError, ValueError):
+                        target_retries = 1
+            except (TypeError, ValueError):
+                target_timeout = None
+        return target_timeout, target_retries
+
+    @staticmethod
+    def _cooldown_info_for(target_cooldowns: dict, candidate: str) -> dict:
+        """Return the cooldown config for a candidate (default 3600s)."""
+        if target_cooldowns:
+            return target_cooldowns.get(
+                candidate, {"seconds": 3600, "dynamic": True}
+            )
+        return {"seconds": 3600, "dynamic": True}
+
+    async def _finalize_route_response(
+        self,
+        *,
+        response: ProviderResponse,
+        body: dict,
+        api_key: str,
+        headers: dict,
+        metadata: dict,
+        request_id: str,
+        alias: str,
+        route: dict,
+        route_name: str,
+        from_plane: bool,
+        session_id: str | None,
+        sticky_model: str | None,
+        outbound: dict,
+        want_cache: bool,
+        client_id: str | None,
+        client_profile: str | None,
+        conversation_id: str | None,
+        fallback: str,
+        served: str | None,
+        chain_started: float,
+    ) -> ProviderResponse:
+        """Finalize a served response: sticky binding, cost records,
+        stream wrapping, cache write and route headers."""
         response.headers = dict(response.headers)
         response.headers["X-Gateway-Route"] = route_name
         response.headers["X-Gateway-Serving-Model"] = response.model
@@ -1224,7 +1563,7 @@ class GatewayProxy:
                 logger.exception("product route activity record failed request=%s", request_id)
         if response.status_code < 400 and from_plane:
             try:
-                plane.record_model_spend(
+                self._routing_control_plane.record_model_spend(
                     alias, response.model, cost, at=self._routing_now()
                 )
             except Exception:
