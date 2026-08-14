@@ -40,15 +40,15 @@ that to HTTP 404).
 
 from __future__ import annotations
 
-import asyncio
 import json
 import logging
 import os
 import sqlite3
 import threading
 import time
+from collections.abc import AsyncIterator
 from dataclasses import dataclass, field
-from typing import Any, AsyncIterator
+from typing import Any
 
 import httpx
 
@@ -406,7 +406,7 @@ class DirectProviderClient:
         *,
         timeout: float = 60.0,
         client: httpx.AsyncClient | None = None,
-    ) -> "DirectProviderClient":
+    ) -> DirectProviderClient:
         """Build a client from ``GATEWAY_PROVIDER_REGISTRY`` in the env.
 
         ``env`` defaults to ``os.environ``; a dict can be passed in tests.
@@ -630,7 +630,7 @@ class DirectProviderClient:
                             " ORDER BY created_at DESC LIMIT 50",
                             (fn_name, fn_name.replace(":", "_") if ":" in fn_name else fn_name),
                         ).fetchall()
-                    for db_fn, db_args, db_sig in rows:
+                    for _db_fn, db_args, db_sig in rows:
                         try:
                             if json.loads(db_args) == parsed:
                                 sig = str(db_sig)

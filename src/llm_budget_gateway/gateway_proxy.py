@@ -567,7 +567,7 @@ class GatewayProxy:
                     region=str(metadata.get("region", "eu")),
                     capabilities=capabilities,
                 )
-            except (KeyError, RuntimeError, TypeError, ValueError) as exc:
+            except (KeyError, RuntimeError, TypeError, ValueError):
                 return self._error_response(404, f"unknown route: {alias}", alias)
             candidates = list(decision.get("candidate_models", []))
             selected = str(decision["selected_model"])
@@ -1037,7 +1037,7 @@ class GatewayProxy:
                     if is_last:
                         raise
                     continue
-                except Exception as exc:
+                except Exception:
                     if is_last:
                         raise
                     continue

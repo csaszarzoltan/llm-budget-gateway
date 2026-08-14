@@ -15,8 +15,6 @@ from pathlib import Path
 from fastapi import FastAPI, Request
 from fastapi.responses import JSONResponse, Response, StreamingResponse
 
-logger = logging.getLogger(__name__)
-
 from .budget_enforcement import (
     BudgetEnforcer,
     InMemoryCounterStore,
@@ -29,11 +27,12 @@ from .gateway_home import install_gateway_home
 from .gateway_proxy import (
     GatewayProxy,
     ProviderResponse,
-    _body_has_images,
     _model_supports_vision,
 )
 from .model_fallback import FallbackConfig, FallbackManager
 from .routing_control_plane import RoutingControlPlane
+
+logger = logging.getLogger(__name__)
 
 
 def _setup_gateway_logging() -> None:
@@ -144,8 +143,11 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     # opt-in per request (X-Gateway-Cache: 1, X-Gateway-Redact-Pii: 1,
     # metadata.cost_aware: true).
     try:
-        from .market_features import ExactResponseCache, PIIRedactor, UsageAnomalyDetector
         from .market_features import CostAwareRouter as MarketCostAwareRouter
+        from .market_features import (
+            ExactResponseCache,
+            PIIRedactor,
+        )
 
         proxy.attach_intelligence(
             cache=ExactResponseCache(str(data_dir / "intelligence.db")),
@@ -244,7 +246,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
                 disconnected = await asyncio.wait_for(
                     request.is_disconnected(), timeout=0.1
                 )
-            except asyncio.TimeoutError:
+            except TimeoutError:
                 disconnected = False
             if disconnected:
                 upstream.cancel()

@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import logging
 import re
 import secrets
 import sqlite3
@@ -12,7 +13,7 @@ from pathlib import Path
 from typing import Any
 from zoneinfo import ZoneInfo
 
-
+logger = logging.getLogger(__name__)
 
 _HERMES_CONFIG = Path.home() / ".hermes" / "config.yaml"
 
@@ -43,9 +44,9 @@ def _sync_hermes_context_lengths(db: sqlite3.Connection) -> None:
         return
     try:
         _HERMES_CONFIG.write_text(cleaned, encoding="utf-8")
-        _log.info("hermes config sync: stripped stale context_length entries")
+        logger.info("hermes config sync: stripped stale context_length entries")
     except OSError as exc:
-        _log.warning("hermes config sync failed: %s", exc)
+        logger.warning("hermes config sync failed: %s", exc)
 
 
 class ProductConsoleStore:
@@ -628,8 +629,8 @@ def _targets(items: list[dict[str, Any]]) -> list[dict[str, Any]]:
         if to is not None:
             try:
                 to_int = int(to)
-            except (TypeError, ValueError):
-                raise ValueError("timeout_seconds must be a number")
+            except (TypeError, ValueError) as exc:
+                raise ValueError("timeout_seconds must be a number") from exc
             if to_int <= 0:
                 raise ValueError("timeout_seconds must be positive")
             item["timeout_seconds"] = max(to_int, 90)
@@ -642,8 +643,8 @@ def _targets(items: list[dict[str, Any]]) -> list[dict[str, Any]]:
                 if ctx_len_int <= 0:
                     raise ValueError
                 item["context_length"] = ctx_len_int
-            except (ValueError, TypeError):
-                raise ValueError("context_length must be a positive integer")
+            except (ValueError, TypeError) as exc:
+                raise ValueError("context_length must be a positive integer") from exc
         # cooldown_dynamic: per-target dynamic ladder toggle (default True)
         cdyn = item.get("cooldown_dynamic")
         if cdyn is not None:

@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import logging
 import os
 import socket
 import subprocess
@@ -11,8 +12,6 @@ import time
 from dataclasses import asdict, dataclass
 from pathlib import Path
 from typing import IO
-
-import logging
 
 logger = logging.getLogger(__name__)
 

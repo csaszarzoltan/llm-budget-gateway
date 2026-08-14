@@ -12,8 +12,8 @@ import logging
 import sqlite3
 import threading
 import time
-from datetime import UTC, datetime
 from dataclasses import dataclass
+from datetime import UTC, datetime
 from zoneinfo import ZoneInfo
 
 from .budget_enforcement import BudgetScope
@@ -461,10 +461,9 @@ class CostStore:
         days_out = [
             {"date": day, "models": by_day[day]} for day in sorted(by_day)
         ]
-        if route:
-            calls = [c for c in call_rows if c[2] == route]
-        else:
-            calls = list(call_rows)
+        calls = (
+            [c for c in call_rows if c[2] == route] if route else list(call_rows)
+        )
         return {
             "days": days_out,
             "calls": [
@@ -737,10 +736,9 @@ class CostStore:
             }
             for bucket in sorted(by_bucket)
         ]
-        if route:
-            calls = [c for c in call_rows if c[2] == route]
-        else:
-            calls = list(call_rows)
+        calls = (
+            [c for c in call_rows if c[2] == route] if route else list(call_rows)
+        )
         return {
             "days": buckets_out,
             "calls": [
