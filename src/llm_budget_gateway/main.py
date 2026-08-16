@@ -30,6 +30,7 @@ from .gateway_proxy import (
     _model_supports_vision,
 )
 from .model_fallback import FallbackConfig, FallbackManager
+from .request_telemetry import RequestTelemetryLogger, RequestTelemetryStore
 from .routing_control_plane import RoutingControlPlane
 
 logger = logging.getLogger(__name__)
@@ -214,6 +215,22 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         except Exception:
             logger.exception("failed to attach direct provider transport")
 
+    # Attach the LLM request telemetry logger (roadmap #1 observability).
+    # Uses the same SQLite database as the cost ledger. Telemetry is
+    # best-effort: if the DB is unavailable the logger falls back to
+    # stderr INFO logging and never blocks the proxy path.
+    try:
+        telemetry_store = RequestTelemetryStore(
+            _sqlite_path(settings.database_url),
+            connection=store._conn,
+        )
+        proxy.attach_telemetry(
+            RequestTelemetryLogger(store=telemetry_store)
+        )
+        logger.info("attached LLM request telemetry logger")
+    except Exception:
+        logger.exception("failed to attach telemetry logger")
+
     app = FastAPI(title="LLM Budget Gateway", version="0.1.0")
 
     @app.post("/v1/chat/completions")
@@ -305,6 +322,63 @@ def create_app(settings: Settings | None = None) -> FastAPI:
             return _provider_response(
                 GatewayProxy._error_response(400, str(exc), str(body.get("model", "")))
             )
+
+    @app.get("/v1/observability/requests")
+    async def observability_requests(
+        request: Request,
+        limit: int = 200,
+        model: str | None = None,
+        status: str | None = None,
+        provider: str | None = None,
+        since: int | None = None,
+        trace_id: str | None = None,
+    ) -> Response:
+        """Query LLM request telemetry (roadmap #1 observability).
+
+        Returns recorded telemetry entries with provider, model, token
+        usage, cost, latency, trace_id, and status.  Query parameters:
+        ``model``, ``status`` (success|error|timeout|rate_limited),
+        ``provider`` (litellm|direct), ``since`` (epoch seconds),
+        ``trace_id`` (single-trace lookup), ``limit``.
+        """
+        telemetry = proxy._telemetry
+        store = telemetry.store
+        if store is None:
+            return JSONResponse(
+                status_code=503,
+                content={"error": "telemetry store not available"},
+            )
+        if trace_id is not None:
+            entry = store.lookup(trace_id)
+            if entry is None:
+                return JSONResponse(
+                    status_code=404,
+                    content={"error": f"trace_id {trace_id} not found"},
+                )
+            return JSONResponse({"trace": entry, "total": 1})
+        entries = store.query(
+            model=model,
+            status=status,
+            provider=provider,
+            since_epoch=since,
+            limit=limit,
+        )
+        return JSONResponse({"requests": entries, "total": len(entries)})
+
+    @app.get("/v1/observability/summary")
+    async def observability_summary(
+        request: Request,
+        since: int | None = None,
+        model: str | None = None,
+    ) -> Response:
+        """Aggregate telemetry summary (request count, token totals, cost)."""
+        store = proxy._telemetry.store
+        if store is None:
+            return JSONResponse(
+                status_code=503,
+                content={"error": "telemetry store not available"},
+            )
+        return JSONResponse(store.summary(since_epoch=since, model=model))
 
     @app.get("/v1/models")
     async def list_models() -> JSONResponse:

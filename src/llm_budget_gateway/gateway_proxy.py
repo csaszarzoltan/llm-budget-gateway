@@ -30,6 +30,7 @@ from .budget_enforcement import (
 from .config import Settings
 from .cost_tracking import CostTracker, TokenUsage, UsageRecord, accumulate_usage
 from .model_fallback import FallbackManager
+from .request_telemetry import RequestTelemetryLogger
 
 try:
     from zoneinfo import ZoneInfo
@@ -238,12 +239,24 @@ class GatewayProxy:
         self._intel_cache = None
         self._intel_redactor = None
         self._intel_cost_router = None
+        # LLM request telemetry (roadmap #1 observability). Attached lazily by
+        # main.py so tests can run without the telemetry SQLite DB.
+        self._telemetry = RequestTelemetryLogger()
 
     def attach_intelligence(self, cache=None, redactor=None, cost_router=None) -> None:
         """Attach the integrated intelligence helpers (cache, PII, cost)."""
         self._intel_cache = cache
         self._intel_redactor = redactor
         self._intel_cost_router = cost_router
+
+    def attach_telemetry(self, logger_instance: RequestTelemetryLogger) -> None:
+        """Attach the LLM request telemetry logger.
+
+        When attached, every request handled by ``_handle`` and
+        ``_handle_logical_route`` emits a telemetry entry capturing
+        provider, model, token usage, cost, latency and trace_id.
+        """
+        self._telemetry = logger_instance
 
     def attach_product_console(self, store: object) -> None:
         """Attach the UI-managed route store (pc_routes/targets model).
@@ -295,6 +308,40 @@ class GatewayProxy:
             return None
         return model
 
+    def _emit_telemetry(
+        self,
+        *,
+        trace_id: str,
+        provider: str,
+        response: ProviderResponse,
+        scope: BudgetScope | None = None,
+        customer_id: str | None = None,
+        route: str | None = None,
+        conversation_id: str | None = None,
+    ) -> None:
+        """Emit a telemetry entry from a ProviderResponse (no-op if unattached).
+
+        Best-effort: never raises into the proxy request path. Used by
+        ``_handle`` and ``_handle_logical_route`` to capture
+        provider/model/tokens/cost/latency/trace_id on every request.
+        """
+        try:
+            entry = self._telemetry.from_response(
+                trace_id=trace_id,
+                provider=provider,
+                response=response,
+                scope=scope,
+                customer_id=customer_id,
+                route=route,
+                conversation_id=conversation_id,
+            )
+            entry.recorded_at = int(time.time())
+            self._telemetry.emit(entry)
+        except Exception:
+            logger.exception(
+                "telemetry emit failed trace_id=%s", trace_id
+            )
+
     async def handle_chat_completion(
         self, body: dict, api_key: str, headers: dict
     ) -> ProviderResponse:
@@ -330,16 +377,32 @@ class GatewayProxy:
                 try:
                     return await self._handle_logical_route(body, api_key, headers, request_id)
                 except ProviderTimeoutError:
-                    return self._error_response(
+                    err_resp = self._error_response(
                         502, "upstream provider timed out", model
                     )
+                    self._emit_telemetry(
+                        trace_id=request_id,
+                        provider="direct",
+                        response=err_resp,
+                        scope=None,
+                        customer_id=self._resolve_request_customer(body, headers),
+                    )
+                    return err_resp
                 except Exception:
                     logger.exception(
                         "logical route failed request=%s model=%s", request_id, model
                     )
-                    return self._error_response(
+                    err_resp = self._error_response(
                         502, "upstream provider error", model
                     )
+                    self._emit_telemetry(
+                        trace_id=request_id,
+                        provider="direct",
+                        response=err_resp,
+                        scope=None,
+                        customer_id=self._resolve_request_customer(body, headers),
+                    )
+                    return err_resp
         if self._product_console is not None:
             try:
                 self._product_console.authenticate_application(api_key)
@@ -349,16 +412,32 @@ class GatewayProxy:
                 try:
                     return await self._handle_logical_route(body, api_key, headers, request_id)
                 except ProviderTimeoutError:
-                    return self._error_response(
+                    err_resp = self._error_response(
                         502, "upstream provider timed out", model
                     )
+                    self._emit_telemetry(
+                        trace_id=request_id,
+                        provider="direct",
+                        response=err_resp,
+                        scope=None,
+                        customer_id=self._resolve_request_customer(body, headers),
+                    )
+                    return err_resp
                 except Exception:
                     logger.exception(
                         "logical route failed request=%s model=%s", request_id, model
                     )
-                    return self._error_response(
+                    err_resp = self._error_response(
                         502, "upstream provider error", model
                     )
+                    self._emit_telemetry(
+                        trace_id=request_id,
+                        provider="direct",
+                        response=err_resp,
+                        scope=None,
+                        customer_id=self._resolve_request_customer(body, headers),
+                    )
+                    return err_resp
         try:
             scopes = self.resolve_scopes(api_key, headers)
         except ApiKeyError:
@@ -367,28 +446,68 @@ class GatewayProxy:
                 request_id,
                 self._redact_key(api_key),
             )
-            return self._error_response(401, "invalid or missing api key", model)
+            err_resp = self._error_response(401, "invalid or missing api key", model)
+            self._emit_telemetry(
+                trace_id=request_id,
+                provider="litellm",
+                response=err_resp,
+                scope=None,
+                customer_id=self._resolve_request_customer(body, headers),
+            )
+            return err_resp
 
         if not self._model_known(model):
-            return self._error_response(404, f"unknown model: {model}", model)
+            err_resp = self._error_response(404, f"unknown model: {model}", model)
+            self._emit_telemetry(
+                trace_id=request_id,
+                provider="litellm",
+                response=err_resp,
+                scope=scopes[0] if scopes else None,
+                customer_id=self._resolve_request_customer(body, headers),
+            )
+            return err_resp
 
         est_input_tokens = self._estimate_input_tokens(body)
         try:
             self._budget_enforcer.check_sync(scopes, model, est_input_tokens)
         except RateLimitExceededError as exc:
-            return self._error_response(429, str(exc), model)
+            err_resp = self._error_response(429, str(exc), model)
+            self._emit_telemetry(
+                trace_id=request_id,
+                provider="litellm",
+                response=err_resp,
+                scope=scopes[0],
+                customer_id=self._resolve_request_customer(body, headers),
+            )
+            return err_resp
 
         try:
             check = self._budget_enforcer.check_hard(scopes)
             if inspect.isawaitable(check):
                 await check
         except BudgetExceededError as exc:
-            return self._error_response(412, str(exc), model)
+            err_resp = self._error_response(412, str(exc), model)
+            self._emit_telemetry(
+                trace_id=request_id,
+                provider="litellm",
+                response=err_resp,
+                scope=scopes[0],
+                customer_id=self._resolve_request_customer(body, headers),
+            )
+            return err_resp
 
         try:
             response = await self._forward_with_fallback(model, body, api_key, headers)
         except ProviderTimeoutError:
             logger.warning("provider timeout request=%s model=%s", request_id, model)
+            err_resp = self._error_response(502, "upstream provider timed out", model)
+            self._emit_telemetry(
+                trace_id=request_id,
+                provider="litellm",
+                response=err_resp,
+                scope=scopes[0],
+                customer_id=self._resolve_request_customer(body, headers),
+            )
             await self._record(
                 request_id=request_id,
                 scope=scopes[0],
@@ -399,13 +518,21 @@ class GatewayProxy:
                 status_code=502,
                 customer_id=self._resolve_request_customer(body, headers),
             )
-            return self._error_response(502, "upstream provider timed out", model)
+            return err_resp
         except Exception as exc:
             logger.warning(
                 "provider error request=%s model=%s: %s",
                 request_id,
                 model,
                 exc,
+            )
+            err_resp = self._error_response(502, "upstream provider error", model)
+            self._emit_telemetry(
+                trace_id=request_id,
+                provider="litellm",
+                response=err_resp,
+                scope=scopes[0],
+                customer_id=self._resolve_request_customer(body, headers),
             )
             await self._record(
                 request_id=request_id,
@@ -417,7 +544,7 @@ class GatewayProxy:
                 status_code=502,
                 customer_id=self._resolve_request_customer(body, headers),
             )
-            return self._error_response(502, "upstream provider error", model)
+            return err_resp
 
         await self._record(
             request_id=request_id,
@@ -427,6 +554,15 @@ class GatewayProxy:
             latency_ms=response.latency_ms,
             status="success",
             customer_id=self._resolve_request_customer(body, headers),
+        )
+        # Emit LLM request telemetry (roadmap #1 observability).
+        self._emit_telemetry(
+            trace_id=request_id,
+            provider="litellm",
+            response=response,
+            scope=scopes[0],
+            customer_id=self._resolve_request_customer(body, headers),
+            conversation_id=self._extract_session_id(body) or None,
         )
         # Rate-limit visibility: attach standard X-RateLimit-* headers from
         # the last check_sync so clients (Hermes) can show remaining quota.
@@ -1539,6 +1675,17 @@ class GatewayProxy:
                 await result
         except Exception:
             logger.exception("product route cost record failed request=%s", request_id)
+        # Emit LLM request telemetry (roadmap #1 observability) for logical
+        # routes — provider is "direct" (product-console / routing plane).
+        self._emit_telemetry(
+            trace_id=request_id,
+            provider="direct",
+            response=response,
+            scope=BudgetScope(kind="key", key=str(api_key)),
+            customer_id=self._resolve_request_customer(body, headers),
+            route=route_name,
+            conversation_id=conversation_id,
+        )
         logger.info(
             "request=%s route=%s served=%s status=%s fallback=%s latency=%sms",
             request_id,
