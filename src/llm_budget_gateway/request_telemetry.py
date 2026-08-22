@@ -130,9 +130,17 @@ class RequestTelemetryStore:
     used standalone or in tests.
     """
 
-    def __init__(self, db_path: str, connection: sqlite3.Connection | None = None) -> None:
+    def __init__(
+        self,
+        db_path: str,
+        connection: sqlite3.Connection | None = None,
+        *,
+        lock: threading.Lock | None = None,
+    ) -> None:
         self._db_path = db_path
-        self._lock = threading.Lock()
+        # When sharing the cost ledger's handle (main.py), reuse its lock so
+        # both stores serialise on one mutex — two locks on one connection races.
+        self._lock = lock or threading.Lock()
         self._conn = connection or sqlite3.connect(db_path, check_same_thread=False)
         self._conn.row_factory = sqlite3.Row
         with self._lock:

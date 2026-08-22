@@ -2,13 +2,17 @@
 
 from __future__ import annotations
 
+import asyncio
 import csv
 import io
 import json
+import logging
 import os
+import re
 import sqlite3
 import tempfile
 import time
+import urllib.parse
 from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
 from pathlib import Path
@@ -351,10 +355,10 @@ def create_console_app(
             adapters.setdefault(channel, adapter)
         return AlertDispatcher(adapters=adapters)
 
-    _dispatcher_singleton: AlertDispatcher | None = None
+    _dispatcher_singleton: AlertDispatcher | None = build_alert_dispatcher()
     app.state.build_alert_adapter = build_alert_adapter
     app.state.build_alert_dispatcher = build_alert_dispatcher
-    app.state.alert_dispatcher = _dispatcher_singleton or build_alert_dispatcher()
+    app.state.alert_dispatcher = _dispatcher_singleton
 
     @app.post("/v1/console/alerts/evaluate")
     async def console_alerts_evaluate(body: dict[str, object]) -> dict[str, object]:
@@ -898,9 +902,13 @@ def create_console_app(
             import httpx as _httpx  # type: ignore[import-not-found]
 
             async with _httpx.AsyncClient(timeout=2.0) as _cli:
-                await _cli.post("http://127.0.0.1:8000/_admin/reload-direct-registry")
-        except Exception:  # pragma: no cover — proxy may not be running
-            pass
+                resp = await _cli.post("http://127.0.0.1:8000/_admin/reload-direct-registry")
+                if resp.status_code >= 400:
+                    logging.getLogger(__name__).warning(
+                        "proxy reload returned %s: %s", resp.status_code, resp.text[:200]
+                    )
+        except Exception as exc:  # pragma: no cover — proxy may not be running
+            logging.getLogger(__name__).debug("proxy reload poke failed: %s", exc)
 
     @app.post("/v1/product/provider-connections", status_code=201)
     async def create_product_provider_connection(
@@ -909,7 +917,7 @@ def create_console_app(
         """Store one encrypted credential set for one named provider account."""
         try:
             result = provider_store.create(body)
-            await _poke_proxy_reload_direct_registry()
+            asyncio.create_task(_poke_proxy_reload_direct_registry())
             return result
         except ValueError as exc:
             raise HTTPException(422, str(exc)) from exc
@@ -925,7 +933,7 @@ def create_console_app(
         """
         try:
             result = provider_store.update(provider_id, body)
-            await _poke_proxy_reload_direct_registry()
+            asyncio.create_task(_poke_proxy_reload_direct_registry())
             return result
         except KeyError as exc:
             raise HTTPException(404, "unknown provider connection") from exc
@@ -937,7 +945,7 @@ def create_console_app(
         """Verify credentials and download the provider-native model catalog."""
         try:
             result = await provider_discovery.sync(provider_id)
-            await _poke_proxy_reload_direct_registry()
+            asyncio.create_task(_poke_proxy_reload_direct_registry())
             return result
         except KeyError as exc:
             raise HTTPException(404, "unknown provider connection") from exc
@@ -1098,6 +1106,10 @@ def create_console_app(
         page: int = 1,
         page_size: int = 200,
     ) -> dict[str, object]:
+        if period not in {"hour", "day", "month"}:
+            raise HTTPException(422, "period must be hour|day|month")
+        page = max(1, int(page))
+        page_size = max(1, min(int(page_size), 500))
         base = product.usage()
         bucket_key = {"hour": "hourly", "day": "daily", "month": "monthly"}.get(
             period, "daily"
@@ -1267,11 +1279,14 @@ def create_console_app(
                     f"{row.cost:.6f}",
                 ]
             )
-        filename = f"{customer['name']}-usage.csv"
+        raw_name = str(customer['name'])
+        safe = re.sub(r'[^a-zA-Z0-9._-]', '_', raw_name).strip('._')[:64] or "export"
+        filename = f"{safe}-usage.csv"
+        encoded = urllib.parse.quote(filename)
         return PlainTextResponse(
             buf.getvalue(),
             media_type="text/csv",
-            headers={"Content-Disposition": f'attachment; filename="{filename}"'},
+            headers={"Content-Disposition": f"attachment; filename=\"{filename}\"; filename*=UTF-8''{encoded}"},
         )
 
     @app.get("/v1/product/routes/{route_id}/status")

@@ -252,6 +252,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         telemetry_store = RequestTelemetryStore(
             _sqlite_path(settings.database_url),
             connection=store.connection,
+            lock=store.shared_lock,
         )
         proxy.attach_telemetry(
             RequestTelemetryLogger(store=telemetry_store)

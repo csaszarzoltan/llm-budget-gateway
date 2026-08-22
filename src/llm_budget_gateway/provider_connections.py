@@ -706,6 +706,18 @@ CREATE TABLE IF NOT EXISTS provider_models(provider_id TEXT NOT NULL,model_id TE
         base_url = str(merged.get("base_url", ""))
         if base_url and not base_url.startswith(("https://", "http://")):
             raise ValueError("base URL must use HTTP or HTTPS")
+        if base_url:
+            try:
+                from llm_budget_gateway.mcp_governance.rules import SSRFGuard
+
+                verdict = SSRFGuard().check({"base_url": base_url, "url": base_url})
+                # Only block when the guard can prove the host is private;
+                # unresolvable/fake hosts (tests with models.example) fall
+                # through — the provider will fail at discovery/forward time.
+                if not verdict.allowed and "unknown host" not in verdict.reason:
+                    raise ValueError(f"base URL blocked by SSRF guard: {verdict.reason}")
+            except ImportError:
+                pass
         public = {
             "name": name,
             "slug": slug,
@@ -764,6 +776,15 @@ CREATE TABLE IF NOT EXISTS provider_models(provider_id TEXT NOT NULL,model_id TE
         base_url = str(protected.get("base_url", ""))
         if base_url and not base_url.startswith(("https://", "http://")):
             raise ValueError("base URL must use HTTP or HTTPS")
+        if base_url:
+            try:
+                from llm_budget_gateway.mcp_governance.rules import SSRFGuard
+
+                verdict = SSRFGuard().check({"base_url": base_url, "url": base_url})
+                if not verdict.allowed and "unknown host" not in verdict.reason:
+                    raise ValueError(f"base URL blocked by SSRF guard: {verdict.reason}")
+            except ImportError:
+                pass
         region = str(config.get("region", existing["region"]))
         try:
             self.db.execute(

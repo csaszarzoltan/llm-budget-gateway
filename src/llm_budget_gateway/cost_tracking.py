@@ -218,6 +218,10 @@ class CostStore:
             db_path or ":memory:", check_same_thread=False
         )
         self._conn.row_factory = sqlite3.Row
+        #: When a shared connection is injected (e.g. telemetry sharing the
+        #: gateway DB), callers may set ``_shared_lock`` so both stores
+        #: serialize on the same mutex. Otherwise each store owns its lock.
+        self._shared_lock: threading.Lock | None = None
         with self._lock:
             self._conn.execute("PRAGMA journal_mode=WAL")
             self._conn.execute(_CREATE_TABLE)
@@ -255,6 +259,21 @@ class CostStore:
     def connection(self) -> sqlite3.Connection:
         """Expose the underlying SQLite connection (shared with telemetry)."""
         return self._conn
+
+    @property
+    def shared_lock(self) -> threading.Lock:
+        """Mutex that guards the shared DB handle.
+
+        When ``RequestTelemetryStore`` is attached to the same handle
+        (see ``main.py``), it borrows this lock so cost and telemetry
+        serialise on one mutex — two locks on one ``sqlite3.Connection``
+        would race under concurrent workers.
+        """
+        return self._shared_lock or self._lock
+
+    def attach_shared_lock(self, lock: threading.Lock) -> None:
+        """Use an externally provided lock (telemetry will share it)."""
+        self._shared_lock = lock
 
     def _migrate_legacy_schema(self) -> None:
         """Add columns introduced after the original table was created.
