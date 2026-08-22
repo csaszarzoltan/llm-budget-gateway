@@ -123,6 +123,86 @@ class TestRegistryLoading:
             )
 
 
+class TestReloadRegistry:
+    """Hot-reload of the provider registry (sync-models → no restart needed)."""
+
+    def test_reload_adds_new_model(self):
+        client = DirectProviderClient(REGISTRY, timeout=5.0)
+        with pytest.raises(UnknownModelError):
+            client.resolve("stealth/ox-alpha")
+        client.reload_registry(
+            {
+                **REGISTRY,
+                "openrouter": {
+                    "base_url": "https://openrouter.ai/api/v1",
+                    "api_key_env": "OPENROUTER_API_KEY",
+                    "auth": "bearer",
+                    "models": ["stealth/ox-alpha"],
+                },
+            }
+        )
+        endpoint = client.resolve("stealth/ox-alpha")
+        assert endpoint.name == "openrouter"
+        # qualified alias also resolves after reload
+        assert client.resolve("@openrouter/stealth/ox-alpha").name == "openrouter"
+
+    def test_reload_removes_stale_model(self):
+        registry = {
+            "gone": {
+                "base_url": "https://g.example.com/v1",
+                "api_key_env": "G_KEY",
+                "models": ["old-model"],
+            },
+        }
+        client = DirectProviderClient(registry, timeout=5.0)
+        assert client.resolve("old-model").name == "gone"
+        client.reload_registry({})
+        with pytest.raises(UnknownModelError):
+            client.resolve("old-model")
+
+    def test_reload_preserves_client_and_thought_signatures(self, tmp_path):
+        db_path = str(tmp_path / "sig.db")
+        client = DirectProviderClient(REGISTRY, timeout=5.0, signature_db_path=db_path)
+        original_client = client._client
+        sig_db = client._sig_db
+        client._capture_thought_signatures(
+            {
+                "choices": [
+                    {
+                        "message": {
+                            "tool_calls": [
+                                {
+                                    "id": "call_1",
+                                    "type": "function",
+                                    "function": {"name": "f", "arguments": "{}"},
+                                    "extra_content": {"google": {"thought_signature": "SIG"}},
+                                }
+                            ]
+                        }
+                    }
+                ]
+            }
+        )
+        # in-memory signatures before reload
+        assert "call_1" in client._thought_signatures
+        client.reload_registry(REGISTRY)
+        # same httpx client + signature db survive the reload
+        assert client._client is original_client
+        assert client._sig_db is sig_db
+        # captured signatures still replayable after reload
+        assert "call_1" in client._thought_signatures
+        # also persisted to sqlite
+        cur = client._sig_db.execute("SELECT signature FROM thought_signatures WHERE id='call_1'")
+        assert cur.fetchone() is not None
+
+    def test_reload_invalid_registry_raises_and_keeps_old(self):
+        client = DirectProviderClient(REGISTRY, timeout=5.0)
+        with pytest.raises(ProviderConfigError):
+            client.reload_registry({"bad": {"base_url": "ftp://nope"}})
+        # old index still works
+        assert client.resolve("mimo-v2.5-free").name == "opencode-zen"
+
+
 class TestResolve:
     def test_resolve_known_model(self):
         client = DirectProviderClient(REGISTRY, timeout=5.0)

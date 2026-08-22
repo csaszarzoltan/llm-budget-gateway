@@ -348,6 +348,27 @@ class DirectProviderClient:
                 logger.exception("failed to open thought_signature db")
         self._load_registry(registry or {})
 
+    def reload_registry(self, registry: dict[str, dict[str, Any]]) -> None:
+        """Hot-reload the provider registry without losing state.
+
+        Used after sync-models adds/removes discovered models so the running
+        proxy does not need a restart. Validates into a staging map first —
+        on failure the live index is untouched. The HTTP client and the
+        persisted thought_signature DB/locks are kept.
+        """
+        # Validate into a transient client so errors do not mutate self.
+        try:
+            tmp = DirectProviderClient.__new__(DirectProviderClient)
+            tmp._registry = {}  # type: ignore[attr-defined]
+            tmp._model_index = {}  # type: ignore[attr-defined]
+            tmp._timeout = self._timeout  # type: ignore[attr-defined]
+            tmp._load_registry(registry)
+        except Exception:
+            raise
+        # Replace only the index — keep client + signature state.
+        self._registry = tmp._registry  # type: ignore[attr-defined]
+        self._model_index = tmp._model_index  # type: ignore[attr-defined]
+
     def _load_registry(self, registry: dict[str, dict[str, Any]]) -> None:
         """Build the endpoint map and the model -> endpoint index."""
         for name, raw in registry.items():

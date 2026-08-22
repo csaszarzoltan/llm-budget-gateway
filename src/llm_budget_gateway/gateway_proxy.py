@@ -273,7 +273,7 @@ class GatewayProxy:
         if now is not None:
             self._routing_now = now
 
-    def attach_direct_client(self, client: object) -> None:
+    def attach_direct_client(self, client: object, *, registry_factory=None) -> None:
         """Attach the direct provider transport (replaces litellm forwarding).
 
         When attached, models resolved by the direct client are forwarded as
@@ -281,6 +281,27 @@ class GatewayProxy:
         client does not know fall back to the legacy litellm path.
         """
         self._direct_client = client
+        self._direct_registry_factory = registry_factory
+
+    def reload_direct_registry(self) -> None:
+        """Hot-reload the direct client's registry from the persisted store.
+
+        Rebuilds the provider registry from the factory registered via
+        ``attach_direct_client`` and calls ``reload_registry`` on the live
+        ``DirectProviderClient`` (no new HTTP client, no lost thought
+        signatures). Called by the sync-models endpoint or an explicit
+        admin action. No-op when no direct client is attached.
+        """
+        factory = getattr(self, "_direct_registry_factory", None)
+        client = getattr(self, "_direct_client", None)
+        if client is None or not callable(factory):
+            return
+        registry = factory()
+        reload = getattr(client, "reload_registry", None)
+        if callable(reload):
+            reload(registry)
+        else:  # pragma: no cover — fallback for stub doubles
+            self._direct_client = factory  # type: ignore[assignment]
 
     # -- sticky session helpers -------------------------------------------
 
@@ -1236,7 +1257,7 @@ class GatewayProxy:
                             {
                                 "type": "error",
                                 "error": str(exc)[:500],
-                                "body": getattr(exc, "body", "")[:500],
+                                "body": (getattr(exc, "body", "") or "")[:500],
                             }
                         ),
                         count_strike=count_strike,
@@ -2065,11 +2086,35 @@ class GatewayProxy:
         if self._direct_client is not None:
             resolved = getattr(self._direct_client, "resolve", None)
             if resolved is not None:
+                resolved_ok = False
                 try:
                     resolved(model)
-                except Exception:
-                    resolved = None
-                if resolved is not None:
+                    resolved_ok = True
+                except Exception as _resolve_exc:
+                    # Stale registry race: a sync-models just landed new models
+                    # (e.g. stealth/ox-alpha) while this worker's index is still
+                    # old. The admin poke may have hit another worker (4 workers
+                    # on :8000), so do one lazy reload and retry here.
+                    factory = getattr(self, "_direct_registry_factory", None)
+                    if callable(factory):
+                        try:
+                            self.reload_direct_registry()
+                            resolved(model)
+                            resolved_ok = True
+                            logger.info(
+                                "direct registry auto-reloaded for model=%s", model
+                            )
+                        except Exception as _retry_exc:  # noqa: F841
+                            logger.debug(
+                                "direct client resolve failed model=%s error=%s",
+                                model, _resolve_exc,
+                            )
+                    else:
+                        logger.debug(
+                            "direct client resolve failed model=%s error=%s",
+                            model, _resolve_exc,
+                        )
+                if resolved_ok:
                     return await self._forward_direct(
                         model, body, stream, timeout=effective_timeout,
                         request_id=getattr(self, "_current_request_id", None),

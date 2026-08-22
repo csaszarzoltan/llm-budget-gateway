@@ -210,7 +210,34 @@ def create_app(settings: Settings | None = None) -> FastAPI:
                     timeout=settings.provider_timeout,
                     signature_db_path=_sqlite_path(settings.database_url),
                 )
-                proxy.attach_direct_client(direct)
+
+                def _build_direct_registry() -> dict:
+                    """Re-read the persisted provider connections on each sync."""
+                    rebuilt: dict[str, dict] = {}
+                    for connection in store.list():
+                        slug = str(connection["slug"])
+                        secret = store.connection_secret(str(connection["id"]))
+                        models = [str(m["id"]) for m in store.models(str(connection["id"]))]
+                        base = str(secret.get("base_url", "")).rstrip("/")
+                        if not base or not models:
+                            continue
+                        rebuilt[slug] = {
+                            "base_url": base,
+                            "api_key_env": f"__vault_{slug}__",
+                            "api_key": str(secret.get("api_key", "")),
+                            "user_agent": str(secret.get("user_agent", "")).strip() or None,
+                            "models": models,
+                        }
+                        if extra_body_raw_sync := str(secret.get("extra_body_json", "") or "").strip():  # noqa: F841
+                            try:
+                                eb = json.loads(extra_body_raw_sync)
+                                if isinstance(eb, dict) and eb:
+                                    rebuilt[slug]["extra_body"] = eb
+                            except json.JSONDecodeError:
+                                pass
+                    return rebuilt
+
+                proxy.attach_direct_client(direct, registry_factory=_build_direct_registry)
                 logger.info("attached direct provider transport: %s", sorted(registry))
         except Exception:
             logger.exception("failed to attach direct provider transport")
@@ -487,6 +514,23 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     @app.get("/health")
     async def health() -> JSONResponse:
         return JSONResponse({"status": "ok"})
+
+    @app.post("/_admin/reload-direct-registry")
+    async def reload_direct_registry() -> JSONResponse:
+        """Hot-reload the direct client's registry from the persisted store.
+
+        Called by the console after sync-models, or by an admin trigger.
+        Refreshes every gateway worker view of the provider model index —
+        newly discovered models (e.g. stealth/ox-alpha on openrouter)
+        become addressable without a process restart. Thought_signature
+        state and the HTTP client are preserved.
+        """
+        try:
+            proxy.reload_direct_registry()
+        except Exception as exc:  # pragma: no cover — best-effort
+            logger.exception("direct registry reload failed: %s", exc)
+            return JSONResponse({"error": str(exc)}, status_code=500)
+        return JSONResponse({"status": "reloaded"})
 
     return install_gateway_home(app)
 async def _read_json_body(request: Request) -> dict | ProviderResponse:

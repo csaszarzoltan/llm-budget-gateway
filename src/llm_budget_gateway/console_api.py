@@ -916,7 +916,20 @@ def create_console_app(
     async def sync_product_provider_models(provider_id: str) -> dict[str, object]:
         """Verify credentials and download the provider-native model catalog."""
         try:
-            return await provider_discovery.sync(provider_id)
+            result = await provider_discovery.sync(provider_id)
+            # Hot-reload the proxy's direct-registry so newly discovered models
+            # (e.g. stealth/ox-alpha) are addressable without a restart. The
+            # console and proxy are different processes, so we poke the proxy's
+            # admin endpoint. Failures are best-effort — the DB is authoritative
+            # and the next proxy restart would still pick up the models.
+            try:
+                import httpx as _httpx  # type: ignore[import-not-found]
+
+                async with _httpx.AsyncClient(timeout=2.0) as _cli:
+                    await _cli.post("http://127.0.0.1:8000/_admin/reload-direct-registry")
+            except Exception:  # pragma: no cover — proxy may not be running
+                pass
+            return result
         except KeyError as exc:
             raise HTTPException(404, "unknown provider connection") from exc
         except ValueError as exc:
