@@ -251,6 +251,11 @@ class CostStore:
             )
             self._conn.commit()
 
+    @property
+    def connection(self) -> sqlite3.Connection:
+        """Expose the underlying SQLite connection (shared with telemetry)."""
+        return self._conn
+
     def _migrate_legacy_schema(self) -> None:
         """Add columns introduced after the original table was created.
 

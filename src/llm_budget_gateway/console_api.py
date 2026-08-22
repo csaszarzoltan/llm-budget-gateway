@@ -886,13 +886,31 @@ def create_console_app(
         """List named provider accounts without secret material."""
         return {"providers": provider_store.list()}
 
+    async def _poke_proxy_reload_direct_registry() -> None:
+        """Best-effort poke of the gateway proxy so the DB write is live.
+
+        The console and the proxy are different processes (8013 vs 8000), so
+        provider-connection CRUD must explicitly reload the proxy's in-memory
+        index. Failures are silent — the DB is authoritative and a restart
+        still picks up the state (plus forward() has a lazy auto-heal retry).
+        """
+        try:
+            import httpx as _httpx  # type: ignore[import-not-found]
+
+            async with _httpx.AsyncClient(timeout=2.0) as _cli:
+                await _cli.post("http://127.0.0.1:8000/_admin/reload-direct-registry")
+        except Exception:  # pragma: no cover — proxy may not be running
+            pass
+
     @app.post("/v1/product/provider-connections", status_code=201)
     async def create_product_provider_connection(
         body: dict[str, object],
     ) -> dict[str, object]:
         """Store one encrypted credential set for one named provider account."""
         try:
-            return provider_store.create(body)
+            result = provider_store.create(body)
+            await _poke_proxy_reload_direct_registry()
+            return result
         except ValueError as exc:
             raise HTTPException(422, str(exc)) from exc
 
@@ -906,7 +924,9 @@ def create_console_app(
         value — an empty api_key means "keep the stored key".
         """
         try:
-            return provider_store.update(provider_id, body)
+            result = provider_store.update(provider_id, body)
+            await _poke_proxy_reload_direct_registry()
+            return result
         except KeyError as exc:
             raise HTTPException(404, "unknown provider connection") from exc
         except ValueError as exc:
@@ -917,18 +937,7 @@ def create_console_app(
         """Verify credentials and download the provider-native model catalog."""
         try:
             result = await provider_discovery.sync(provider_id)
-            # Hot-reload the proxy's direct-registry so newly discovered models
-            # (e.g. stealth/ox-alpha) are addressable without a restart. The
-            # console and proxy are different processes, so we poke the proxy's
-            # admin endpoint. Failures are best-effort — the DB is authoritative
-            # and the next proxy restart would still pick up the models.
-            try:
-                import httpx as _httpx  # type: ignore[import-not-found]
-
-                async with _httpx.AsyncClient(timeout=2.0) as _cli:
-                    await _cli.post("http://127.0.0.1:8000/_admin/reload-direct-registry")
-            except Exception:  # pragma: no cover — proxy may not be running
-                pass
+            await _poke_proxy_reload_direct_registry()
             return result
         except KeyError as exc:
             raise HTTPException(404, "unknown provider connection") from exc

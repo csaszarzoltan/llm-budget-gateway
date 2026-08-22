@@ -228,7 +228,8 @@ def create_app(settings: Settings | None = None) -> FastAPI:
                             "user_agent": str(secret.get("user_agent", "")).strip() or None,
                             "models": models,
                         }
-                        if extra_body_raw_sync := str(secret.get("extra_body_json", "") or "").strip():  # noqa: F841
+                        extra_body_raw_sync = str(secret.get("extra_body_json", "") or "").strip()
+                        if extra_body_raw_sync:
                             try:
                                 eb = json.loads(extra_body_raw_sync)
                                 if isinstance(eb, dict) and eb:
@@ -249,7 +250,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     try:
         telemetry_store = RequestTelemetryStore(
             _sqlite_path(settings.database_url),
-            connection=store._conn,
+            connection=store.connection,
         )
         proxy.attach_telemetry(
             RequestTelemetryLogger(store=telemetry_store)
