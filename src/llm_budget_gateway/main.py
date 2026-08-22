@@ -7,12 +7,13 @@ analysis brief §4 P0-1.
 
 from __future__ import annotations
 
+import asyncio
 import json
 import logging
 import sqlite3
 from pathlib import Path
 
-from fastapi import FastAPI, Request
+from fastapi import FastAPI, HTTPException, Request
 from fastapi.responses import JSONResponse, Response, StreamingResponse
 
 from .budget_enforcement import (
@@ -169,7 +170,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
             from .provider_connections import CredentialVault, ProviderConnectionStore
             from .provider_direct import DirectProviderClient
 
-            store = ProviderConnectionStore(
+            provider_store = ProviderConnectionStore(
                 sqlite3.connect(str(providers_db), check_same_thread=False),
                 CredentialVault(master_key),
             )
@@ -178,12 +179,12 @@ def create_app(settings: Settings | None = None) -> FastAPI:
             # resolve first-wins inside DirectProviderClient, and routes pin
             # providers explicitly with @slug/model aliases — no hardcoded
             # priority list here.
-            connections = list(store.list())
+            connections = list(provider_store.list())
             registry: dict[str, dict] = {}
             for connection in connections:
                 slug = str(connection["slug"])
-                secret = store.connection_secret(str(connection["id"]))
-                models = [str(m["id"]) for m in store.models(str(connection["id"]))]
+                secret = provider_store.connection_secret(str(connection["id"]))
+                models = [str(m["id"]) for m in provider_store.models(str(connection["id"]))]
                 base_url = str(secret.get("base_url", "")).rstrip("/")
                 if not base_url or not models:
                     continue
@@ -214,10 +215,10 @@ def create_app(settings: Settings | None = None) -> FastAPI:
                 def _build_direct_registry() -> dict:
                     """Re-read the persisted provider connections on each sync."""
                     rebuilt: dict[str, dict] = {}
-                    for connection in store.list():
+                    for connection in provider_store.list():
                         slug = str(connection["slug"])
-                        secret = store.connection_secret(str(connection["id"]))
-                        models = [str(m["id"]) for m in store.models(str(connection["id"]))]
+                        secret = provider_store.connection_secret(str(connection["id"]))
+                        models = [str(m["id"]) for m in provider_store.models(str(connection["id"]))]
                         base = str(secret.get("base_url", "")).rstrip("/")
                         if not base or not models:
                             continue
@@ -279,8 +280,6 @@ def create_app(settings: Settings | None = None) -> FastAPI:
             return _provider_response(response)
         # Cancellable path: run the upstream call as a task and cancel it
         # the moment the client disconnects.
-        import asyncio
-
         upstream = asyncio.create_task(
             proxy.handle_chat_completion(
                 body, _bearer_token(request), dict(request.headers)
@@ -517,15 +516,17 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         return JSONResponse({"status": "ok"})
 
     @app.post("/_admin/reload-direct-registry")
-    async def reload_direct_registry() -> JSONResponse:
+    async def reload_direct_registry(request: Request) -> JSONResponse:
         """Hot-reload the direct client's registry from the persisted store.
 
-        Called by the console after sync-models, or by an admin trigger.
-        Refreshes every gateway worker view of the provider model index —
-        newly discovered models (e.g. stealth/ox-alpha on openrouter)
-        become addressable without a process restart. Thought_signature
-        state and the HTTP client are preserved.
+        Local-only (mirrors console_api._require_local_client): the gateway
+        binds to 127.0.0.1 via system_launcher, but an explicit check prevents
+        exposure if the bind is ever widened. Called by the console after
+        sync-models, or by an admin trigger.
         """
+        client = request.client.host if request.client else ""
+        if client not in {"127.0.0.1", "::1", "testclient"}:
+            raise HTTPException(403, detail="admin reload is local-only")
         try:
             proxy.reload_direct_registry()
         except Exception as exc:  # pragma: no cover — best-effort

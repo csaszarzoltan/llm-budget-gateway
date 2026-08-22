@@ -2104,7 +2104,7 @@ class GatewayProxy:
                             logger.info(
                                 "direct registry auto-reloaded for model=%s", model
                             )
-                        except Exception as _retry_exc:  # noqa: F841
+                        except Exception:
                             logger.debug(
                                 "direct client resolve failed model=%s error=%s",
                                 model, _resolve_exc,

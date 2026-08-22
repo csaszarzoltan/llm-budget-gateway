@@ -650,11 +650,17 @@ class ProviderConnectionStore:
 
     def __init__(self, db: sqlite3.Connection, vault: CredentialVault) -> None:
         self.db, self.vault = db, vault
-        db.executescript("""
+        self._db = db  # alias for shared-handle callers
+        self.db.executescript("""
 CREATE TABLE IF NOT EXISTS provider_connections(id TEXT PRIMARY KEY,name TEXT NOT NULL,slug TEXT UNIQUE NOT NULL,provider_type TEXT NOT NULL,region TEXT NOT NULL,status TEXT NOT NULL,encrypted_config TEXT NOT NULL,last_sync TEXT,last_error TEXT,created TEXT NOT NULL);
 CREATE TABLE IF NOT EXISTS provider_models(provider_id TEXT NOT NULL,model_id TEXT NOT NULL,display_name TEXT,owned_by TEXT,capabilities TEXT NOT NULL,raw_json TEXT NOT NULL,last_seen TEXT NOT NULL,PRIMARY KEY(provider_id,model_id));
 """)
-        db.commit()
+        self.db.commit()
+
+    @property
+    def connection(self) -> sqlite3.Connection:
+        """Expose the underlying SQLite connection."""
+        return self.db
 
     def provider_types(self) -> list[dict[str, Any]]:
         return PROVIDER_TYPES
