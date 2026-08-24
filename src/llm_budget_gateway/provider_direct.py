@@ -924,7 +924,7 @@ class DirectProviderClient:
         max_tokens = body.get("max_completion_tokens") or body.get("max_tokens")
         if max_tokens:
             v = int(max_tokens)
-            if "muse" in bare and v < 4096:
+            if "muse" in bare.lower() and v < 4096:
                 v = 4096
             payload["max_output_tokens"] = v
         for src, dst in (("temperature", "temperature"), ("top_p", "top_p")):
@@ -1104,7 +1104,7 @@ class DirectProviderClient:
         max_tokens = body.get("max_completion_tokens") or body.get("max_tokens")
         if max_tokens:
             v = int(max_tokens)
-            if "muse" in bare and v < 4096:
+            if "muse" in bare.lower() and v < 4096:
                 v = 4096
             payload["max_output_tokens"] = v
         for src in ("temperature", "top_p"):
