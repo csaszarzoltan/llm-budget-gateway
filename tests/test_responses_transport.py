@@ -243,3 +243,26 @@ async def test_stream_chunks_default_stays_chat_completions():
     ):
         chunks.append(chunk)
     assert captured["url"].endswith("/chat/completions")
+
+
+@pytest.mark.asyncio
+async def test_responses_input_assistant_uses_output_text():
+    """Multi-turn: assistant history items need output_text, users input_text."""
+    client = DirectProviderClient(registry={})
+    instructions, items = client._responses_input_from_messages({
+        "messages": [
+            {"role": "system", "content": "sys"},
+            {"role": "user", "content": "Hi"},
+            {"role": "assistant", "content": "Hello! How can I help?"},
+            {"role": "user", "content": "Say: pong"},
+        ]
+    })
+    assert instructions == "sys"
+    roles = [(i["role"], i["content"][0]["type"]) for i in items]
+    # assistant MUST be output_text; user MUST stay input_text
+    assert ("user", "input_text") in roles
+    assert ("assistant", "output_text") in roles
+    assert all(
+        ctype == ("output_text" if role == "assistant" else "input_text")
+        for role, ctype in roles
+    )

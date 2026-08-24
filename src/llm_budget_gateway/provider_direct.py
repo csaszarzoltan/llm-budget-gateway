@@ -904,11 +904,14 @@ class DirectProviderClient:
                 text = "\n".join(parts)
             else:
                 text = "" if content is None else json.dumps(content)
-            out_role = "assistant" if role == "assistant" else "user"
+            is_assistant = role == "assistant"
             input_items.append(
                 {
-                    "role": out_role,
-                    "content": [{"type": "input_text", "text": text}],
+                    "role": "assistant" if is_assistant else "user",
+                    # Responses API: assistant history uses `output_text`.
+                    "content": [
+                        {"type": "output_text" if is_assistant else "input_text", "text": text}
+                    ],
                 }
             )
         payload: dict[str, Any] = {
@@ -1060,11 +1063,15 @@ class DirectProviderClient:
             if role == "system":
                 system_parts.append(text)
                 continue
-            out_role = "assistant" if role == "assistant" else "user"
+            is_assistant = role == "assistant"
             input_items.append(
                 {
-                    "role": out_role,
-                    "content": [{"type": "input_text", "text": text}],
+                    "role": "assistant" if is_assistant else "user",
+                    # Responses API: assistant history uses `output_text`;
+                    # `input_text` there is an invalid_request_error.
+                    "content": [
+                        {"type": "output_text" if is_assistant else "input_text", "text": text}
+                    ],
                 }
             )
         return "\n\n".join(system_parts), input_items
