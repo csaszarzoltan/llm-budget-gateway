@@ -1068,11 +1068,32 @@ def create_console_app(
     @app.post("/v1/product/routes/{route_id}/simulate")
     async def simulate_product_route(route_id: str, body: dict[str, object]) -> dict[str, object]:
         try:
-            return product.simulate_route(route_id, capabilities=list(body.get("capabilities", [])), budget_remaining_usd=float(body.get("budget_remaining_usd", 0)))
+            result = product.simulate_route(route_id, capabilities=list(body.get("capabilities", [])), budget_remaining_usd=float(body.get("budget_remaining_usd", 0)))
         except KeyError as exc:
             raise HTTPException(404, "unknown route") from exc
         except (TypeError, ValueError, RuntimeError) as exc:
             raise HTTPException(422, str(exc)) from exc
+        # Augment static eligibility with a live probe so the UI sees real
+        # upstream outcomes (cooldown, HTTP errors) instead of "eligible" for
+        # every target.  Best-effort: if the proxy is unreachable we still
+        # return the static result.
+        try:
+            import httpx as _httpx
+            route = product.route(route_id)
+            async with _httpx.AsyncClient(timeout=5.0) as _cli:
+                resp = await _cli.post(
+                    "http://127.0.0.1:8000/_admin/probe-route",
+                    json={"route": route["name"]},
+                )
+                if resp.status_code in (200, 502):
+                    probe = resp.json()
+                    result["probe"] = probe
+                    result["provider_call_made"] = probe.get("ok", False)
+                    if probe.get("served_by"):
+                        result["selected_model"] = probe["served_by"]
+        except Exception:
+            pass  # proxy may not be running; return static result
+        return result
 
     @app.post("/v1/product/routes/{route_id}/publish")
     async def publish_product_route(route_id: str) -> dict[str, object]:
