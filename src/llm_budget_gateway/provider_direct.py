@@ -133,15 +133,46 @@ def _responses_to_chat(data: dict[str, Any], fallback_model: str) -> dict[str, A
     total tokens; finish_reason mirrors ``status``.
     """
     text_parts: list[str] = []
+    tool_calls: list[dict[str, Any]] = []
     for item in data.get("output", []) or []:
-        if item.get("type") != "message":
-            continue
-        for part in item.get("content", []) or []:
-            if part.get("type") == "output_text" and part.get("text"):
-                text_parts.append(str(part["text"]))
+        itype = item.get("type")
+        if itype == "message":
+            for part in item.get("content", []) or []:
+                if part.get("type") == "output_text" and part.get("text"):
+                    text_parts.append(str(part["text"]))
+        elif itype == "function_call":
+            # Codex / Responses function_call → chat tool_calls
+            tool_calls.append(
+                {
+                    "id": str(item.get("call_id") or item.get("id") or f"call_{len(tool_calls)}"),
+                    "type": "function",
+                    "function": {
+                        "name": str(item.get("name") or ""),
+                        "arguments": str(item.get("arguments") or "{}"),
+                    },
+                }
+            )
+        elif itype == "tool_call":
+            tool_calls.append(
+                {
+                    "id": str(item.get("call_id") or item.get("id") or f"call_{len(tool_calls)}"),
+                    "type": "function",
+                    "function": {
+                        "name": str(item.get("name") or ""),
+                        "arguments": str(item.get("arguments") or "{}"),
+                    },
+                }
+            )
     usage_raw = data.get("usage") or {}
     status = data.get("status", "completed")
-    finish = "stop" if status == "completed" else ("length" if status == "incomplete" else status)
+    # If we have tool calls, finish is tool_calls, else map status
+    if tool_calls:
+        finish = "tool_calls"
+    else:
+        finish = "stop" if status == "completed" else ("length" if status == "incomplete" else status)
+    msg: dict[str, Any] = {"role": "assistant", "content": "".join(text_parts)}
+    if tool_calls:
+        msg["tool_calls"] = tool_calls
     return {
         "id": data.get("id", ""),
         "object": "chat.completion",
@@ -150,7 +181,7 @@ def _responses_to_chat(data: dict[str, Any], fallback_model: str) -> dict[str, A
         "choices": [
             {
                 "index": 0,
-                "message": {"role": "assistant", "content": "".join(text_parts)},
+                "message": msg,
                 "finish_reason": finish,
             }
         ],
@@ -165,6 +196,43 @@ def _responses_to_chat(data: dict[str, Any], fallback_model: str) -> dict[str, A
         },
         "_responses_status": status,
     }
+
+
+def _chat_tools_to_responses(tools: Any) -> list[dict[str, Any]]:
+    """Translate chat-completions tools to Responses API shape."""
+    out: list[dict[str, Any]] = []
+    if not isinstance(tools, list):
+        return out
+    for t in tools:
+        if not isinstance(t, dict):
+            continue
+        if t.get("type") == "function" and isinstance(t.get("function"), dict):
+            fn = t["function"]
+            out.append(
+                {
+                    "type": "function",
+                    "name": str(fn.get("name") or ""),
+                    "description": str(fn.get("description") or ""),
+                    "parameters": fn.get("parameters") or {"type": "object", "properties": {}},
+                }
+            )
+        elif "name" in t:
+            # Already responses shape
+            out.append(t)
+    return out
+
+
+def _chat_tool_choice_to_responses(choice: Any) -> Any:
+    """Translate chat tool_choice to Responses shape."""
+    if choice is None:
+        return None
+    if isinstance(choice, str):
+        return choice
+    if not isinstance(choice, dict):
+        return choice
+    if choice.get("type") == "function" and isinstance(choice.get("function"), dict):
+        return {"type": "function", "name": str(choice["function"].get("name") or "")}
+    return choice
 
 
 _REASONING_ECHO_MODEL_SUBS = ("deepseek", "kimi", "mimo")
@@ -966,6 +1034,13 @@ class DirectProviderClient:
         for src, dst in (("temperature", "temperature"), ("top_p", "top_p")):
             if body.get(src) is not None:
                 payload[dst] = body[src]
+        # Tools: translate chat shape to Responses shape
+        if body.get("tools"):
+            payload["tools"] = _chat_tools_to_responses(body["tools"])
+        if body.get("tool_choice") is not None:
+            tc = _chat_tool_choice_to_responses(body["tool_choice"])
+            if tc is not None:
+                payload["tool_choice"] = tc
         if endpoint.extra_body:
             payload.update(endpoint.extra_body)
         url = endpoint.url("/responses")
@@ -1087,6 +1162,52 @@ class DirectProviderClient:
         for msg in messages:
             role = msg.get("role")
             content = msg.get("content")
+            # Tool result messages (role=tool) → function_call_output
+            if role == "tool":
+                call_id = str(msg.get("tool_call_id") or msg.get("call_id") or "")
+                if isinstance(content, str):
+                    out_text = content
+                elif isinstance(content, list):
+                    out_text = "\n".join(str(p.get("text") or "") if isinstance(p, dict) else str(p) for p in content)
+                else:
+                    out_text = "" if content is None else __import__("json").dumps(content)
+                input_items.append(
+                    {
+                        "type": "function_call_output",
+                        "call_id": call_id,
+                        "output": out_text,
+                    }
+                )
+                continue
+            # Assistant messages with tool_calls → function_call items
+            if role == "assistant" and msg.get("tool_calls"):
+                for tc in msg.get("tool_calls") or []:
+                    if not isinstance(tc, dict):
+                        continue
+                    fn = tc.get("function") or {}
+                    input_items.append(
+                        {
+                            "type": "function_call",
+                            "call_id": str(tc.get("id") or ""),
+                            "name": str(fn.get("name") or ""),
+                            "arguments": str(fn.get("arguments") or "{}"),
+                        }
+                    )
+                # If assistant also has text, keep it as output_text
+                if isinstance(content, str) and content.strip():
+                    text = content
+                elif isinstance(content, list):
+                    text = "\n".join(str(p.get("text") or "") if isinstance(p, dict) else str(p) for p in content)
+                else:
+                    text = "" if content is None else __import__("json").dumps(content)
+                if text.strip():
+                    input_items.append(
+                        {
+                            "role": "assistant",
+                            "content": [{"type": "output_text", "text": text}],
+                        }
+                    )
+                continue
             if isinstance(content, str):
                 text = content
             elif isinstance(content, list):
@@ -1147,6 +1268,12 @@ class DirectProviderClient:
         for src in ("temperature", "top_p"):
             if body.get(src) is not None:
                 payload[src] = body[src]
+        if body.get("tools"):
+            payload["tools"] = _chat_tools_to_responses(body["tools"])
+        if body.get("tool_choice") is not None:
+            tc = _chat_tool_choice_to_responses(body["tool_choice"])
+            if tc is not None:
+                payload["tool_choice"] = tc
         if endpoint.extra_body:
             payload.update(endpoint.extra_body)
         url = endpoint.url("/responses")
@@ -1202,6 +1329,33 @@ class DirectProviderClient:
                             ],
                         }
                         index += 1
+                    elif etype in ("response.function_call.delta", "response.tool_call.delta"):
+                        # Streaming function call arguments
+                        yield {
+                            "id": str(event.get("item_id") or f"resp-{index}"),
+                            "object": "chat.completion.chunk",
+                            "model": bare,
+                            "choices": [
+                                {
+                                    "index": 0,
+                                    "delta": {
+                                        "tool_calls": [
+                                            {
+                                                "index": 0,
+                                                "id": str(event.get("item_id") or event.get("call_id") or f"call_{index}"),
+                                                "type": "function",
+                                                "function": {
+                                                    "name": str(event.get("name") or ""),
+                                                    "arguments": str(event.get("delta") or event.get("arguments") or ""),
+                                                },
+                                            }
+                                        ]
+                                    },
+                                    "finish_reason": None,
+                                }
+                            ],
+                        }
+                        index += 1
                     elif etype in ("response.completed", "response.incomplete"):
                         resp = event.get("response", {}) or {}
                         if etype == "response.incomplete" and not resp:
@@ -1209,7 +1363,43 @@ class DirectProviderClient:
                         usage_raw = resp.get("usage", {}) or {}
                         status = str(resp.get("status", "")) if isinstance(resp, dict) else ""
                         incomplete = resp.get("incomplete_details") if isinstance(resp, dict) else None
-                        finish = "length" if (etype == "response.incomplete" or status == "incomplete" or incomplete) else "stop"
+                        # Check if response contains function calls → tool_calls finish
+                        has_fn = False
+                        for it in resp.get("output", []) or []:
+                            if isinstance(it, dict) and it.get("type") in ("function_call", "tool_call"):
+                                has_fn = True
+                                break
+                        if has_fn:
+                            finish = "tool_calls"
+                        else:
+                            finish = "length" if (etype == "response.incomplete" or status == "incomplete" or incomplete) else "stop"
+                        # If there are function calls, emit them as tool_calls deltas before final
+                        for it in resp.get("output", []) or []:
+                            if isinstance(it, dict) and it.get("type") in ("function_call", "tool_call"):
+                                yield {
+                                    "id": str(resp.get("id", "")) or f"resp-{index}",
+                                    "object": "chat.completion.chunk",
+                                    "model": str(resp.get("model", "")) or bare,
+                                    "choices": [
+                                        {
+                                            "index": 0,
+                                            "delta": {
+                                                "tool_calls": [
+                                                    {
+                                                        "id": str(it.get("call_id") or it.get("id") or f"call_{index}"),
+                                                        "type": "function",
+                                                        "function": {
+                                                            "name": str(it.get("name") or ""),
+                                                            "arguments": str(it.get("arguments") or "{}"),
+                                                        },
+                                                    }
+                                                ]
+                                            },
+                                            "finish_reason": None,
+                                        }
+                                    ],
+                                }
+                                index += 1
                         yield {
                             "id": str(resp.get("id", "")) or f"resp-{index}",
                             "object": "chat.completion.chunk",

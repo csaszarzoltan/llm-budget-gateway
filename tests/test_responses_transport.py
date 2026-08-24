@@ -105,7 +105,7 @@ async def test_api_mode_responses_posts_to_responses_endpoint(monkeypatch):
     sent = calls[0]["json"]
     assert sent["model"] == "muse-spark-1.2-contributor"
     assert "input" in sent and "messages" not in sent
-    assert sent["max_output_tokens"] == 4096  # muse min enforced (reasoning needs budget; 30 would truncate to 0)
+    assert sent["max_output_tokens"] == 8192  # muse min enforced (reasoning needs budget; 30 would truncate to 0)
     # Response translated back to chat-completions shape for callers.
     assert data["choices"][0]["message"]["role"] == "assistant"
     assert data["choices"][0]["message"]["content"] == "pong"
@@ -293,7 +293,7 @@ async def test_min_output_tokens_pattern_clamps_reasoning(monkeypatch):
     # No explicit min set → pattern should clamp
     object.__setattr__(ep, "min_output_tokens", None)
     await client.forward("muse-spark-1.2-contributor", {"messages": [{"role": "user", "content": "hi"}], "max_tokens": 200})
-    assert calls[0]["json"]["max_output_tokens"] == 4096
+    assert calls[0]["json"]["max_output_tokens"] == 8192
 
 
 @pytest.mark.asyncio
