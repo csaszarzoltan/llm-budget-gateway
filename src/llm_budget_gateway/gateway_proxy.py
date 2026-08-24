@@ -2528,6 +2528,17 @@ class GatewayProxy:
                             )
                         except Exception:
                             content = str(b)[:80]
+                    elif isinstance(b, list):
+                        # SSE chunks list — extract the last chunk's delta
+                        for chunk in reversed(b):
+                            if isinstance(chunk, dict):
+                                delta = chunk.get("choices", [{}])[0].get("delta", {})
+                                if delta.get("content"):
+                                    content = str(delta["content"])
+                                    break
+                    else:
+                        # async generator (streaming) — cannot read here
+                        content = "[streaming]"
                     entry["status"] = "success"
                     entry["latency_ms"] = resp.latency_ms
                     entry["detail"] = content[:60]
