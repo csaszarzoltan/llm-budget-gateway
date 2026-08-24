@@ -351,7 +351,7 @@ class ProviderEndpoint:
 # Reasoning models (muse, R1, O1/O3, thinking) need budget or they
 # truncate to 0 output (seen: max_output_tokens=200 → incomplete empty).
 REASONING_MIN_TOKENS: dict[str, int] = {
-    "muse": 4096,
+    "muse": 8192,
     "r1": 4096,
     "reasoning": 4096,
     "thinking": 4096,
