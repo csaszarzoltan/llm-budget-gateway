@@ -312,6 +312,7 @@ class ProviderEndpoint:
     user_agent: str | None = None  # client-emulation User-Agent for upstream
     extra_body: dict[str, Any] | None = None  # provider-level body merge
     api_mode: str = "chat_completions"  # or "codex_responses" (POST /responses)
+    min_output_tokens: int | None = None  # clamp for reasoning models (e.g. 4096 for muse)
 
     def api_key(self) -> str:
         """Read the API key from the vault value or the environment."""
@@ -344,6 +345,33 @@ class ProviderEndpoint:
         """Absolute URL for ``path`` (e.g. ``/chat/completions``)."""
         base = self.base_url.rstrip("/")
         return f"{base}{path}"
+
+
+# Per-model fallback when provider has no explicit min_output_tokens.
+# Reasoning models (muse, R1, O1/O3, thinking) need budget or they
+# truncate to 0 output (seen: max_output_tokens=200 → incomplete empty).
+REASONING_MIN_TOKENS: dict[str, int] = {
+    "muse": 4096,
+    "r1": 4096,
+    "reasoning": 4096,
+    "thinking": 4096,
+    "o1": 4096,
+    "o3": 4096,
+}
+
+def _reasoning_min(bare: str, endpoint: ProviderEndpoint) -> int:
+    """Effective min_output_tokens for (model, endpoint). Provider wins over pattern."""
+    if endpoint.min_output_tokens is not None:
+        try:
+            v = int(endpoint.min_output_tokens)
+            return v if v > 0 else 0
+        except Exception:
+            return 0
+    low = bare.lower()
+    for pat, val in REASONING_MIN_TOKENS.items():
+        if pat in low:
+            return val
+    return 0
 
 
 class DirectProviderClient:
@@ -450,6 +478,13 @@ class DirectProviderClient:
                 user_agent=raw.get("user_agent") or None,
                 extra_body=raw.get("extra_body") or None,
                 api_mode=str(raw.get("api_mode") or "chat_completions"),
+                min_output_tokens=(
+                    None
+                    if raw.get("min_output_tokens") is None or str(raw.get("min_output_tokens")).strip() == ""
+                    else int(str(raw.get("min_output_tokens")).strip())
+                    if str(raw.get("min_output_tokens")).strip().lstrip("-").isdigit()
+                    else None
+                ),
             )
             self._registry[name] = endpoint
             for model in models:
@@ -924,8 +959,9 @@ class DirectProviderClient:
         max_tokens = body.get("max_completion_tokens") or body.get("max_tokens")
         if max_tokens:
             v = int(max_tokens)
-            if "muse" in bare.lower() and v < 4096:
-                v = 4096
+            eff = _reasoning_min(bare, endpoint)
+            if eff and v < eff:
+                v = eff
             payload["max_output_tokens"] = v
         for src, dst in (("temperature", "temperature"), ("top_p", "top_p")):
             if body.get(src) is not None:
@@ -1104,8 +1140,9 @@ class DirectProviderClient:
         max_tokens = body.get("max_completion_tokens") or body.get("max_tokens")
         if max_tokens:
             v = int(max_tokens)
-            if "muse" in bare.lower() and v < 4096:
-                v = 4096
+            eff = _reasoning_min(bare, endpoint)
+            if eff and v < eff:
+                v = eff
             payload["max_output_tokens"] = v
         for src in ("temperature", "top_p"):
             if body.get(src) is not None:

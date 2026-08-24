@@ -58,6 +58,7 @@ def test_provider_specific_schema_and_secret_roundtrip(
         "api_key",
         "base_url",
         "api_version",
+        "min_output_tokens",
     ]
     assert "project_id" in [field["name"] for field in schemas["vertex_ai"]["fields"]]
     created = store.create(

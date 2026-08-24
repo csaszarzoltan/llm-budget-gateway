@@ -34,6 +34,12 @@ PROVIDER_TYPES: list[dict[str, Any]] = [
                 "type": "text",
                 "required": False,
             },
+            {
+                "name": "min_output_tokens",
+                "label": "Min output tokens (reasoning clamp)",
+                "type": "text",
+                "required": False,
+            },
         ],
     },
     {
@@ -46,6 +52,12 @@ PROVIDER_TYPES: list[dict[str, Any]] = [
         "fields": [
             {"name": "api_key", "label": "API key", "type": "secret", "required": True},
             {"name": "base_url", "label": "Base URL", "type": "url", "required": True},
+            {
+                "name": "min_output_tokens",
+                "label": "Min output tokens (reasoning clamp)",
+                "type": "text",
+                "required": False,
+            },
         ],
     },
     {
@@ -58,6 +70,12 @@ PROVIDER_TYPES: list[dict[str, Any]] = [
         "fields": [
             {"name": "api_key", "label": "API key", "type": "secret", "required": True},
             {"name": "base_url", "label": "Base URL", "type": "url", "required": True},
+            {
+                "name": "min_output_tokens",
+                "label": "Min output tokens (reasoning clamp)",
+                "type": "text",
+                "required": False,
+            },
         ],
     },
     {
@@ -80,6 +98,12 @@ PROVIDER_TYPES: list[dict[str, Any]] = [
                 "label": "API version",
                 "type": "text",
                 "required": True,
+            },
+            {
+                "name": "min_output_tokens",
+                "label": "Min output tokens (reasoning clamp)",
+                "type": "text",
+                "required": False,
             },
         ],
     },
@@ -118,6 +142,12 @@ PROVIDER_TYPES: list[dict[str, Any]] = [
                 "label": "Models array field",
                 "type": "text",
                 "required": True,
+            },
+                        {
+                "name": "min_output_tokens",
+                "label": "Min output tokens (reasoning clamp)",
+                "type": "text",
+                "required": False,
             },
             {"name": "model_id_field", "label": "Model ID field", "type": "text", "required": True},
         ],
@@ -158,6 +188,12 @@ PROVIDER_TYPES: list[dict[str, Any]] = [
                 "type": "text",
                 "required": True,
             },
+                        {
+                "name": "min_output_tokens",
+                "label": "Min output tokens (reasoning clamp)",
+                "type": "text",
+                "required": False,
+            },
             {"name": "model_id_field", "label": "Model ID field", "type": "text", "required": True},
         ],
     },
@@ -190,6 +226,12 @@ PROVIDER_TYPES: list[dict[str, Any]] = [
                 "label": "Models array field",
                 "type": "text",
                 "required": True,
+            },
+                        {
+                "name": "min_output_tokens",
+                "label": "Min output tokens (reasoning clamp)",
+                "type": "text",
+                "required": False,
             },
             {"name": "model_id_field", "label": "Model ID field", "type": "text", "required": True},
         ],
@@ -224,6 +266,12 @@ PROVIDER_TYPES: list[dict[str, Any]] = [
                 "type": "text",
                 "required": True,
             },
+                        {
+                "name": "min_output_tokens",
+                "label": "Min output tokens (reasoning clamp)",
+                "type": "text",
+                "required": False,
+            },
             {"name": "model_id_field", "label": "Model ID field", "type": "text", "required": True},
         ],
     },
@@ -256,6 +304,12 @@ PROVIDER_TYPES: list[dict[str, Any]] = [
                 "label": "Models array field",
                 "type": "text",
                 "required": True,
+            },
+                        {
+                "name": "min_output_tokens",
+                "label": "Min output tokens (reasoning clamp)",
+                "type": "text",
+                "required": False,
             },
             {"name": "model_id_field", "label": "Model ID field", "type": "text", "required": True},
         ],
@@ -290,6 +344,12 @@ PROVIDER_TYPES: list[dict[str, Any]] = [
                 "type": "text",
                 "required": True,
             },
+                        {
+                "name": "min_output_tokens",
+                "label": "Min output tokens (reasoning clamp)",
+                "type": "text",
+                "required": False,
+            },
             {"name": "model_id_field", "label": "Model ID field", "type": "text", "required": True},
         ],
     },
@@ -322,6 +382,12 @@ PROVIDER_TYPES: list[dict[str, Any]] = [
                 "label": "Models array field",
                 "type": "text",
                 "required": True,
+            },
+                        {
+                "name": "min_output_tokens",
+                "label": "Min output tokens (reasoning clamp)",
+                "type": "text",
+                "required": False,
             },
             {"name": "model_id_field", "label": "Model ID field", "type": "text", "required": True},
         ],
@@ -356,6 +422,12 @@ PROVIDER_TYPES: list[dict[str, Any]] = [
                 "type": "text",
                 "required": True,
             },
+                        {
+                "name": "min_output_tokens",
+                "label": "Min output tokens (reasoning clamp)",
+                "type": "text",
+                "required": False,
+            },
             {"name": "model_id_field", "label": "Model ID field", "type": "text", "required": True},
         ],
     },
@@ -388,6 +460,12 @@ PROVIDER_TYPES: list[dict[str, Any]] = [
                 "label": "Models array field",
                 "type": "text",
                 "required": True,
+            },
+                        {
+                "name": "min_output_tokens",
+                "label": "Min output tokens (reasoning clamp)",
+                "type": "text",
+                "required": False,
             },
             {"name": "model_id_field", "label": "Model ID field", "type": "text", "required": True},
         ],
@@ -422,6 +500,12 @@ PROVIDER_TYPES: list[dict[str, Any]] = [
                 "type": "text",
                 "required": True,
             },
+                        {
+                "name": "min_output_tokens",
+                "label": "Min output tokens (reasoning clamp)",
+                "type": "text",
+                "required": False,
+            },
             {"name": "model_id_field", "label": "Model ID field", "type": "text", "required": True},
         ],
     },
@@ -454,6 +538,12 @@ PROVIDER_TYPES: list[dict[str, Any]] = [
                 "label": "Models array field",
                 "type": "text",
                 "required": True,
+            },
+                        {
+                "name": "min_output_tokens",
+                "label": "Min output tokens (reasoning clamp)",
+                "type": "text",
+                "required": False,
             },
             {"name": "model_id_field", "label": "Model ID field", "type": "text", "required": True},
         ],
@@ -488,6 +578,12 @@ PROVIDER_TYPES: list[dict[str, Any]] = [
                 "type": "text",
                 "required": True,
             },
+                        {
+                "name": "min_output_tokens",
+                "label": "Min output tokens (reasoning clamp)",
+                "type": "text",
+                "required": False,
+            },
             {"name": "model_id_field", "label": "Model ID field", "type": "text", "required": True},
         ],
     },
@@ -520,6 +616,12 @@ PROVIDER_TYPES: list[dict[str, Any]] = [
                 "label": "Models array field",
                 "type": "text",
                 "required": True,
+            },
+                        {
+                "name": "min_output_tokens",
+                "label": "Min output tokens (reasoning clamp)",
+                "type": "text",
+                "required": False,
             },
             {"name": "model_id_field", "label": "Model ID field", "type": "text", "required": True},
         ],
@@ -554,6 +656,12 @@ PROVIDER_TYPES: list[dict[str, Any]] = [
                 "type": "text",
                 "required": True,
             },
+                        {
+                "name": "min_output_tokens",
+                "label": "Min output tokens (reasoning clamp)",
+                "type": "text",
+                "required": False,
+            },
             {"name": "model_id_field", "label": "Model ID field", "type": "text", "required": True},
         ],
     },
@@ -579,6 +687,12 @@ PROVIDER_TYPES: list[dict[str, Any]] = [
             },
             {"name": "user_agent", "label": "Client user-agent (emulation)", "type": "text", "required": False},
             {"name": "models_field", "label": "Models array field", "type": "text", "required": True},
+                        {
+                "name": "min_output_tokens",
+                "label": "Min output tokens (reasoning clamp)",
+                "type": "text",
+                "required": False,
+            },
             {"name": "model_id_field", "label": "Model ID field", "type": "text", "required": True},
         ],
     },
@@ -607,6 +721,12 @@ PROVIDER_TYPES: list[dict[str, Any]] = [
                 "name": "base_url",
                 "label": "API endpoint",
                 "type": "url",
+                "required": False,
+            },
+            {
+                "name": "min_output_tokens",
+                "label": "Min output tokens (reasoning clamp)",
+                "type": "text",
                 "required": False,
             },
         ],
@@ -703,6 +823,14 @@ CREATE TABLE IF NOT EXISTS provider_models(provider_id TEXT NOT NULL,model_id TE
         ]
         if missing:
             raise ValueError("missing connection fields: " + ", ".join(missing))
+        # Validate min_output_tokens if provided
+        mot = str(merged.get("min_output_tokens", "")).strip()
+        if mot != "":
+            if not mot.isdigit() or not (0 <= int(mot) <= 128000):
+                raise ValueError("min_output_tokens must be an integer 0..128000 or empty")
+            merged["min_output_tokens"] = mot
+        else:
+            merged["min_output_tokens"] = ""
         base_url = str(merged.get("base_url", ""))
         if base_url and not base_url.startswith(("https://", "http://")):
             raise ValueError("base URL must use HTTP or HTTPS")
@@ -769,7 +897,19 @@ CREATE TABLE IF NOT EXISTS provider_models(provider_id TEXT NOT NULL,model_id TE
         protected: dict[str, Any] = {}
         for key in secret_fields:
             new_value = config.get(key)
-            if isinstance(new_value, str) and new_value.strip():
+            # min_output_tokens: empty string explicitly clears the clamp
+            if key == "min_output_tokens":
+                if key in config:
+                    v = str(new_value).strip() if new_value is not None else ""
+                    if v == "":
+                        protected[key] = ""
+                    elif v.isdigit() and 0 <= int(v) <= 128000:
+                        protected[key] = v
+                    else:
+                        raise ValueError("min_output_tokens must be an integer 0..128000 or empty")
+                else:
+                    protected[key] = current.get(key, "")
+            elif isinstance(new_value, str) and new_value.strip():
                 protected[key] = new_value.strip()
             else:
                 protected[key] = current.get(key, "")
@@ -836,11 +976,15 @@ CREATE TABLE IF NOT EXISTS provider_models(provider_id TEXT NOT NULL,model_id TE
             result["user_agent"] = secret.get("user_agent", "")
             result["extra_headers_json"] = secret.get("extra_headers_json", "")
             result["extra_body_json"] = secret.get("extra_body_json", "")
+            result["min_output_tokens"] = secret.get("min_output_tokens", "")
+            result["api_mode"] = secret.get("api_mode", "chat_completions")
         except Exception:
             result["base_url"] = ""
             result["user_agent"] = ""
             result["extra_headers_json"] = ""
             result["extra_body_json"] = ""
+            result["min_output_tokens"] = ""
+            result["api_mode"] = "chat_completions"
         return result
 
     def list(self) -> list[dict[str, Any]]:

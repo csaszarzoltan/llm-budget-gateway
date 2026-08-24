@@ -205,8 +205,6 @@ async def test_stream_chunks_uses_responses_and_translates(monkeypatch):
 
 
 @pytest.mark.asyncio
-
-@pytest.mark.asyncio
 async def test_stream_chunks_handles_incomplete():
     """response.incomplete must yield length finish, not hang truncated."""
     lines = [
@@ -282,6 +280,87 @@ async def test_stream_chunks_default_stays_chat_completions():
         chunks.append(chunk)
     assert captured["url"].endswith("/chat/completions")
 
+
+
+@pytest.mark.asyncio
+async def test_min_output_tokens_pattern_clamps_reasoning(monkeypatch):
+    """Pattern fallback: muse with small max → clamped to 4096."""
+    client, calls = _client_with(
+        monkeypatch, lambda payload: _responses_payload(payload)
+    )
+    ep = client.resolve("muse-spark-1.2-contributor")
+    object.__setattr__(ep, "api_mode", "codex_responses")
+    # No explicit min set → pattern should clamp
+    object.__setattr__(ep, "min_output_tokens", None)
+    await client.forward("muse-spark-1.2-contributor", {"messages": [{"role": "user", "content": "hi"}], "max_tokens": 200})
+    assert calls[0]["json"]["max_output_tokens"] == 4096
+
+
+@pytest.mark.asyncio
+async def test_min_output_tokens_provider_overrides_pattern(monkeypatch):
+    """Provider explicit min wins over pattern."""
+    client, calls = _client_with(
+        monkeypatch, lambda payload: _responses_payload(payload)
+    )
+    ep = client.resolve("muse-spark-1.2-contributor")
+    object.__setattr__(ep, "api_mode", "codex_responses")
+    object.__setattr__(ep, "min_output_tokens", 8000)
+    await client.forward("muse-spark-1.2-contributor", {"messages": [{"role": "user", "content": "hi"}], "max_tokens": 100})
+    assert calls[0]["json"]["max_output_tokens"] == 8000
+
+
+@pytest.mark.asyncio
+async def test_min_output_tokens_non_reasoning_not_clamped(monkeypatch):
+    """Non-reasoning model with small max must not be clamped."""
+    client, calls = _client_with(
+        monkeypatch, lambda payload: _responses_payload(payload)
+    )
+    # Use a non-reasoning endpoint
+    ep = _endpoint()
+    ep2 = type(ep)(name="xiaomi", base_url="https://api.example/v1", api_key_env="", models=("mimo-v2-flash",), api_key_value="k")
+    object.__setattr__(ep2, "api_mode", "codex_responses")
+    client._registry["xiaomi"] = ep2
+    client._model_index["mimo-v2-flash"] = ep2
+    client._model_index["@xiaomi/mimo-v2-flash"] = ep2
+    await client.forward("mimo-v2-flash", {"messages": [{"role": "user", "content": "hi"}], "max_tokens": 200})
+    # Find call for mimo
+    assert calls[-1]["json"]["max_output_tokens"] == 200
+
+
+@pytest.mark.asyncio
+async def test_min_output_tokens_zero_disables_clamp(monkeypatch):
+    """Explicit 0 disables clamping even for reasoning model."""
+    client, calls = _client_with(
+        monkeypatch, lambda payload: _responses_payload(payload)
+    )
+    ep = client.resolve("muse-spark-1.2-contributor")
+    object.__setattr__(ep, "api_mode", "codex_responses")
+    object.__setattr__(ep, "min_output_tokens", 0)
+    await client.forward("muse-spark-1.2-contributor", {"messages": [{"role": "user", "content": "hi"}], "max_tokens": 200})
+    assert calls[0]["json"]["max_output_tokens"] == 200
+
+
+@pytest.mark.asyncio
+async def test_responses_input_assistant_uses_output_text():
+    """Multi-turn: assistant history items need output_text, users input_text."""
+    client = DirectProviderClient(registry={})
+    instructions, items = client._responses_input_from_messages({
+        "messages": [
+            {"role": "system", "content": "sys"},
+            {"role": "user", "content": "Hi"},
+            {"role": "assistant", "content": "Hello! How can I help?"},
+            {"role": "user", "content": "Say: pong"},
+        ]
+    })
+    assert instructions == "sys"
+    roles = [(i["role"], i["content"][0]["type"]) for i in items]
+    # assistant MUST be output_text; user MUST stay input_text
+    assert ("user", "input_text") in roles
+    assert ("assistant", "output_text") in roles
+    assert all(
+        ctype == ("output_text" if role == "assistant" else "input_text")
+        for role, ctype in roles
+    )
 
 @pytest.mark.asyncio
 async def test_responses_input_assistant_uses_output_text():
