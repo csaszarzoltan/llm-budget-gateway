@@ -35,6 +35,12 @@ PROVIDER_TYPES: list[dict[str, Any]] = [
                 "required": False,
             },
             {
+                "name": "api_mode",
+                "label": "API mode (chat_completions or codex_responses)",
+                "type": "text",
+                "required": False,
+            },
+            {
                 "name": "min_output_tokens",
                 "label": "Min output tokens (reasoning clamp)",
                 "type": "text",
@@ -53,6 +59,12 @@ PROVIDER_TYPES: list[dict[str, Any]] = [
             {"name": "api_key", "label": "API key", "type": "secret", "required": True},
             {"name": "base_url", "label": "Base URL", "type": "url", "required": True},
             {
+                "name": "api_mode",
+                "label": "API mode (chat_completions or codex_responses)",
+                "type": "text",
+                "required": False,
+            },
+            {
                 "name": "min_output_tokens",
                 "label": "Min output tokens (reasoning clamp)",
                 "type": "text",
@@ -70,6 +82,12 @@ PROVIDER_TYPES: list[dict[str, Any]] = [
         "fields": [
             {"name": "api_key", "label": "API key", "type": "secret", "required": True},
             {"name": "base_url", "label": "Base URL", "type": "url", "required": True},
+            {
+                "name": "api_mode",
+                "label": "API mode (chat_completions or codex_responses)",
+                "type": "text",
+                "required": False,
+            },
             {
                 "name": "min_output_tokens",
                 "label": "Min output tokens (reasoning clamp)",
@@ -98,6 +116,12 @@ PROVIDER_TYPES: list[dict[str, Any]] = [
                 "label": "API version",
                 "type": "text",
                 "required": True,
+            },
+            {
+                "name": "api_mode",
+                "label": "API mode (chat_completions or codex_responses)",
+                "type": "text",
+                "required": False,
             },
             {
                 "name": "min_output_tokens",
@@ -144,6 +168,12 @@ PROVIDER_TYPES: list[dict[str, Any]] = [
                 "required": True,
             },
                         {
+                "name": "api_mode",
+                "label": "API mode (chat_completions or codex_responses)",
+                "type": "text",
+                "required": False,
+            },
+            {
                 "name": "min_output_tokens",
                 "label": "Min output tokens (reasoning clamp)",
                 "type": "text",
@@ -189,6 +219,12 @@ PROVIDER_TYPES: list[dict[str, Any]] = [
                 "required": True,
             },
                         {
+                "name": "api_mode",
+                "label": "API mode (chat_completions or codex_responses)",
+                "type": "text",
+                "required": False,
+            },
+            {
                 "name": "min_output_tokens",
                 "label": "Min output tokens (reasoning clamp)",
                 "type": "text",
@@ -228,6 +264,12 @@ PROVIDER_TYPES: list[dict[str, Any]] = [
                 "required": True,
             },
                         {
+                "name": "api_mode",
+                "label": "API mode (chat_completions or codex_responses)",
+                "type": "text",
+                "required": False,
+            },
+            {
                 "name": "min_output_tokens",
                 "label": "Min output tokens (reasoning clamp)",
                 "type": "text",
@@ -267,6 +309,12 @@ PROVIDER_TYPES: list[dict[str, Any]] = [
                 "required": True,
             },
                         {
+                "name": "api_mode",
+                "label": "API mode (chat_completions or codex_responses)",
+                "type": "text",
+                "required": False,
+            },
+            {
                 "name": "min_output_tokens",
                 "label": "Min output tokens (reasoning clamp)",
                 "type": "text",
@@ -306,6 +354,12 @@ PROVIDER_TYPES: list[dict[str, Any]] = [
                 "required": True,
             },
                         {
+                "name": "api_mode",
+                "label": "API mode (chat_completions or codex_responses)",
+                "type": "text",
+                "required": False,
+            },
+            {
                 "name": "min_output_tokens",
                 "label": "Min output tokens (reasoning clamp)",
                 "type": "text",
@@ -345,6 +399,12 @@ PROVIDER_TYPES: list[dict[str, Any]] = [
                 "required": True,
             },
                         {
+                "name": "api_mode",
+                "label": "API mode (chat_completions or codex_responses)",
+                "type": "text",
+                "required": False,
+            },
+            {
                 "name": "min_output_tokens",
                 "label": "Min output tokens (reasoning clamp)",
                 "type": "text",
@@ -384,6 +444,12 @@ PROVIDER_TYPES: list[dict[str, Any]] = [
                 "required": True,
             },
                         {
+                "name": "api_mode",
+                "label": "API mode (chat_completions or codex_responses)",
+                "type": "text",
+                "required": False,
+            },
+            {
                 "name": "min_output_tokens",
                 "label": "Min output tokens (reasoning clamp)",
                 "type": "text",
@@ -423,6 +489,12 @@ PROVIDER_TYPES: list[dict[str, Any]] = [
                 "required": True,
             },
                         {
+                "name": "api_mode",
+                "label": "API mode (chat_completions or codex_responses)",
+                "type": "text",
+                "required": False,
+            },
+            {
                 "name": "min_output_tokens",
                 "label": "Min output tokens (reasoning clamp)",
                 "type": "text",
@@ -462,6 +534,12 @@ PROVIDER_TYPES: list[dict[str, Any]] = [
                 "required": True,
             },
                         {
+                "name": "api_mode",
+                "label": "API mode (chat_completions or codex_responses)",
+                "type": "text",
+                "required": False,
+            },
+            {
                 "name": "min_output_tokens",
                 "label": "Min output tokens (reasoning clamp)",
                 "type": "text",
@@ -501,6 +579,12 @@ PROVIDER_TYPES: list[dict[str, Any]] = [
                 "required": True,
             },
                         {
+                "name": "api_mode",
+                "label": "API mode (chat_completions or codex_responses)",
+                "type": "text",
+                "required": False,
+            },
+            {
                 "name": "min_output_tokens",
                 "label": "Min output tokens (reasoning clamp)",
                 "type": "text",
@@ -540,6 +624,12 @@ PROVIDER_TYPES: list[dict[str, Any]] = [
                 "required": True,
             },
                         {
+                "name": "api_mode",
+                "label": "API mode (chat_completions or codex_responses)",
+                "type": "text",
+                "required": False,
+            },
+            {
                 "name": "min_output_tokens",
                 "label": "Min output tokens (reasoning clamp)",
                 "type": "text",
@@ -579,6 +669,12 @@ PROVIDER_TYPES: list[dict[str, Any]] = [
                 "required": True,
             },
                         {
+                "name": "api_mode",
+                "label": "API mode (chat_completions or codex_responses)",
+                "type": "text",
+                "required": False,
+            },
+            {
                 "name": "min_output_tokens",
                 "label": "Min output tokens (reasoning clamp)",
                 "type": "text",
@@ -618,6 +714,12 @@ PROVIDER_TYPES: list[dict[str, Any]] = [
                 "required": True,
             },
                         {
+                "name": "api_mode",
+                "label": "API mode (chat_completions or codex_responses)",
+                "type": "text",
+                "required": False,
+            },
+            {
                 "name": "min_output_tokens",
                 "label": "Min output tokens (reasoning clamp)",
                 "type": "text",
@@ -657,6 +759,12 @@ PROVIDER_TYPES: list[dict[str, Any]] = [
                 "required": True,
             },
                         {
+                "name": "api_mode",
+                "label": "API mode (chat_completions or codex_responses)",
+                "type": "text",
+                "required": False,
+            },
+            {
                 "name": "min_output_tokens",
                 "label": "Min output tokens (reasoning clamp)",
                 "type": "text",
@@ -688,6 +796,12 @@ PROVIDER_TYPES: list[dict[str, Any]] = [
             {"name": "user_agent", "label": "Client user-agent (emulation)", "type": "text", "required": False},
             {"name": "models_field", "label": "Models array field", "type": "text", "required": True},
                         {
+                "name": "api_mode",
+                "label": "API mode (chat_completions or codex_responses)",
+                "type": "text",
+                "required": False,
+            },
+            {
                 "name": "min_output_tokens",
                 "label": "Min output tokens (reasoning clamp)",
                 "type": "text",
@@ -721,6 +835,12 @@ PROVIDER_TYPES: list[dict[str, Any]] = [
                 "name": "base_url",
                 "label": "API endpoint",
                 "type": "url",
+                "required": False,
+            },
+            {
+                "name": "api_mode",
+                "label": "API mode (chat_completions or codex_responses)",
+                "type": "text",
                 "required": False,
             },
             {
