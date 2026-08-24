@@ -2499,7 +2499,10 @@ class GatewayProxy:
         attempts: list[dict] = []
         body = {
             "messages": [{"role": "user", "content": prompt}],
-            "max_tokens": 16,
+            # Reasoning models (muse family) spend output tokens on hidden
+            # reasoning before any text — too small a budget yields
+            # finish=length with empty content and false-negative probes.
+            "max_tokens": 2000,
         }
         for model in candidates:
             entry: dict = {"model": model}

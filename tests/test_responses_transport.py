@@ -134,3 +134,112 @@ async def test_api_mode_default_stays_chat_completions(monkeypatch):
     assert status == 200
     assert calls[0]["url"].endswith("/chat/completions")
     assert "messages" in calls[0]["json"]
+
+
+@pytest.mark.asyncio
+async def test_stream_chunks_uses_responses_and_translates(monkeypatch):
+    """api_mode=codex_responses + stream → /responses SSE translated to chat chunks."""
+    lines = [
+        'data: {"type":"response.output_text.delta","item_id":"it1","delta":"po"}',
+        'data: {"type":"response.output_text.delta","item_id":"it1","delta":"ng"}',
+        'data: {"type":"response.completed","response":{"id":"resp_9","model":"muse-spark-1.2-contributor","status":"completed","usage":{"input_tokens":10,"output_tokens":5,"total_tokens":15}}}',
+        "data: [DONE]",
+    ]
+
+    class _StreamCtx:
+        async def __aenter__(self):
+            class R:
+                status_code = 200
+
+                async def aread(self):
+                    return b""
+
+                async def aiter_lines(self):
+                    for ln in lines:
+                        yield ln
+
+            return R()
+
+        async def __aexit__(self, *exc):
+            return False
+
+    captured = {}
+
+    def _stream(method, url, json=None, headers=None):  # noqa: A002
+        captured["url"] = url
+        captured["json"] = json
+        return _StreamCtx()
+
+    client = DirectProviderClient(registry={})
+    ep = _endpoint()
+    object.__setattr__(ep, "api_mode", "codex_responses")
+    client._registry["opencode-go"] = ep
+    client._model_index["muse-spark-1.2-contributor"] = ep
+    object.__setattr__(
+        client, "_client", type("C", (), {"stream": staticmethod(_stream)})()
+    )
+
+    chunks = []
+    async for chunk in client.stream_chunks(
+        "muse-spark-1.2-contributor",
+        {
+            "messages": [{"role": "user", "content": "Say exactly: pong"}],
+            "max_tokens": 100,
+            "stream": True,
+        },
+    ):
+        chunks.append(chunk)
+
+    assert captured["url"].endswith("/responses")
+    assert captured["json"]["stream"] is True
+    assert captured["json"]["input"][0]["content"][0]["text"] == "Say exactly: pong"
+    texts = [
+        c["choices"][0]["delta"].get("content", "")
+        for c in chunks
+        if c["choices"][0]["delta"].get("content")
+    ]
+    assert "".join(texts) == "pong"
+    last = chunks[-1]
+    assert last["choices"][0]["finish_reason"] == "stop"
+    assert last["usage"]["total_tokens"] == 15
+
+
+@pytest.mark.asyncio
+async def test_stream_chunks_default_stays_chat_completions():
+    """Without api_mode the streaming URL must remain /chat/completions."""
+    captured = {}
+
+    class _StreamCtx:
+        async def __aenter__(self):
+            class R:
+                status_code = 200
+
+                async def aread(self):
+                    return b""
+
+                async def aiter_lines(self):
+                    yield 'data: {"id":"c1","choices":[{"index":0,"delta":{"content":"hi"}}]}'
+                    yield "data: [DONE]"
+
+            return R()
+
+        async def __aexit__(self, *exc):
+            return False
+
+    def _stream(method, url, json=None, headers=None):  # noqa: A002
+        captured["url"] = url
+        return _StreamCtx()
+
+    client = DirectProviderClient(registry={})
+    ep = _endpoint()  # default chat_completions
+    client._registry["opencode-go"] = ep
+    client._model_index["muse-spark-1.2-contributor"] = ep
+    object.__setattr__(
+        client, "_client", type("C", (), {"stream": staticmethod(_stream)})()
+    )
+    chunks = []
+    async for chunk in client.stream_chunks(
+        "muse-spark-1.2-contributor", {"messages": [{"role": "user", "content": "x"}]}
+    ):
+        chunks.append(chunk)
+    assert captured["url"].endswith("/chat/completions")

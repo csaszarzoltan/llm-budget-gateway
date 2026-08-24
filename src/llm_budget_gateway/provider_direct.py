@@ -1035,6 +1035,148 @@ class DirectProviderClient:
             raise UpstreamProviderError(502, f"upstream provider error: {endpoint.name}") from exc
         return response.status_code, chunks, served
 
+    def _responses_input_from_messages(
+        self, body: dict[str, Any]
+    ) -> tuple[str, list[dict[str, Any]]]:
+        """Shared chat-messages → (instructions, input items) translation."""
+        messages = body.get("messages", [])
+        system_parts: list[str] = []
+        input_items: list[dict[str, Any]] = []
+        for msg in messages:
+            role = msg.get("role")
+            content = msg.get("content")
+            if isinstance(content, str):
+                text = content
+            elif isinstance(content, list):
+                parts = []
+                for part in content:
+                    if isinstance(part, dict):
+                        parts.append(str(part.get("text") or ""))
+                    else:
+                        parts.append(str(part))
+                text = "\n".join(parts)
+            else:
+                text = "" if content is None else json.dumps(content)
+            if role == "system":
+                system_parts.append(text)
+                continue
+            out_role = "assistant" if role == "assistant" else "user"
+            input_items.append(
+                {
+                    "role": out_role,
+                    "content": [{"type": "input_text", "text": text}],
+                }
+            )
+        return "\n\n".join(system_parts), input_items
+
+    async def _stream_responses(
+        self,
+        endpoint: ProviderEndpoint,
+        model: str,
+        body: dict[str, Any],
+    ) -> AsyncIterator[dict[str, Any]]:
+        """Streaming variant of ``_forward_responses``.
+
+        POSTs to ``{base}/responses`` with ``stream: true`` and translates the
+        Responses SSE event stream into chat-completions chunks on the fly:
+        ``response.output_text.delta`` → delta.content,
+        ``response.completed`` → final chunk with usage + finish_reason.
+        """
+        bare = model.split("/", 1)[1] if model.startswith("@") else model
+        instructions, input_items = self._responses_input_from_messages(body)
+        payload: dict[str, Any] = {
+            "model": bare,
+            "input": input_items,
+            "stream": True,
+        }
+        if instructions:
+            payload["instructions"] = instructions
+        max_tokens = body.get("max_completion_tokens") or body.get("max_tokens")
+        if max_tokens:
+            payload["max_output_tokens"] = int(max_tokens)
+        for src in ("temperature", "top_p"):
+            if body.get(src) is not None:
+                payload[src] = body[src]
+        if endpoint.extra_body:
+            payload.update(endpoint.extra_body)
+        url = endpoint.url("/responses")
+        index = 0
+        chunk_id = ""
+        usage_raw: dict[str, Any] = {}
+        try:
+            async with self._client.stream(
+                "POST", url, json=payload, headers=endpoint.headers()
+            ) as response:
+                if response.status_code >= 400:
+                    body_text = ""
+                    try:
+                        body_text = (await response.aread()).decode(
+                            "utf-8", errors="replace"
+                        )[:2000]
+                    except Exception:
+                        body_text = ""
+                    raise UpstreamProviderError(
+                        response.status_code,
+                        f"upstream provider error: {endpoint.name} (HTTP {response.status_code})",
+                        body=body_text,
+                    )
+                async for line in response.aiter_lines():
+                    line = line.strip()
+                    if not line.startswith("data:"):
+                        continue
+                    data = line[5:].strip()
+                    if data == "[DONE]":
+                        break
+                    try:
+                        event = json.loads(data)
+                    except json.JSONDecodeError:
+                        continue
+                    if not isinstance(event, dict):
+                        continue
+                    etype = event.get("type", "")
+                    if etype == "response.output_text.delta":
+                        chunk_id = chunk_id or str(event.get("item_id", ""))
+                        delta = str(event.get("delta", ""))
+                        if not delta:
+                            continue
+                        yield {
+                            "id": chunk_id or f"resp-{index}",
+                            "object": "chat.completion.chunk",
+                            "model": bare,
+                            "choices": [
+                                {
+                                    "index": 0,
+                                    "delta": {"content": delta},
+                                    "finish_reason": None,
+                                }
+                            ],
+                        }
+                        index += 1
+                    elif etype == "response.completed":
+                        resp = event.get("response", {}) or {}
+                        usage_raw = resp.get("usage", {}) or {}
+                        yield {
+                            "id": str(resp.get("id", "")) or f"resp-{index}",
+                            "object": "chat.completion.chunk",
+                            "model": str(resp.get("model", "")) or bare,
+                            "choices": [
+                                {
+                                    "index": 0,
+                                    "delta": {},
+                                    "finish_reason": "stop",
+                                }
+                            ],
+                            "usage": {
+                                "prompt_tokens": int(usage_raw.get("input_tokens", 0) or 0),
+                                "completion_tokens": int(usage_raw.get("output_tokens", 0) or 0),
+                                "total_tokens": int(usage_raw.get("total_tokens", 0) or 0),
+                            },
+                        }
+        except httpx.TimeoutException as exc:
+            raise UpstreamProviderError(502, f"upstream provider timed out: {endpoint.name}") from exc
+        except httpx.HTTPError as exc:
+            raise UpstreamProviderError(502, f"upstream provider error: {endpoint.name}") from exc
+
     async def stream_chunks(
         self,
         model: str,
@@ -1055,6 +1197,10 @@ class DirectProviderClient:
         chunk.
         """
         endpoint = self.resolve(model)
+        if kind == "chat" and getattr(endpoint, "api_mode", "") == "codex_responses":
+            async for chunk in self._stream_responses(endpoint, model, body):
+                yield chunk
+            return
         url = self._request_url(endpoint, kind)
         payload = {k: v for k, v in body.items() if k in _FORWARD_ALLOWLIST}
         payload["model"] = model.split("/", 1)[1] if model.startswith("@") else model
