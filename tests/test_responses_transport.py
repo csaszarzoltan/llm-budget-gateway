@@ -105,7 +105,7 @@ async def test_api_mode_responses_posts_to_responses_endpoint(monkeypatch):
     sent = calls[0]["json"]
     assert sent["model"] == "muse-spark-1.2-contributor"
     assert "input" in sent and "messages" not in sent
-    assert sent["max_output_tokens"] == 30
+    assert sent["max_output_tokens"] == 4096  # muse min enforced (reasoning needs budget; 30 would truncate to 0)
     # Response translated back to chat-completions shape for callers.
     assert data["choices"][0]["message"]["role"] == "assistant"
     assert data["choices"][0]["message"]["content"] == "pong"
@@ -202,6 +202,44 @@ async def test_stream_chunks_uses_responses_and_translates(monkeypatch):
     last = chunks[-1]
     assert last["choices"][0]["finish_reason"] == "stop"
     assert last["usage"]["total_tokens"] == 15
+
+
+@pytest.mark.asyncio
+
+@pytest.mark.asyncio
+async def test_stream_chunks_handles_incomplete():
+    """response.incomplete must yield length finish, not hang truncated."""
+    lines = [
+        'data: {"type":"response.output_text.delta","item_id":"it1","delta":"hello "}',
+        'data: {"type":"response.output_text.delta","item_id":"it1","delta":"world"}',
+        'data: {"type":"response.incomplete","response":{"id":"resp_inc","model":"muse-spark-1.2-contributor","status":"incomplete","incomplete_details":{"reason":"max_output_tokens"},"usage":{"input_tokens":10,"output_tokens":5,"total_tokens":15}}}',
+        "data: [DONE]",
+    ]
+    class _Ctx:
+        async def __aenter__(self):
+            class R:
+                status_code=200
+                async def aread(self): return b""
+                async def aiter_lines(self):
+                    for l in lines: yield l
+            return R()
+        async def __aexit__(self,*a): return False
+    def _stream(m,u,json=None,headers=None):
+        return _Ctx()
+    from llm_budget_gateway.provider_direct import DirectProviderClient
+    client=DirectProviderClient(registry={})
+    from tests.test_responses_transport import _endpoint
+    ep=_endpoint()
+    object.__setattr__(ep,"api_mode","codex_responses")
+    client._registry["opencode-go"]=ep
+    client._model_index["muse-spark-1.2-contributor"]=ep
+    object.__setattr__(client,"_client", type("C",(),{"stream":staticmethod(_stream)})())
+    chunks=[]
+    async for c in client.stream_chunks("muse-spark-1.2-contributor", {"messages":[{"role":"user","content":"hi"}],"max_tokens":10}):
+        chunks.append(c)
+    assert len(chunks)==3  # 2 deltas + 1 final
+    assert chunks[-1]["choices"][0]["finish_reason"]=="length"
+    assert chunks[-1]["usage"]["total_tokens"]==15
 
 
 @pytest.mark.asyncio

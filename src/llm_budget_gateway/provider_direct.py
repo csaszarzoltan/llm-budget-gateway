@@ -923,7 +923,10 @@ class DirectProviderClient:
             payload["instructions"] = system_text
         max_tokens = body.get("max_completion_tokens") or body.get("max_tokens")
         if max_tokens:
-            payload["max_output_tokens"] = int(max_tokens)
+            v = int(max_tokens)
+            if "muse" in bare and v < 4096:
+                v = 4096
+            payload["max_output_tokens"] = v
         for src, dst in (("temperature", "temperature"), ("top_p", "top_p")):
             if body.get(src) is not None:
                 payload[dst] = body[src]
@@ -1100,7 +1103,10 @@ class DirectProviderClient:
             payload["instructions"] = instructions
         max_tokens = body.get("max_completion_tokens") or body.get("max_tokens")
         if max_tokens:
-            payload["max_output_tokens"] = int(max_tokens)
+            v = int(max_tokens)
+            if "muse" in bare and v < 4096:
+                v = 4096
+            payload["max_output_tokens"] = v
         for src in ("temperature", "top_p"):
             if body.get(src) is not None:
                 payload[src] = body[src]
@@ -1159,9 +1165,14 @@ class DirectProviderClient:
                             ],
                         }
                         index += 1
-                    elif etype == "response.completed":
+                    elif etype in ("response.completed", "response.incomplete"):
                         resp = event.get("response", {}) or {}
+                        if etype == "response.incomplete" and not resp:
+                            resp = event
                         usage_raw = resp.get("usage", {}) or {}
+                        status = str(resp.get("status", "")) if isinstance(resp, dict) else ""
+                        incomplete = resp.get("incomplete_details") if isinstance(resp, dict) else None
+                        finish = "length" if (etype == "response.incomplete" or status == "incomplete" or incomplete) else "stop"
                         yield {
                             "id": str(resp.get("id", "")) or f"resp-{index}",
                             "object": "chat.completion.chunk",
@@ -1170,7 +1181,7 @@ class DirectProviderClient:
                                 {
                                     "index": 0,
                                     "delta": {},
-                                    "finish_reason": "stop",
+                                    "finish_reason": finish,
                                 }
                             ],
                             "usage": {
@@ -1179,6 +1190,15 @@ class DirectProviderClient:
                                 "total_tokens": int(usage_raw.get("total_tokens", 0) or 0),
                             },
                         }
+                    elif etype == "response.failed":
+                        resp = event.get("response", {}) or {}
+                        err = resp.get("error") or event.get("error") or {}
+                        msg = err.get("message") if isinstance(err, dict) else str(err)
+                        raise UpstreamProviderError(
+                            502,
+                            f"upstream provider error: {endpoint.name} (response.failed: {msg})",
+                            body=str(event)[:2000],
+                        )
         except httpx.TimeoutException as exc:
             raise UpstreamProviderError(502, f"upstream provider timed out: {endpoint.name}") from exc
         except httpx.HTTPError as exc:
