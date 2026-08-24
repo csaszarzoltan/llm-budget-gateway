@@ -194,6 +194,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
                     "api_key": str(secret.get("api_key", "")),
                     "user_agent": str(secret.get("user_agent", "")).strip() or None,
                     "models": models,
+                    "api_mode": str(secret.get("api_mode", "") or "chat_completions"),
                 }
                 extra_body_raw = str(secret.get("extra_body_json", "") or "").strip()
                 if extra_body_raw:
@@ -228,6 +229,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
                             "api_key": str(secret.get("api_key", "")),
                             "user_agent": str(secret.get("user_agent", "")).strip() or None,
                             "models": models,
+                            "api_mode": str(secret.get("api_mode", "") or "chat_completions"),
                         }
                         extra_body_raw_sync = str(secret.get("extra_body_json", "") or "").strip()
                         if extra_body_raw_sync:

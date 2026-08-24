@@ -125,6 +125,48 @@ class UpstreamProviderError(Exception):
         self.body = str(body)[:2000]
 
 
+def _responses_to_chat(data: dict[str, Any], fallback_model: str) -> dict[str, Any]:
+    """Map a Codex /Responses object onto chat-completions JSON.
+
+    Text comes from output items of type ``message`` (content parts of type
+    ``output_text``); usage maps input/output/total → prompt/completion/
+    total tokens; finish_reason mirrors ``status``.
+    """
+    text_parts: list[str] = []
+    for item in data.get("output", []) or []:
+        if item.get("type") != "message":
+            continue
+        for part in item.get("content", []) or []:
+            if part.get("type") == "output_text" and part.get("text"):
+                text_parts.append(str(part["text"]))
+    usage_raw = data.get("usage") or {}
+    status = data.get("status", "completed")
+    finish = "stop" if status == "completed" else ("length" if status == "incomplete" else status)
+    return {
+        "id": data.get("id", ""),
+        "object": "chat.completion",
+        "created": data.get("created_at") or 0,
+        "model": data.get("model") or fallback_model,
+        "choices": [
+            {
+                "index": 0,
+                "message": {"role": "assistant", "content": "".join(text_parts)},
+                "finish_reason": finish,
+            }
+        ],
+        "usage": {
+            "prompt_tokens": int(usage_raw.get("input_tokens", 0) or 0),
+            "completion_tokens": int(usage_raw.get("output_tokens", 0) or 0),
+            "total_tokens": int(
+                usage_raw.get("total_tokens", 0)
+                or (usage_raw.get("input_tokens", 0) or 0)
+                + (usage_raw.get("output_tokens", 0) or 0)
+            ),
+        },
+        "_responses_status": status,
+    }
+
+
 _REASONING_ECHO_MODEL_SUBS = ("deepseek", "kimi", "mimo")
 
 
@@ -269,6 +311,7 @@ class ProviderEndpoint:
     api_key_value: str | None = None  # direct key (vault), bypasses env
     user_agent: str | None = None  # client-emulation User-Agent for upstream
     extra_body: dict[str, Any] | None = None  # provider-level body merge
+    api_mode: str = "chat_completions"  # or "codex_responses" (POST /responses)
 
     def api_key(self) -> str:
         """Read the API key from the vault value or the environment."""
@@ -406,6 +449,7 @@ class DirectProviderClient:
                 api_key_value=raw.get("api_key") or None,
                 user_agent=raw.get("user_agent") or None,
                 extra_body=raw.get("extra_body") or None,
+                api_mode=str(raw.get("api_mode") or "chat_completions"),
             )
             self._registry[name] = endpoint
             for model in models:
@@ -767,6 +811,8 @@ class DirectProviderClient:
         ``forward_stream`` for ``stream: true`` requests.
         """
         endpoint = self.resolve(model)
+        if kind == "chat" and getattr(endpoint, "api_mode", "") == "codex_responses":
+            return await self._forward_responses(endpoint, model, body)
         url = self._request_url(endpoint, kind)
         payload = {k: v for k, v in body.items() if k in _FORWARD_ALLOWLIST}
         # Provider-qualified aliases (@slug/model) select the endpoint, but
@@ -820,6 +866,87 @@ class DirectProviderClient:
         _restore_tool_names(data, tool_name_map)
         served = data.get("model") if isinstance(data, dict) else None
         return response.status_code, data, served or model
+
+    async def _forward_responses(
+        self,
+        endpoint: ProviderEndpoint,
+        model: str,
+        body: dict[str, Any],
+    ) -> tuple[int, dict[str, Any], str]:
+        """Chat-completions in → Codex /Responses API out (translated).
+
+        Some zen models (muse-spark family) only serve the Responses API;
+        their chat-completions shim returns HTTP 500. Translate the OpenAI
+        chat request to ``POST {base}/responses`` and map the response back
+        to chat-completions JSON so callers see one shape.
+        """
+        bare = model.split("/", 1)[1] if model.startswith("@") else model
+        messages = body.get("messages", [])
+        input_items: list[dict[str, Any]] = []
+        system_text = "\n\n".join(
+            m["content"] for m in messages if m.get("role") == "system"
+            and isinstance(m.get("content"), str)
+        )
+        for msg in messages:
+            role = msg.get("role")
+            content = msg.get("content")
+            if role == "system":
+                continue  # folded into `instructions`
+            if isinstance(content, str):
+                text = content
+            elif isinstance(content, list):
+                parts = []
+                for part in content:
+                    if isinstance(part, dict):
+                        parts.append(str(part.get("text") or ""))
+                    else:
+                        parts.append(str(part))
+                text = "\n".join(parts)
+            else:
+                text = "" if content is None else json.dumps(content)
+            out_role = "assistant" if role == "assistant" else "user"
+            input_items.append(
+                {
+                    "role": out_role,
+                    "content": [{"type": "input_text", "text": text}],
+                }
+            )
+        payload: dict[str, Any] = {
+            "model": bare,
+            "input": input_items,
+            "stream": bool(body.get("stream")),
+        }
+        if system_text:
+            payload["instructions"] = system_text
+        max_tokens = body.get("max_completion_tokens") or body.get("max_tokens")
+        if max_tokens:
+            payload["max_output_tokens"] = int(max_tokens)
+        for src, dst in (("temperature", "temperature"), ("top_p", "top_p")):
+            if body.get(src) is not None:
+                payload[dst] = body[src]
+        if endpoint.extra_body:
+            payload.update(endpoint.extra_body)
+        url = endpoint.url("/responses")
+        headers = endpoint.headers()
+        try:
+            response = await self._client.post(url, json=payload, headers=headers)
+        except httpx.TimeoutException as exc:
+            raise UpstreamProviderError(502, f"upstream provider timed out: {endpoint.name}") from exc
+        except httpx.HTTPError as exc:
+            raise UpstreamProviderError(502, f"upstream provider error: {endpoint.name}") from exc
+        if response.status_code >= 400:
+            raise UpstreamProviderError(
+                response.status_code,
+                f"upstream provider error: {endpoint.name} (HTTP {response.status_code})",
+                body=response.text[:2000],
+            )
+        try:
+            data = response.json()
+        except ValueError as exc:
+            raise UpstreamProviderError(
+                502, f"upstream provider returned invalid JSON: {endpoint.name}"
+            ) from exc
+        return response.status_code, _responses_to_chat(data, bare), data.get("model") or bare
 
     async def forward_stream(
         self,
