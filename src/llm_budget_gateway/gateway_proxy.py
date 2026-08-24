@@ -2471,3 +2471,86 @@ class GatewayProxy:
             usage=None,
             latency_ms=0,
         )
+
+    async def probe_route(self, route_name: str, prompt: str = "ping") -> dict:
+        """Walk a published UI route's live candidate chain with one tiny request.
+
+        Unlike the static ``test_route`` (schedule/capability check only),
+        this actually calls each enabled, in-cooldown-aware target through
+        the direct transport and reports per-attempt outcome. Built for the
+        cockpit so "route OK" means "the flow works", not just "a target
+        was selected".
+        """
+        store = self._product_console
+        if store is None:
+            return {"ok": False, "error": "no product console attached"}
+        route = store.published_route_by_name(route_name)
+        if route is None:
+            return {"ok": False, "error": f"unknown route: {route_name}"}
+        decision = self._resolve_targets(route, capabilities=[], body=None)
+        if decision is None:
+            return {
+                "ok": False,
+                "error": "no eligible target",
+                "attempts": [],
+                "excluded": getattr(decision, "excluded", []),
+            }
+        candidates = decision["candidates"]
+        attempts: list[dict] = []
+        body = {
+            "messages": [{"role": "user", "content": prompt}],
+            "max_tokens": 16,
+        }
+        for model in candidates:
+            entry: dict = {"model": model}
+            remaining = 0
+            try:
+                remaining = int(self._cost_tracker.model_in_cooldown(route_name, model))
+            except Exception:
+                remaining = 0
+            if remaining > 0:
+                entry["status"] = "cooldown"
+                entry["detail"] = f"cooldown {remaining}s remaining"
+                attempts.append(entry)
+                continue
+            try:
+                resolved = getattr(self._direct_client, "resolve", None) if self._direct_client else None
+                if callable(resolved):
+                    resolved(model)
+                resp = await self._forward_direct(model, body, timeout=30.0)
+                if resp.status_code == 200:
+                    content = ""
+                    b = resp.body
+                    if isinstance(b, dict):
+                        try:
+                            content = str(
+                                b["choices"][0]["message"]["content"]
+                            )
+                        except Exception:
+                            content = str(b)[:80]
+                    entry["status"] = "success"
+                    entry["latency_ms"] = resp.latency_ms
+                    entry["detail"] = content[:60]
+                    attempts.append(entry)
+                    return {
+                        "ok": True,
+                        "route": route_name,
+                        "served_by": resp.model or model,
+                        "content": content[:200],
+                        "attempts": attempts,
+                    }
+                entry["status"] = "error"
+                entry["detail"] = f"HTTP {resp.status_code}: {str(resp.body)[:160]}"
+            except Exception as exc:
+                status = getattr(exc, "status_code", "")
+                entry["status"] = "error"
+                entry["detail"] = (
+                    f"HTTP {status}: {exc}" if status != "" else f"{type(exc).__name__}: {exc}"
+                )
+            attempts.append(entry)
+        return {
+            "ok": False,
+            "route": route_name,
+            "error": "all targets failed",
+            "attempts": attempts,
+        }

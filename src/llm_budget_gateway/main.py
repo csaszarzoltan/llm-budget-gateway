@@ -535,6 +535,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
             return JSONResponse({"error": str(exc)}, status_code=500)
         return JSONResponse({"status": "reloaded"})
 
+    register_probe_route_endpoint(app, proxy)
     return install_gateway_home(app)
 async def _read_json_body(request: Request) -> dict | ProviderResponse:
     """Parse the request body as a JSON object; 400 on malformed input.
@@ -605,3 +606,29 @@ def _provider_response(response: ProviderResponse) -> Response:
         headers=headers,
         media_type="text/event-stream",
     )
+
+
+def register_probe_route_endpoint(app: FastAPI, proxy: GatewayProxy) -> None:
+    """Attach POST /_admin/probe-route to ``app`` bound to ``proxy``.
+
+    Separated from create_app so tests can register it against a stubbed
+    proxy. Live-probes a published route's candidate chain with a tiny
+    message — the flow-level counterpart of the static route test.
+    """
+
+    @app.post("/_admin/probe-route")
+    async def probe_route(request: Request) -> JSONResponse:
+        client = request.client.host if request.client else ""
+        if client not in {"127.0.0.1", "::1", "testclient"}:
+            raise HTTPException(403, detail="probe is local-only")
+        try:
+            body = await request.json()
+        except Exception:
+            body = {}
+        route_name = str((body or {}).get("route", "")).strip()
+        if not route_name:
+            return JSONResponse({"ok": False, "error": "missing 'route'"}, status_code=422)
+        prompt = str((body or {}).get("prompt", "ping"))[:200]
+        result = await proxy.probe_route(route_name, prompt=prompt)
+        status = 200 if result.get("ok") else 502
+        return JSONResponse(result, status_code=status)
