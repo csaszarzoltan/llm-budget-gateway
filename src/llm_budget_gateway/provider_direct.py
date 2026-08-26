@@ -419,7 +419,7 @@ class ProviderEndpoint:
 # Reasoning models (muse, R1, O1/O3, thinking) need budget or they
 # truncate to 0 output (seen: max_output_tokens=200 → incomplete empty).
 REASONING_MIN_TOKENS: dict[str, int] = {
-    "muse": 8192,
+    "muse": 16384,
     "r1": 4096,
     "reasoning": 4096,
     "thinking": 4096,
@@ -1031,6 +1031,11 @@ class DirectProviderClient:
             if eff and v < eff:
                 v = eff
             payload["max_output_tokens"] = v
+        else:
+            # No max from client: set safe default for reasoning models (prevents provider default truncation)
+            eff = _reasoning_min(bare, endpoint)
+            if eff:
+                payload["max_output_tokens"] = eff
         for src, dst in (("temperature", "temperature"), ("top_p", "top_p")):
             if body.get(src) is not None:
                 payload[dst] = body[src]
@@ -1265,6 +1270,10 @@ class DirectProviderClient:
             if eff and v < eff:
                 v = eff
             payload["max_output_tokens"] = v
+        else:
+            eff = _reasoning_min(bare, endpoint)
+            if eff:
+                payload["max_output_tokens"] = eff
         for src in ("temperature", "top_p"):
             if body.get(src) is not None:
                 payload[src] = body[src]
