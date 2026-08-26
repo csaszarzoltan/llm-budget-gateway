@@ -311,20 +311,18 @@ async def test_min_output_tokens_provider_overrides_pattern(monkeypatch):
 
 @pytest.mark.asyncio
 async def test_min_output_tokens_non_reasoning_not_clamped(monkeypatch):
-    """Non-reasoning model with small max must not be clamped."""
+    """Non-reasoning model with small max gets universal 4096 floor (prevents stealth truncation)."""
     client, calls = _client_with(
         monkeypatch, lambda payload: _responses_payload(payload)
     )
-    # Use a non-reasoning endpoint
     ep = _endpoint()
-    ep2 = type(ep)(name="xiaomi", base_url="https://api.example/v1", api_key_env="", models=("mimo-v2-flash",), api_key_value="k")
+    ep2 = type(ep)(name="openai", base_url="https://api.example/v1", api_key_env="", models=("gpt-4o-mini",), api_key_value="k")
     object.__setattr__(ep2, "api_mode", "codex_responses")
-    client._registry["xiaomi"] = ep2
-    client._model_index["mimo-v2-flash"] = ep2
-    client._model_index["@xiaomi/mimo-v2-flash"] = ep2
-    await client.forward("mimo-v2-flash", {"messages": [{"role": "user", "content": "hi"}], "max_tokens": 200})
-    # Find call for mimo
-    assert calls[-1]["json"]["max_output_tokens"] == 200
+    client._registry["openai"] = ep2
+    client._model_index["gpt-4o-mini"] = ep2
+    client._model_index["@openai/gpt-4o-mini"] = ep2
+    await client.forward("gpt-4o-mini", {"messages": [{"role": "user", "content": "hi"}], "max_tokens": 200})
+    assert calls[-1]["json"]["max_output_tokens"] == 4096
 
 
 @pytest.mark.asyncio

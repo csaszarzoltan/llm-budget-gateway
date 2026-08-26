@@ -420,11 +420,16 @@ class ProviderEndpoint:
 # truncate to 0 output (seen: max_output_tokens=200 → incomplete empty).
 REASONING_MIN_TOKENS: dict[str, int] = {
     "muse": 16384,
-    "r1": 4096,
-    "reasoning": 4096,
-    "thinking": 4096,
-    "o1": 4096,
-    "o3": 4096,
+    "r1": 16384,
+    "reasoning": 16384,
+    "thinking": 16384,
+    "o1": 16384,
+    "o3": 16384,
+    "stealth": 16384,
+    "ox-alpha": 16384,
+    "ox": 8192,
+    "laguna": 8192,
+    "mimo": 8192,
 }
 
 def _reasoning_min(bare: str, endpoint: ProviderEndpoint) -> int:
@@ -1028,6 +1033,14 @@ class DirectProviderClient:
         if max_tokens:
             v = int(max_tokens)
             eff = _reasoning_min(bare, endpoint)
+            # Respect explicit 0 (disable), otherwise universal floor 4096 for tiny max
+            if eff == 0:
+                if endpoint.min_output_tokens is None:
+                    # No provider override and no pattern → use safe universal floor
+                    eff = 4096
+                else:
+                    # Explicit 0 means disable
+                    eff = 0
             if eff and v < eff:
                 v = eff
             payload["max_output_tokens"] = v
@@ -1267,6 +1280,14 @@ class DirectProviderClient:
         if max_tokens:
             v = int(max_tokens)
             eff = _reasoning_min(bare, endpoint)
+            # Respect explicit 0 (disable), otherwise universal floor 4096 for tiny max
+            if eff == 0:
+                if endpoint.min_output_tokens is None:
+                    # No provider override and no pattern → use safe universal floor
+                    eff = 4096
+                else:
+                    # Explicit 0 means disable
+                    eff = 0
             if eff and v < eff:
                 v = eff
             payload["max_output_tokens"] = v
