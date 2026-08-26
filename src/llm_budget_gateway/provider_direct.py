@@ -447,6 +447,30 @@ def _reasoning_min(bare: str, endpoint: ProviderEndpoint) -> int:
     return 0
 
 
+def _clamp_chat_max(payload: dict, endpoint) -> None:
+    """Clamp payload max_tokens for chat_completions (stealth/laguna etc)."""
+    m = payload.get("max_completion_tokens") or payload.get("max_tokens")
+    if m is None:
+        return
+    try:
+        v = int(m)
+    except Exception:
+        return
+    eff = _reasoning_min(str(payload.get("model", "")), endpoint)
+    if eff == 0:
+        if endpoint.min_output_tokens is None:
+            eff = 4096
+        else:
+            try:
+                if int(endpoint.min_output_tokens) == 0:
+                    return
+            except Exception:
+                eff = 4096
+    if eff and v < eff:
+        payload["max_tokens"] = eff
+        payload["max_completion_tokens"] = eff
+
+
 class DirectProviderClient:
     """Resolves models to configured providers and forwards HTTP calls.
 
@@ -926,6 +950,7 @@ class DirectProviderClient:
         # Provider-qualified aliases (@slug/model) select the endpoint, but
         # the upstream always receives the bare model name.
         payload["model"] = model.split("/", 1)[1] if model.startswith("@") else model
+        _clamp_chat_max(payload, endpoint)
         # Provider-level extra body (e.g. DeepInfra "flex": true) — config is
         # authoritative over anything the client sent.
         if endpoint.extra_body:
@@ -1104,6 +1129,7 @@ class DirectProviderClient:
         # the upstream always receives the bare model name.
         payload["model"] = model.split("/", 1)[1] if model.startswith("@") else model
         payload["stream"] = True
+        _clamp_chat_max(payload, endpoint)
         # Provider-level extra body (e.g. DeepInfra "flex": true) — config is
         # authoritative over anything the client sent.
         if endpoint.extra_body:
@@ -1489,6 +1515,7 @@ class DirectProviderClient:
         payload = {k: v for k, v in body.items() if k in _FORWARD_ALLOWLIST}
         payload["model"] = model.split("/", 1)[1] if model.startswith("@") else model
         payload["stream"] = True
+        _clamp_chat_max(payload, endpoint)
         if endpoint.extra_body:
             payload.update(endpoint.extra_body)
         if _model_needs_reasoning_echo(payload.get("model", "")):
