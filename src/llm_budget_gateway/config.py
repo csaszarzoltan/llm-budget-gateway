@@ -28,7 +28,7 @@ class Settings(BaseSettings):
     #: subsequent stream chunk) before failing the request. Env
     #: ``GATEWAY_PROVIDER_TIMEOUT``. A hung upstream must never hang the
     #: worker indefinitely (availability review checklist item 2).
-    provider_timeout: float = 60.0
+    provider_timeout: float = 120.0
     #: Total wall-clock budget for a route's whole fallback chain. When
     #: several targets are in cooldown or timing out, the chain can exceed
     #: the client's own timeout (Hermes waits ~60-90s) and the client gives
@@ -36,7 +36,7 @@ class Settings(BaseSettings):
     #: eventually answer. This caps the sum: once the budget is spent, the
     #: remaining candidates are skipped and the last one is tried with the
     #: leftover time. Env ``GATEWAY_ROUTE_TIMEOUT_BUDGET``.
-    route_timeout_budget: float = 90.0
+    route_timeout_budget: float = 150.0
     #: Dynamic cooldown ladder in seconds. A target that fails repeatedly
     #: (429/5xx/timeout) escalates through this ladder instead of being
     #: parked for a fixed duration: 1m → 5m → 15m → 1h → 2h → 4h → 8h →
