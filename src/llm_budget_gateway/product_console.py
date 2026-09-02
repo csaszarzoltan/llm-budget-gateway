@@ -61,6 +61,15 @@ CREATE TABLE IF NOT EXISTS pc_route_versions(route_id TEXT,version INTEGER,targe
 CREATE TABLE IF NOT EXISTS pc_apps(id TEXT PRIMARY KEY,name TEXT,default_route TEXT,key_hash TEXT,created TEXT);
 CREATE TABLE IF NOT EXISTS pc_activity(id TEXT PRIMARY KEY,app_id TEXT,route TEXT,model TEXT,cost REAL,latency INTEGER,success INTEGER,reason TEXT,created TEXT);
 """)
+        # live-migrate: add key_preview for masked display (gw_****) without storing plaintext
+        try:
+            cur = connection.execute("PRAGMA table_info(pc_apps)")
+            cols = [r[1] for r in cur.fetchall()]
+            if "key_preview" not in cols:
+                connection.execute("ALTER TABLE pc_apps ADD COLUMN key_preview TEXT")
+                connection.commit()
+        except Exception:
+            pass
         connection.commit()
 
     def create_provider(
@@ -121,14 +130,16 @@ CREATE TABLE IF NOT EXISTS pc_activity(id TEXT PRIMARY KEY,app_id TEXT,route TEX
             raise ValueError("application name and route are required")
         aid = "app_" + secrets.token_hex(5)
         key = "gw_" + secrets.token_urlsafe(22)
+        preview = f"{key[:8]}****{key[-4:]}"
         self.db.execute(
-            "INSERT INTO pc_apps VALUES(?,?,?,?,?)",
+            "INSERT INTO pc_apps VALUES(?,?,?,?,?,?)",
             (
                 aid,
                 name,
                 default_route,
                 hashlib.sha256(key.encode()).hexdigest(),
                 _now(),
+                preview,
             ),
         )
         self.db.commit()
@@ -137,6 +148,7 @@ CREATE TABLE IF NOT EXISTS pc_activity(id TEXT PRIMARY KEY,app_id TEXT,route TEX
             "name": name,
             "default_route": default_route,
             "api_key": key,
+            "key_preview": preview,
             "status": "active",
         }
 
@@ -156,20 +168,49 @@ CREATE TABLE IF NOT EXISTS pc_activity(id TEXT PRIMARY KEY,app_id TEXT,route TEX
         return {"id": row[0], "name": row[1], "default_route": row[2], "created": row[3]}
 
     def applications(self) -> list[dict[str, Any]]:
-        """List applications without secret material."""
-        rows = self.db.execute(
-            "SELECT id,name,default_route,created FROM pc_apps ORDER BY created"
-        ).fetchall()
-        return [
-            {
-                "id": r[0],
-                "name": r[1],
-                "default_route": r[2],
-                "status": "active",
-                "created_at": r[3],
-            }
-            for r in rows
-        ]
+        """List applications without secret material (preview only)."""
+        # key_preview is masked (gw_****), never plaintext
+        try:
+            rows = self.db.execute(
+                "SELECT id,name,default_route,created,key_preview FROM pc_apps ORDER BY created"
+            ).fetchall()
+            has_preview = True
+        except Exception:
+            rows = self.db.execute(
+                "SELECT id,name,default_route,created FROM pc_apps ORDER BY created"
+            ).fetchall()
+            has_preview = False
+        out = []
+        for r in rows:
+            preview = r[4] if has_preview and len(r) > 4 else None
+            # derive masked placeholder when preview missing (old row)
+            if not preview:
+                preview = "gw_****"
+            out.append(
+                {
+                    "id": r[0],
+                    "name": r[1],
+                    "default_route": r[2],
+                    "status": "active",
+                    "created_at": r[3],
+                    "key_preview": preview,
+                }
+            )
+        return out
+
+    def rotate_application_key(self, app_id: str) -> dict[str, Any]:
+        """Rotate an application key: new gw_****, old hash replaced, preview updated."""
+        row = self.db.execute("SELECT id,name,default_route FROM pc_apps WHERE id=?", (app_id,)).fetchone()
+        if not row:
+            raise KeyError(app_id)
+        new_key = "gw_" + secrets.token_urlsafe(22)
+        preview = f"{new_key[:8]}****{new_key[-4:]}"
+        self.db.execute(
+            "UPDATE pc_apps SET key_hash=?, key_preview=? WHERE id=?",
+            (hashlib.sha256(new_key.encode()).hexdigest(), preview, app_id),
+        )
+        self.db.commit()
+        return {"id": app_id, "api_key": new_key, "key_preview": preview, "status": "active"}
 
     def create_route(self, name: str, targets: list[dict[str, Any]]) -> dict[str, Any]:
         """Create a versioned route draft."""

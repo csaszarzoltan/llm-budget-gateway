@@ -221,9 +221,9 @@ class TestProviderTimeout:
         assert "timed out" in resp.text
 
     def test_provider_timeout_setting_default_and_env(self, monkeypatch) -> None:
-        """MEDIUM B: Settings.provider_timeout exists, defaults to 60s and is
+        """MEDIUM B: Settings.provider_timeout exists, defaults to 120s and is
         overridable via GATEWAY_PROVIDER_TIMEOUT."""
-        assert Settings().provider_timeout == 60.0
+        assert Settings().provider_timeout == 120.0
         monkeypatch.setenv("GATEWAY_PROVIDER_TIMEOUT", "7.5")
         assert Settings().provider_timeout == 7.5
 

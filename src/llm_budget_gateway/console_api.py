@@ -880,6 +880,14 @@ def create_console_app(
         except ValueError as exc:
             raise HTTPException(422, str(exc)) from exc
 
+    @app.post("/v1/product/applications/{app_id}/rotate", status_code=200)
+    async def rotate_product_application(app_id: str) -> dict[str, object]:
+        """Rotate an application key: returns new api_key once, then only preview."""
+        try:
+            return product.rotate_application_key(app_id)
+        except KeyError as exc:
+            raise HTTPException(404, "unknown application") from exc
+
     @app.get("/v1/product/provider-types")
     async def product_provider_types() -> dict[str, object]:
         """Return provider-specific connection fields for the setup wizard."""

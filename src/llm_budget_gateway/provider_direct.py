@@ -347,6 +347,46 @@ def _collect_tool_name_map(payload: dict[str, Any] | None) -> dict[str, str]:
     return mapping
 
 
+def _normalize_arguments(value: Any) -> str:
+    """Coerce tool arguments to a valid JSON string for POST /responses.
+
+    Console Go (opencode.ai zen/go) validates ``arguments`` with strict JSON
+    parsing (400 ``arguments must be valid JSON``). Hermes may replay
+    tool_calls where ``arguments`` is already a dict (not a string) or a
+    Python repr ``{'k': 'v'}`` from ``str(dict)`` — both fail the check.
+    This normalizes to ``\"{}\"`` or a JSON-dumped object string.
+    """
+    if value is None:
+        return "{}"
+    if isinstance(value, dict) or isinstance(value, list):
+        try:
+            return json.dumps(value, ensure_ascii=False)
+        except Exception:
+            return "{}"
+    if isinstance(value, str):
+        s = value.strip()
+        if not s:
+            return "{}"
+        try:
+            json.loads(s)
+            return s
+        except (ValueError, TypeError):
+            # Python repr fallback, e.g. "{'board': 'default'}"
+            try:
+                import ast
+
+                lit = ast.literal_eval(s)
+                if isinstance(lit, (dict, list)):
+                    return json.dumps(lit, ensure_ascii=False)
+            except Exception:
+                pass
+            return "{}"
+    try:
+        return json.dumps(value, ensure_ascii=False)
+    except Exception:
+        return "{}"
+
+
 def _restore_tool_names(data: Any, mapping: dict[str, str]) -> None:
     """Restore original tool/function names on a response body or stream chunk."""
     if not isinstance(data, dict) or not mapping:
@@ -1014,46 +1054,17 @@ class DirectProviderClient:
         to chat-completions JSON so callers see one shape.
         """
         bare = model.split("/", 1)[1] if model.startswith("@") else model
-        messages = body.get("messages", [])
-        input_items: list[dict[str, Any]] = []
-        system_text = "\n\n".join(
-            m["content"] for m in messages if m.get("role") == "system"
-            and isinstance(m.get("content"), str)
-        )
-        for msg in messages:
-            role = msg.get("role")
-            content = msg.get("content")
-            if role == "system":
-                continue  # folded into `instructions`
-            if isinstance(content, str):
-                text = content
-            elif isinstance(content, list):
-                parts = []
-                for part in content:
-                    if isinstance(part, dict):
-                        parts.append(str(part.get("text") or ""))
-                    else:
-                        parts.append(str(part))
-                text = "\n".join(parts)
-            else:
-                text = "" if content is None else json.dumps(content)
-            is_assistant = role == "assistant"
-            input_items.append(
-                {
-                    "role": "assistant" if is_assistant else "user",
-                    # Responses API: assistant history uses `output_text`.
-                    "content": [
-                        {"type": "output_text" if is_assistant else "input_text", "text": text}
-                    ],
-                }
-            )
+        # Use shared translation so tool replays (assistant tool_calls + role=tool)
+        # become proper function_call / function_call_output items and arguments
+        # are normalized to valid JSON (Console Go strict check).
+        instructions, input_items = self._responses_input_from_messages(body)
         payload: dict[str, Any] = {
             "model": bare,
             "input": input_items,
             "stream": bool(body.get("stream")),
         }
-        if system_text:
-            payload["instructions"] = system_text
+        if instructions:
+            payload["instructions"] = instructions
         max_tokens = body.get("max_completion_tokens") or body.get("max_tokens")
         if max_tokens:
             v = int(max_tokens)
@@ -1234,7 +1245,7 @@ class DirectProviderClient:
                             "type": "function_call",
                             "call_id": str(tc.get("id") or ""),
                             "name": str(fn.get("name") or ""),
-                            "arguments": str(fn.get("arguments") or "{}"),
+                            "arguments": _normalize_arguments(fn.get("arguments")),
                         }
                     )
                 # If assistant also has text, keep it as output_text
