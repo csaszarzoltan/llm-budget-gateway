@@ -381,3 +381,65 @@ async def test_responses_input_assistant_uses_output_text():
         ctype == ("output_text" if role == "assistant" else "input_text")
         for role, ctype in roles
     )
+
+
+def _session_endpoint(**kw) -> ProviderEndpoint:
+    base = dict(name="opencode-go", base_url="https://zen.example/v1", api_key_env="", models=("muse-spark-1.2-contributor",), api_key_value="[REDACTED]")
+    base.update(kw)
+    return ProviderEndpoint(**base)
+
+
+def test_session_header_fallback_without_client():
+    """09/06+: opencode upstream always gets x-opencode-session (gateway fallback)."""
+    from llm_budget_gateway.provider_direct import _UPSTREAM_CLIENT_HEADERS
+    _UPSTREAM_CLIENT_HEADERS.set(None)
+    ep = _session_endpoint()
+    assert ep.headers()["x-opencode-session"] == "gw-opencode-go"
+
+
+def test_session_header_client_forwarded():
+    """Hermes PR #101864 client value wins over the gateway fallback."""
+    from llm_budget_gateway.provider_direct import _UPSTREAM_CLIENT_HEADERS
+    tok = _UPSTREAM_CLIENT_HEADERS.set({"x-opencode-session": "sess-abc"})
+    try:
+        ep = _session_endpoint()
+        assert ep.headers()["x-opencode-session"] == "sess-abc"
+    finally:
+        _UPSTREAM_CLIENT_HEADERS.reset(tok)
+
+
+def test_session_header_static_not_clobbered():
+    """Static Console extra_headers_json wins over fallback; client wins over static."""
+    from llm_budget_gateway.provider_direct import _UPSTREAM_CLIENT_HEADERS
+    _UPSTREAM_CLIENT_HEADERS.set(None)
+    ep = _session_endpoint(extra_headers={"x-opencode-session": "static-1"})
+    assert ep.headers()["x-opencode-session"] == "static-1"
+    tok = _UPSTREAM_CLIENT_HEADERS.set({"x-opencode-session": "client-wins"})
+    try:
+        assert ep.headers()["x-opencode-session"] == "client-wins"
+    finally:
+        _UPSTREAM_CLIENT_HEADERS.reset(tok)
+
+
+def test_session_header_non_opencode_untouched():
+    """Non-opencode providers never get the session header injected."""
+    from llm_budget_gateway.provider_direct import _UPSTREAM_CLIENT_HEADERS
+    _UPSTREAM_CLIENT_HEADERS.set({"x-opencode-session": "sess-abc"})
+    ep = _session_endpoint(name="openrouter")
+    assert "x-opencode-session" not in ep.headers()
+
+
+@pytest.mark.asyncio
+async def test_session_header_sent_on_responses_post(monkeypatch):
+    """POST /responses carries x-opencode-session upstream (captured headers)."""
+    from llm_budget_gateway.provider_direct import _UPSTREAM_CLIENT_HEADERS
+    _UPSTREAM_CLIENT_HEADERS.set(None)
+    client, calls = _client_with(monkeypatch, lambda payload: _responses_payload(payload))
+    ep = client.resolve("muse-spark-1.2-contributor")
+    object.__setattr__(ep, "api_mode", "codex_responses")
+    await client.forward("muse-spark-1.2-contributor", {"messages": [{"role": "user", "content": "hi"}]})
+    assert calls[0]["headers"]["x-opencode-session"] == "gw-opencode-go"
+    _UPSTREAM_CLIENT_HEADERS.set({"x-opencode-session": "sess-live"})
+    await client.forward("muse-spark-1.2-contributor", {"messages": [{"role": "user", "content": "hi"}]})
+    assert calls[1]["headers"]["x-opencode-session"] == "sess-live"
+    _UPSTREAM_CLIENT_HEADERS.set(None)

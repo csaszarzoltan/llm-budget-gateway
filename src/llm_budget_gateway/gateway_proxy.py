@@ -388,6 +388,34 @@ class GatewayProxy:
         forward -> cost record. Errors map to HTTP responses.
         """
         request_id = uuid4().hex
+        # OpenCode Go 09/06+: forward x-opencode-session upstream. The direct
+        # transport reads this ContextVar in endpoint.headers() (fallback to
+        # a stable gw-<provider> id when the client — Hermes PR #101864 —
+        # does not send it yet). Reset in `finally` below.
+        _upstream_token = None
+        try:
+            from .provider_direct import set_upstream_client_headers
+
+            _upstream_token = set_upstream_client_headers(
+                headers if isinstance(headers, dict) else None
+            )
+        except Exception:
+            _upstream_token = None
+        try:
+            return await self._handle_inner(body, api_key, headers, request_id)
+        finally:
+            if _upstream_token is not None:
+                try:
+                    from .provider_direct import _UPSTREAM_CLIENT_HEADERS
+
+                    _UPSTREAM_CLIENT_HEADERS.reset(_upstream_token)
+                except Exception:
+                    pass
+
+    async def _handle_inner(
+        self, body: dict, api_key: str, headers: dict, request_id: str
+    ) -> ProviderResponse:
+        """Pre-ContextVar body of ``_handle`` (auth -> scopes -> forward)."""
         model = body.get("model", "") if isinstance(body, dict) else ""
         if self._routing_control_plane is not None:
             try:

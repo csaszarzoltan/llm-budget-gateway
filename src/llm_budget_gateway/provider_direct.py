@@ -54,6 +54,20 @@ import httpx
 
 logger = logging.getLogger(__name__)
 
+#: Per-request client headers (set by the proxy in ``_handle``) so the direct
+#: transport can forward ``x-opencode-session`` upstream without threading a
+#: new parameter through every forward/stream signature. ContextVar-safe for
+#: asyncio concurrency. ``None`` = no client headers (health probes) → the
+#: endpoint falls back to a stable gateway session id.
+_UPSTREAM_CLIENT_HEADERS: Any = __import__("contextvars").ContextVar(
+    "gw_upstream_client_headers", default=None
+)
+
+
+def set_upstream_client_headers(headers: dict[str, str] | None) -> Any:
+    """Set per-request client headers; returns the reset token."""
+    return _UPSTREAM_CLIENT_HEADERS.set(headers)
+
 #: Client body fields allowed through to the upstream provider. Everything
 #: else is dropped — provider credentials and endpoint overrides must come
 #: from gateway config/env only, never from the client body (SSRF +
@@ -418,6 +432,7 @@ class ProviderEndpoint:
     models: tuple[str, ...] = field(default_factory=tuple)
     api_key_value: str | None = None  # direct key (vault), bypasses env
     user_agent: str | None = None  # client-emulation User-Agent for upstream
+    extra_headers: dict[str, str] | None = None  # static upstream headers (e.g. x-opencode-session)
     extra_body: dict[str, Any] | None = None  # provider-level body merge
     api_mode: str = "chat_completions"  # or "codex_responses" (POST /responses)
     min_output_tokens: int | None = None  # clamp for reasoning models (e.g. 4096 for muse)
@@ -433,8 +448,15 @@ class ProviderEndpoint:
             )
         return value
 
-    def headers(self) -> dict[str, str]:
-        """Auth headers for this endpoint."""
+    def headers(self, extra: dict[str, str] | None = None) -> dict[str, str]:
+        """Auth headers for this endpoint.
+
+        ``extra`` carries per-request upstream headers (e.g. the client's
+        ``x-opencode-session`` forwarded by the proxy); it wins over the
+        static ``extra_headers`` on ties. When ``extra`` is None, the
+        per-request ContextVar (set by the proxy in ``_handle``) is merged
+        via ``session_headers`` for opencode-family providers.
+        """
         key = self.api_key()
         if self.auth == "x-api-key":
             headers = {"x-api-key": key}
@@ -447,7 +469,54 @@ class ProviderEndpoint:
         # Setting the upstream-expected User-Agent unlocks the same limits.
         if self.user_agent:
             headers["User-Agent"] = self.user_agent
+        # Static provider-level headers (Console extra_headers_json).
+        if self.extra_headers:
+            for k, v in self.extra_headers.items():
+                headers[str(k)] = str(v)
+        if extra is None:
+            try:
+                client_headers = _UPSTREAM_CLIENT_HEADERS.get()
+            except Exception:
+                client_headers = None
+            ch = client_headers if isinstance(client_headers, dict) else None
+            sess = self.session_headers(ch)
+            # Priority: client-provided session > static extra_headers >
+            # gateway fallback. The fallback ("gw-<provider>") must not
+            # clobber a static header; a client value always wins.
+            client_val = sess.get("x-opencode-session", "")
+            is_client = False
+            if ch:
+                for k, v in ch.items():
+                    if str(k).lower() == "x-opencode-session" and str(v).strip():
+                        is_client = True
+            for k, v in sess.items():
+                if not is_client and k in headers:
+                    continue
+                headers[str(k)] = str(v)
+            extra = {}
+        if extra:
+            for k, v in extra.items():
+                headers[str(k)] = str(v)
         return headers
+
+    def session_headers(self, client_headers: dict[str, str] | None) -> dict[str, str]:
+        """Upstream session headers for opencode-family providers.
+
+        Forwards the client's ``x-opencode-session`` when present (Hermes
+        PR #101864 sends it); otherwise falls back to a stable gateway
+        session id so 09/06+ upstream validation still passes. Non-opencode
+        endpoints get ``{}`` (no-op).
+        """
+        if "opencode" not in self.name.lower():
+            return {}
+        out: dict[str, str] = {}
+        if client_headers:
+            for k, v in client_headers.items():
+                if str(k).lower() == "x-opencode-session" and str(v).strip():
+                    out["x-opencode-session"] = str(v).strip()
+        if "x-opencode-session" not in out:
+            out["x-opencode-session"] = f"gw-{self.name}"
+        return out
 
     def url(self, path: str) -> str:
         """Absolute URL for ``path`` (e.g. ``/chat/completions``)."""
@@ -613,6 +682,11 @@ class DirectProviderClient:
                 models=models,
                 api_key_value=raw.get("api_key") or None,
                 user_agent=raw.get("user_agent") or None,
+                extra_headers=(
+                    {str(k): str(v) for k, v in raw.get("extra_headers").items()}
+                    if isinstance(raw.get("extra_headers"), dict)
+                    else None
+                ),
                 extra_body=raw.get("extra_body") or None,
                 api_mode=str(raw.get("api_mode") or "chat_completions"),
                 min_output_tokens=(

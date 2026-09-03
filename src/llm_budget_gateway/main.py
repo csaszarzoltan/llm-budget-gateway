@@ -206,6 +206,20 @@ def create_app(settings: Settings | None = None) -> FastAPI:
                         logger.warning(
                             "provider=%s invalid extra_body_json, ignored", slug
                         )
+                # Static upstream headers (Console extra_headers_json), e.g.
+                # {"x-opencode-session": "..."} for OpenCode Go 09/06+.
+                extra_headers_raw = str(secret.get("extra_headers_json", "") or "").strip()
+                if extra_headers_raw:
+                    try:
+                        extra_headers = json.loads(extra_headers_raw)
+                        if isinstance(extra_headers, dict) and extra_headers:
+                            registry[slug]["extra_headers"] = {
+                                str(k): str(v) for k, v in extra_headers.items()
+                            }
+                    except json.JSONDecodeError:
+                        logger.warning(
+                            "provider=%s invalid extra_headers_json, ignored", slug
+                        )
             if registry:
                 direct = DirectProviderClient(
                     registry,
@@ -237,6 +251,16 @@ def create_app(settings: Settings | None = None) -> FastAPI:
                                 eb = json.loads(extra_body_raw_sync)
                                 if isinstance(eb, dict) and eb:
                                     rebuilt[slug]["extra_body"] = eb
+                            except json.JSONDecodeError:
+                                pass
+                        extra_headers_raw_sync = str(secret.get("extra_headers_json", "") or "").strip()
+                        if extra_headers_raw_sync:
+                            try:
+                                eh = json.loads(extra_headers_raw_sync)
+                                if isinstance(eh, dict) and eh:
+                                    rebuilt[slug]["extra_headers"] = {
+                                        str(k): str(v) for k, v in eh.items()
+                                    }
                             except json.JSONDecodeError:
                                 pass
                     return rebuilt
