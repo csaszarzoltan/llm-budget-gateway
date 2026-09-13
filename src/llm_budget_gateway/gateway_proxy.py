@@ -200,6 +200,31 @@ def _body_has_images(body: dict | None) -> bool:
 
 
 @dataclass
+class MidStreamFailure(Exception):
+    """Raised when a live stream dies mid-response (after first chunk).
+
+    Carries the failed candidate, the error detail and how many SSE chunks
+    were already yielded to the client, so the route layer can decide:
+    re-drive the remaining candidates as a fresh stream (client reconnects
+    the SSE) instead of letting the exception become an ASGI traceback
+    and a truncated client reply (``[server_error] The model failed to
+    generate a response`` from opencode-family upstreams).
+    """
+
+    def __init__(
+        self,
+        candidate: str,
+        message: str,
+        body: str = "",
+        chunks_yielded: int = 0,
+    ) -> None:
+        super().__init__(message)
+        self.candidate = candidate
+        self.body = str(body)[:2000]
+        self.chunks_yielded = chunks_yielded
+
+
+@dataclass
 class ProviderResponse:
     status_code: int
     body: dict | str | list | AsyncIterator[str]
@@ -686,8 +711,7 @@ class GatewayProxy:
             fallback=fallback,
             request_id=request_id,
         )
-        return await self._finalize_route_response(
-            response=response,
+        finalize_kwargs = dict(
             body=body,
             api_key=api_key,
             headers=headers,
@@ -707,6 +731,17 @@ class GatewayProxy:
             fallback=fallback,
             served=served,
             chain_started=chain_started,
+            candidates=candidates,
+            fallback_statuses=fallback_statuses,
+            target_cooldowns=target_cooldowns,
+        )
+        # NOTE: mid-stream upstream death (opencode [server_error] after the
+        # first chunk) is recovered INSIDE _finalize_route_response's
+        # _wrapped_stream generator — it re-drives the remaining candidates
+        # as a fresh stream there, because the failure surfaces during SSE
+        # iteration (after this function returned), not during this call.
+        return await self._finalize_route_response(
+            response=response, **finalize_kwargs
         )
 
     @staticmethod
@@ -1621,9 +1656,20 @@ class GatewayProxy:
         fallback: str,
         served: str | None,
         chain_started: float,
+        candidates: list[str] | None = None,
+        fallback_statuses: list[int] | None = None,
+        target_cooldowns: dict | None = None,
     ) -> ProviderResponse:
         """Finalize a served response: sticky binding, cost records,
-        stream wrapping, cache write and route headers."""
+        stream wrapping, cache write and route headers.
+
+        ``mid_stream`` (optional): context for live-stream recovery —
+        ``(candidates, outbound, route, from_plane, fallback_statuses,
+        target_cooldowns)``. When the winning candidate dies mid-stream,
+        the wrapper generator re-drives the remaining candidates as a
+        fresh stream instead of surfacing an ASGI traceback + truncated
+        client reply.
+        """
         response.headers = dict(response.headers)
         response.headers["X-Gateway-Route"] = route_name
         response.headers["X-Gateway-Serving-Model"] = response.model
@@ -1643,6 +1689,12 @@ class GatewayProxy:
         # a wrapper generator that runs after the last chunk.
         if isinstance(response.body, AsyncIterator):
             original_body = response.body
+            # Mid-stream recovery context: the chain that served this
+            # response. Defaults guard direct _finalize callers (tests,
+            # probes) that don't pass a chain.
+            _candidates = list(candidates or [])
+            _fallback_statuses = list(fallback_statuses or [])
+            _target_cooldowns = dict(target_cooldowns or {})
 
             async def _wrapped_stream() -> AsyncIterator[str]:
                 nonlocal cost
@@ -1650,6 +1702,148 @@ class GatewayProxy:
                 try:
                     async for ev in original_body:
                         yield ev
+                except MidStreamFailure as msf:
+                    # Winning candidate died mid-stream (opencode
+                    # [server_error]). The partial SSE is discarded; re-drive
+                    # the remaining candidates as a FRESH stream so the
+                    # client gets one complete reply. The SSE `data:`
+                    # framing restarts cleanly — no traceback, no truncation.
+                    logger.warning(
+                        "route=%s model=%s mid-stream failure after %s "
+                        "chunks request=%s error=%s — fresh-stream fallback",
+                        route_name,
+                        msf.candidate,
+                        msf.chunks_yielded,
+                        request_id,
+                        str(msf)[:300],
+                    )
+                    # Park the dead candidate (capped 300s).
+                    try:
+                        cooldown_info = self._cooldown_info_for(
+                            _target_cooldowns, msf.candidate
+                        )
+                        self._cost_tracker.set_model_cooldown(
+                            route_name,
+                            msf.candidate,
+                            min(int(cooldown_info.get("seconds", 3600)), 300),
+                            reason=json.dumps(
+                                {
+                                    "type": "mid_stream",
+                                    "error": str(msf)[:500],
+                                    "body": msf.body[:500],
+                                }
+                            ),
+                            count_strike=True,
+                        )
+                    except Exception:
+                        logger.exception(
+                            "mid-stream cooldown record failed route=%s model=%s",
+                            route_name,
+                            msf.candidate,
+                        )
+                    remaining = [
+                        c for c in _candidates if c != msf.candidate
+                    ]
+                    if not remaining:
+                        yield "data: " + json.dumps(
+                            {
+                                "error": {
+                                    "message": f"upstream stream failed mid-response: {msf}",
+                                    "type": "provider_error",
+                                }
+                            },
+                            ensure_ascii=False,
+                        ) + "\n\n"
+                        yield "data: [DONE]\n\n"
+                        return
+                    # Drive the remaining chain OUTSIDE the dead generator:
+                    # a fresh _run_candidate_chain + _forward_direct stream,
+                    # yielding its SSE lines verbatim.
+                    try:
+                        fb_response, fb_served, fb_fallback, _ = (
+                            await self._run_candidate_chain(
+                                candidates=remaining,
+                                outbound=outbound,
+                                route=route,
+                                route_name=route_name,
+                                from_plane=from_plane,
+                                fallback_statuses=_fallback_statuses,
+                                target_cooldowns=_target_cooldowns,
+                                fallback=f"mid_stream_{msf.candidate}",
+                                request_id=request_id,
+                            )
+                        )
+                    except Exception as exc:
+                        logger.exception(
+                            "mid-stream re-drive failed request=%s", request_id
+                        )
+                        yield "data: " + json.dumps(
+                            {
+                                "error": {
+                                    "message": f"upstream stream failed mid-response: {exc}",
+                                    "type": "provider_error",
+                                }
+                            },
+                            ensure_ascii=False,
+                        ) + "\n\n"
+                        yield "data: [DONE]\n\n"
+                        return
+                    response.headers["X-Gateway-Fallback"] = (
+                        f"mid_stream_{msf.candidate}->{fb_fallback}"
+                    )
+                    response.headers["X-Gateway-Serving-Model"] = (
+                        fb_served or fb_response.model
+                    )
+                    response.model = fb_served or fb_response.model
+                    if isinstance(fb_response.body, AsyncIterator):
+                        async for ev2 in fb_response.body:
+                            yield ev2
+                    elif isinstance(fb_response.body, dict):
+                        # Non-stream fallback (shouldn't happen for
+                        # stream=true, but stay total): emit as one chunk.
+                        content = ""
+                        try:
+                            content = str(
+                                fb_response.body["choices"][0]["message"][
+                                    "content"
+                                ]
+                            )
+                        except Exception:
+                            content = json.dumps(
+                                fb_response.body, ensure_ascii=False, default=str
+                            )
+                        yield "data: " + json.dumps(
+                            {
+                                "id": f"midstream-{request_id[:8]}",
+                                "object": "chat.completion.chunk",
+                                "model": response.model,
+                                "choices": [
+                                    {
+                                        "index": 0,
+                                        "delta": {"content": content},
+                                        "finish_reason": None,
+                                    }
+                                ],
+                            },
+                            ensure_ascii=False,
+                        ) + "\n\n"
+                        yield "data: " + json.dumps(
+                            {
+                                "id": f"midstream-{request_id[:8]}",
+                                "object": "chat.completion.chunk",
+                                "model": response.model,
+                                "choices": [
+                                    {
+                                        "index": 0,
+                                        "delta": {},
+                                        "finish_reason": "stop",
+                                    }
+                                ],
+                            },
+                            ensure_ascii=False,
+                        ) + "\n\n"
+                    yield "data: [DONE]\n\n"
+                    return
                 finally:
                     # Aggregate usage from the drained chunks (the direct
                     # client stores them on the response).
@@ -1994,13 +2188,33 @@ class GatewayProxy:
                     ensure_ascii=False,
                     default=str,
                 ) + "\n\n"
-                async for chunk in agen:
-                    chunks.append(chunk)
-                    yield "data: " + json.dumps(
-                        GatewayProxy._chunk_to_dict(chunk),
-                        ensure_ascii=False,
-                        default=str,
-                    ) + "\n\n"
+                yielded = 1
+                try:
+                    async for chunk in agen:
+                        chunks.append(chunk)
+                        yield "data: " + json.dumps(
+                            GatewayProxy._chunk_to_dict(chunk),
+                            ensure_ascii=False,
+                            default=str,
+                        ) + "\n\n"
+                        yielded += 1
+                except Exception as exc:
+                    # Mid-stream upstream death (opencode [server_error]
+                    # "The model failed to generate a response"): close the
+                    # dead generator and surface a MidStreamFailure so the
+                    # route layer can re-drive the REMAINING candidates as a
+                    # fresh stream instead of an ASGI traceback + truncated
+                    # client reply.
+                    try:
+                        await agen.aclose()  # type: ignore[union-attr]
+                    except Exception:
+                        pass
+                    raise MidStreamFailure(
+                        model,
+                        str(exc) or "upstream stream failed mid-response",
+                        body=getattr(exc, "body", "") or "",
+                        chunks_yielded=yielded,
+                    ) from exc
                 yield "data: [DONE]\n\n"
                 # Usage is aggregated here (last usage chunk), so the cost
                 # record written by the caller with usage=None is stale —

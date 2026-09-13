@@ -17,6 +17,16 @@ import pytest
 from llm_budget_gateway.provider_direct import (
     DirectProviderClient,
     ProviderEndpoint,
+    UpstreamProviderError,
+)
+from collections.abc import AsyncIterator
+from unittest.mock import Mock
+
+from llm_budget_gateway.config import Settings
+from llm_budget_gateway.gateway_proxy import (
+    GatewayProxy,
+    MidStreamFailure,
+    ProviderResponse,
 )
 
 
@@ -443,3 +453,88 @@ async def test_session_header_sent_on_responses_post(monkeypatch):
     await client.forward("muse-spark-1.2-contributor", {"messages": [{"role": "user", "content": "hi"}]})
     assert calls[1]["headers"]["x-opencode-session"] == "sess-live"
     _UPSTREAM_CLIENT_HEADERS.set(None)
+
+
+@pytest.mark.asyncio
+async def test_mid_stream_failure_reraises_typed():
+    """_rest_stream converts a mid-response upstream death to MidStreamFailure."""
+    from unittest.mock import Mock
+    from llm_budget_gateway.config import Settings
+
+    async def dying_stream(model, body, kind="chat"):
+        yield {"id": "c1", "object": "chat.completion.chunk", "model": model,
+               "choices": [{"index": 0, "delta": {"content": "hello "}, "finish_reason": None}]}
+        raise UpstreamProviderError(502, "upstream provider error: opencode-go (response.failed: boom)", body="boom")
+
+    stub = Mock()
+    stub.stream_chunks = dying_stream
+    proxy = GatewayProxy(settings=Settings(virtual_keys={"k": "v"}), cost_tracker=Mock(), budget_enforcer=Mock(), fallback_manager=Mock())
+    object.__setattr__(proxy, "_direct_client", stub)
+    resp = await proxy._forward_direct("@opencode-go/muse", {"model": "@opencode-go/muse", "messages": [{"role": "user", "content": "hi"}], "stream": True}, stream=True)
+    assert isinstance(resp.body, AsyncIterator)
+    # draining must raise MidStreamFailure (not the raw UpstreamProviderError)
+    with pytest.raises(MidStreamFailure) as ei:
+        async for _ in resp.body:
+            pass
+    assert ei.value.candidate == "@opencode-go/muse"
+    assert ei.value.chunks_yielded >= 1
+
+
+@pytest.mark.asyncio
+async def test_mid_stream_recovery_serves_next_candidate():
+    """_wrapped_stream re-drives remaining candidates as a fresh stream.
+
+    Dead candidate yields 1 chunk then dies; the finalized wrapper must
+    yield the next candidate's full reply + [DONE] (not a traceback).
+    """
+    async def dying_stream(model, body, kind="chat"):
+        yield {"id": "c1", "object": "chat.completion.chunk", "model": model,
+               "choices": [{"index": 0, "delta": {"content": "partial "}, "finish_reason": None}]}
+        raise UpstreamProviderError(502, "upstream provider error: dead (response.failed: boom)", body="boom")
+
+    async def good_stream(model, body, kind="chat"):
+        yield {"id": "c2", "object": "chat.completion.chunk", "model": model,
+               "choices": [{"index": 0, "delta": {"content": "full reply"}, "finish_reason": None}]}
+
+    class Router:
+        def stream_chunks(self, model, body, kind="chat"):
+            if "dead" in model:
+                return dying_stream(model, body, kind)
+            return good_stream(model, body, kind)
+
+    proxy = GatewayProxy(settings=Settings(virtual_keys={"k": "v"}), cost_tracker=Mock(), budget_enforcer=Mock(), fallback_manager=Mock())
+    tracker = Mock()
+    tracker.model_in_cooldown.return_value = 0
+    tracker.record_success.return_value = None
+    tracker.set_model_cooldown.return_value = None
+    tracker.build_record.side_effect = Exception("no db in test")
+    tracker.resolve_customer_id.return_value = None
+    tracker.record.return_value = None
+    object.__setattr__(proxy, "_cost_tracker", tracker)
+    object.__setattr__(proxy, "_direct_client", Router())
+
+    dead_resp = await proxy._forward_direct("@dead/m", {"model": "@dead/m", "messages": [{"role": "user", "content": "hi"}], "stream": True}, stream=True)
+
+    async def fake_chain(**kw):
+        assert kw["candidates"] == ["@good/m"], kw["candidates"]
+        r2 = await proxy._forward_direct("@good/m", {"model": "@good/m", "messages": [], "stream": True}, stream=True)
+        return r2, "@good/m", "mid_stream", 0.0
+    object.__setattr__(proxy, "_run_candidate_chain", fake_chain)
+
+    finalized = await proxy._finalize_route_response(
+        response=dead_resp, body={"model": "r", "messages": []}, api_key="k", headers={},
+        metadata={}, request_id="req1", alias="r", route={}, route_name="r",
+        from_plane=True, session_id=None, sticky_model=None,
+        outbound={"model": "@dead/m", "messages": [{"role": "user", "content": "hi"}], "stream": True},
+        want_cache=False, client_id=None, client_profile=None, conversation_id=None,
+        fallback="none", served="@dead/m", chain_started=0.0,
+        candidates=["@dead/m", "@good/m"], fallback_statuses=[502, 503, 504], target_cooldowns={},
+    )
+    events = []
+    async for ev in finalized.body:
+        events.append(ev)
+    text = "\n".join(events)
+    assert "full reply" in text, text[:500]
+    assert events[-1].strip() == "data: [DONE]"
+    assert "mid_stream_@dead/m" in finalized.headers["X-Gateway-Fallback"]
+    assert tracker.set_model_cooldown.called
