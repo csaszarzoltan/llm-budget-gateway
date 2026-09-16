@@ -538,3 +538,20 @@ async def test_mid_stream_recovery_serves_next_candidate():
     assert events[-1].strip() == "data: [DONE]"
     assert "mid_stream_@dead/m" in finalized.headers["X-Gateway-Fallback"]
     assert tracker.set_model_cooldown.called
+
+
+def test_transport_error_keeps_cause():
+    """Bare 'upstream provider error: <name>' must not recur — cause kept."""
+    import httpx
+    from llm_budget_gateway.provider_direct import _transport_error
+    err = _transport_error("opencode-go", httpx.ConnectError("connection refused"), "transport")
+    assert err.status_code == 502
+    assert "transport error: opencode-go" in str(err)
+    assert "ConnectError" in str(err)
+    assert "connection refused" in str(err)
+    te = _transport_error("opencode-go", httpx.ReadTimeout("read timed out"), "timeout")
+    assert "timed out: opencode-go" in str(te)
+    assert "ReadTimeout" in str(te)
+    # long causes truncated
+    big = _transport_error("x", RuntimeError("z" * 900), "transport")
+    assert len(str(big)) < 450

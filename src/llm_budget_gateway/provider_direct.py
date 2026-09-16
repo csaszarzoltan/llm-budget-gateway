@@ -139,6 +139,27 @@ class UpstreamProviderError(Exception):
         self.body = str(body)[:2000]
 
 
+def _transport_error(endpoint_name: str, exc: BaseException, kind: str) -> UpstreamProviderError:
+    """Build a transport-layer UpstreamProviderError that keeps the cause.
+
+    Bare ``f"upstream provider error: {name}"`` messages (no code, no
+    reason) are undebuggable in the gateway log — every httpx failure
+    below now carries the exception class + message truncated to 300
+    chars, so the log line alone tells transport vs connect vs TLS vs
+    decode apart. ``kind`` is ``timeout`` or ``transport``.
+    """
+    cause = f"{type(exc).__name__}: {exc}".strip()
+    if len(cause) > 300:
+        cause = cause[:300] + "…"
+    if kind == "timeout":
+        return UpstreamProviderError(
+            502, f"upstream provider timed out: {endpoint_name} ({cause})"
+        )
+    return UpstreamProviderError(
+        502, f"upstream provider transport error: {endpoint_name} ({cause})"
+    )
+
+
 def _responses_to_chat(data: dict[str, Any], fallback_model: str) -> dict[str, Any]:
     """Map a Codex /Responses object onto chat-completions JSON.
 
@@ -1092,9 +1113,9 @@ class DirectProviderClient:
                 url, json=payload, headers=endpoint.headers()
             )
         except httpx.TimeoutException as exc:
-            raise UpstreamProviderError(502, f"upstream provider timed out: {endpoint.name}") from exc
+            raise _transport_error(endpoint.name, exc, "timeout") from exc
         except httpx.HTTPError as exc:
-            raise UpstreamProviderError(502, f"upstream provider error: {endpoint.name}") from exc
+            raise _transport_error(endpoint.name, exc, "transport") from exc
         if response.status_code >= 400:
             raise UpstreamProviderError(
                 response.status_code,
@@ -1176,9 +1197,9 @@ class DirectProviderClient:
         try:
             response = await self._client.post(url, json=payload, headers=headers)
         except httpx.TimeoutException as exc:
-            raise UpstreamProviderError(502, f"upstream provider timed out: {endpoint.name}") from exc
+            raise _transport_error(endpoint.name, exc, "timeout") from exc
         except httpx.HTTPError as exc:
-            raise UpstreamProviderError(502, f"upstream provider error: {endpoint.name}") from exc
+            raise _transport_error(endpoint.name, exc, "transport") from exc
         if response.status_code >= 400:
             raise UpstreamProviderError(
                 response.status_code,
@@ -1276,9 +1297,9 @@ class DirectProviderClient:
                 # tool_calls so the (fn, arguments) index is complete.
                 self._reassemble_and_capture(chunks)
         except httpx.TimeoutException as exc:
-            raise UpstreamProviderError(502, f"upstream provider timed out: {endpoint.name}") from exc
+            raise _transport_error(endpoint.name, exc, "timeout") from exc
         except httpx.HTTPError as exc:
-            raise UpstreamProviderError(502, f"upstream provider error: {endpoint.name}") from exc
+            raise _transport_error(endpoint.name, exc, "transport") from exc
         return response.status_code, chunks, served
 
     def _responses_input_from_messages(
@@ -1568,9 +1589,9 @@ class DirectProviderClient:
                             body=str(event)[:2000],
                         )
         except httpx.TimeoutException as exc:
-            raise UpstreamProviderError(502, f"upstream provider timed out: {endpoint.name}") from exc
+            raise _transport_error(endpoint.name, exc, "timeout") from exc
         except httpx.HTTPError as exc:
-            raise UpstreamProviderError(502, f"upstream provider error: {endpoint.name}") from exc
+            raise _transport_error(endpoint.name, exc, "transport") from exc
 
     async def stream_chunks(
         self,
@@ -1645,7 +1666,7 @@ class DirectProviderClient:
                     yield chunk
                 self._reassemble_and_capture(chunks)
         except httpx.TimeoutException as exc:
-            raise UpstreamProviderError(502, f"upstream provider timed out: {endpoint.name}") from exc
+            raise _transport_error(endpoint.name, exc, "timeout") from exc
         except httpx.HTTPError as exc:
-            raise UpstreamProviderError(502, f"upstream provider error: {endpoint.name}") from exc
+            raise _transport_error(endpoint.name, exc, "transport") from exc
 
