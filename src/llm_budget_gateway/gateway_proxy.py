@@ -2058,7 +2058,14 @@ class GatewayProxy:
         # Context-window overflow (413/422) is always fallback-eligible:
         # a request too large for one target's window may fit the next
         # target's — independent of the UI's on_status_codes list.
-        statuses.update({413, 422})
+        # Auth/entitlement errors (401/403) are likewise always eligible:
+        # they are usually per-model (a retired model, a free-tier policy
+        # such as OpenCode's FreeTierError) while sibling models on the
+        # same key serve fine — so the chain must walk on instead of
+        # surfacing 401/403 to the client. Hard client errors keep the
+        # full cooldown (see the chain loop), only transient 5xx/429 get
+        # the short one.
+        statuses.update({401, 403, 413, 422})
         return {
             "candidates": [str(t["model"]) for t in ordered],
             "fallback_statuses": sorted(statuses),

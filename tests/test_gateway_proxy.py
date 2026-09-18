@@ -904,6 +904,179 @@ class TestCreateAppBehavior:
         assert not tracker.set_model_cooldown.called
 
     @pytest.mark.asyncio
+    async def test_product_route_403_freetier_falls_back(
+        self, settings: Settings, mocker
+    ) -> None:
+        """A 403 (e.g. OpenCode FreeTierError) is often per-model policy, not
+        a dead route: the chain must walk to the next candidate instead of
+        surfacing 403 to the client (2026-09-17 incident: 8x client-facing
+        403 on hermes-default, zen head dead all day)."""
+        store = Mock()
+        store.published_route_by_name.return_value = {
+            "name": "hermes-default",
+            "targets": [
+                {
+                    "model": "@zen/free-model",
+                    "priority": 10,
+                    "timeout_seconds": 15,
+                    "on_status_codes": [429, 500],
+                },
+                {
+                    "model": "@go/paid-model",
+                    "priority": 20,
+                    "timeout_seconds": 30,
+                    "on_status_codes": [429, 500],
+                },
+            ],
+        }
+        tracker = Mock()
+        tracker.model_in_cooldown.return_value = 0
+        tracker.build_record.return_value = SimpleNamespace(total_cost=0.0)
+        proxy = GatewayProxy(
+            settings=settings,
+            cost_tracker=tracker,
+            budget_enforcer=Mock(),
+            fallback_manager=FallbackManager([]),
+        )
+        proxy.attach_product_console(store)
+
+        async def _forward(
+            model: str,
+            body: dict,
+            stream: bool = False,
+            timeout: float | None = None,
+        ):
+            if model == "@zen/free-model":
+                return ProviderResponse(
+                    403,
+                    {
+                        "error": {
+                            "message": "upstream provider error: zen (HTTP 403)",
+                            "type": "provider_error",
+                            "provider_body": '{"type":"error","error":{"type":"FreeTierError"}}',
+                        }
+                    },
+                    {},
+                    model,
+                    None,
+                    5,
+                )
+            return ProviderResponse(200, {"ok": True}, {}, model, None, 5)
+
+        proxy.forward = AsyncMock(side_effect=_forward)  # type: ignore[method-assign]
+        result = await proxy.handle_chat_completion(
+            {
+                "model": "hermes-default",
+                "messages": [{"role": "user", "content": "hi"}],
+            },
+            "sk_test_abc",
+            {},
+        )
+        assert result.status_code == 200
+        assert result.model == "@go/paid-model"
+        assert [c.args[0] for c in proxy.forward.call_args_list] == [
+            "@zen/free-model",
+            "@go/paid-model",
+        ]
+        # hard client error -> the dead model is parked (full cooldown)
+        assert tracker.set_model_cooldown.called
+
+    @pytest.mark.asyncio
+    async def test_product_route_401_falls_back(
+        self, settings: Settings, mocker
+    ) -> None:
+        """A 401 is often per-model entitlement (e.g. retired ox-alpha while
+        sibling models on the same key serve fine): walk the chain instead
+        of surfacing 401 (2026-09-17: go/go2 ox-alpha 401s)."""
+        store = Mock()
+        store.published_route_by_name.return_value = {
+            "name": "hermes-default",
+            "targets": [
+                {
+                    "model": "@go/retired-model",
+                    "priority": 10,
+                    "timeout_seconds": 15,
+                    "on_status_codes": [429, 500],
+                },
+                {
+                    "model": "@go/live-model",
+                    "priority": 20,
+                    "timeout_seconds": 30,
+                    "on_status_codes": [429, 500],
+                },
+            ],
+        }
+        tracker = Mock()
+        tracker.model_in_cooldown.return_value = 0
+        tracker.build_record.return_value = SimpleNamespace(total_cost=0.0)
+        proxy = GatewayProxy(
+            settings=settings,
+            cost_tracker=tracker,
+            budget_enforcer=Mock(),
+            fallback_manager=FallbackManager([]),
+        )
+        proxy.attach_product_console(store)
+
+        async def _forward(
+            model: str,
+            body: dict,
+            stream: bool = False,
+            timeout: float | None = None,
+        ):
+            if model == "@go/retired-model":
+                return ProviderResponse(
+                    401,
+                    {"error": {"message": "upstream provider error: go (HTTP 401)"}},
+                    {},
+                    model,
+                    None,
+                    5,
+                )
+            return ProviderResponse(200, {"ok": True}, {}, model, None, 5)
+
+        proxy.forward = AsyncMock(side_effect=_forward)  # type: ignore[method-assign]
+        result = await proxy.handle_chat_completion(
+            {
+                "model": "hermes-default",
+                "messages": [{"role": "user", "content": "hi"}],
+            },
+            "sk_test_abc",
+            {},
+        )
+        assert result.status_code == 200
+        assert result.model == "@go/live-model"
+        assert [c.args[0] for c in proxy.forward.call_args_list] == [
+            "@go/retired-model",
+            "@go/live-model",
+        ]
+
+    @pytest.mark.asyncio
+    async def test_resolve_targets_always_includes_401_403(
+        self, settings: Settings
+    ) -> None:
+        """_resolve_targets must list 401/403 as fallback-eligible even when
+        the UI on_status_codes does not mention them."""
+        proxy = GatewayProxy(
+            settings=settings,
+            cost_tracker=Mock(),
+            budget_enforcer=Mock(),
+            fallback_manager=FallbackManager([]),
+        )
+        decision = proxy._resolve_targets(
+            {
+                "name": "r",
+                "targets": [
+                    {"model": "@a/m", "priority": 10, "on_status_codes": [429, 500]},
+                ],
+            },
+            [],
+            body={"model": "r", "messages": [{"role": "user", "content": "hi"}]},
+        )
+        assert decision is not None
+        assert 401 in decision["fallback_statuses"]
+        assert 403 in decision["fallback_statuses"]
+
+    @pytest.mark.asyncio
     async def test_product_route_400_plain_error_does_not_fallback(
         self, settings: Settings, mocker
     ) -> None:
