@@ -2120,3 +2120,82 @@ class TestTransient5xxFloor:
             )
             assert seconds <= 60
             assert strike is False
+
+
+class TestChainBudgetTailReserve:
+    """The chain's LAST candidate must always get a real attempt."""
+
+    @pytest.mark.asyncio
+    async def test_last_candidate_never_gets_a_token_timeout(
+        self, settings: Settings
+    ) -> None:
+        """Regression: the tail used to be forwarded with a 0.01s timeout.
+
+        Live 2026-09-19: budget 115s, 175.6s elapsed, four candidates skipped,
+        the last one handed 0.01s — both its retries returned within 12ms and
+        the client got a 502 after ~3 minutes of waiting.
+        """
+        store = Mock()
+        store.published_route_by_name.return_value = {
+            "name": "hermes-default",
+            "targets": [
+                {
+                    "model": "@a/primary",
+                    "priority": 10,
+                    "timeout_seconds": 120,
+                    "retries": 1,
+                    "on_status_codes": [429, 500],
+                },
+                {
+                    "model": "@b/mid",
+                    "priority": 20,
+                    "timeout_seconds": 120,
+                    "retries": 1,
+                    "on_status_codes": [429, 500],
+                },
+                {
+                    "model": "@c/last",
+                    "priority": 30,
+                    "timeout_seconds": 120,
+                    "retries": 1,
+                    "on_status_codes": [429, 500],
+                },
+            ],
+        }
+        tracker = Mock()
+        tracker.model_in_cooldown.return_value = 0
+        tracker.build_record.return_value = SimpleNamespace(total_cost=0.0)
+        settings.route_timeout_budget = 0.1  # burn it immediately
+        proxy = GatewayProxy(
+            settings=settings,
+            cost_tracker=tracker,
+            budget_enforcer=Mock(),
+            fallback_manager=FallbackManager([]),
+        )
+        proxy.attach_product_console(store)
+
+        seen: dict[str, float | None] = {}
+
+        async def _forward(
+            model: str,
+            body: dict,
+            stream: bool = False,
+            timeout: float | None = None,
+        ):
+            seen[model] = timeout
+            if model in ("@a/primary", "@b/mid"):
+                await asyncio.sleep(0.2)
+                raise ProviderTimeoutError("slow timeout")
+            return ProviderResponse(200, {}, {}, model, None, 5)
+
+        proxy.forward = AsyncMock(side_effect=_forward)  # type: ignore[method-assign]
+        result = await proxy.handle_chat_completion(
+            {"model": "hermes-default", "messages": [{"role": "user", "content": "hi"}]},
+            "sk_test_abc",
+            {},
+        )
+        assert result.status_code == 200
+        assert result.model == "@c/last"
+        # The tail gets the reserve, not 0.01s.
+        assert seen["@c/last"] is not None
+        assert seen["@c/last"] >= 30.0

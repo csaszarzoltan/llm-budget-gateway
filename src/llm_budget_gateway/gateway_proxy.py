@@ -145,6 +145,11 @@ _MODEL_LEVEL_COOLDOWN_SECONDS = 900
 #: Terminal parking — effectively "disabled until someone clears it".
 TERMINAL_COOLDOWN_SECONDS = 30 * 24 * 3600
 
+#: Seconds of the chain budget reserved for the LAST candidate. Sized from the
+#: measured tail latencies of the fallback models (mimo q90 26.2s, qwen q90
+#: 72.9s), so the chain's final chance is a real attempt rather than a token one.
+_LAST_CANDIDATE_RESERVE = 30.0
+
 
 def _is_terminal_unavailability(body: str | None) -> bool:
     """True when an upstream body says the model itself is gone."""
@@ -1317,13 +1322,21 @@ class GatewayProxy:
         for index, candidate in enumerate(candidates):
             is_last = index + 1 >= len(candidates)
             remaining = 0
-            # Enforce the chain budget: after it is spent, only the last
-            # candidate may still be attempted (with whatever time is left).
+            # Chain budget. A capped attempt still consumes its whole timeout,
+            # so the budget can only be checked BEFORE an attempt — by the time
+            # the last candidate runs it may already be spent. Middle candidates
+            # are therefore SKIPPED once it is gone, but the last one must still
+            # get a real attempt: handing it 0.01s made the tail fail instantly
+            # and turned a recoverable chain into a 502 after the client had
+            # already waited three minutes (observed 2026-09-19: budget 115s,
+            # 175.6s elapsed, four candidates skipped, 0.01s on the tail).
             elapsed = time.perf_counter() - chain_started
+            remaining_budget = chain_budget - elapsed
             if elapsed >= chain_budget and not is_last:
                 fallback = f"chain_budget_{int(chain_budget)}s"
                 logger.info(
-                    "route=%s chain budget %ss spent (%.1fs) skipping %s request=%s",
+                    "route=%s chain budget %ss spent (%.1fs) skipping %s "
+                    "request=%s",
                     route_name,
                     chain_budget,
                     elapsed,
@@ -1361,13 +1374,13 @@ class GatewayProxy:
             # single target cannot burn the whole budget (a 120-180s target
             # would still blow past the client timeout).
             if target_timeout is not None:
-                remaining_budget = chain_budget - (
-                    time.perf_counter() - chain_started
-                )
-                if remaining_budget > 0:
-                    target_timeout = min(target_timeout, remaining_budget)
+                if is_last:
+                    target_timeout = min(
+                        target_timeout,
+                        max(remaining_budget, _LAST_CANDIDATE_RESERVE),
+                    )
                 else:
-                    target_timeout = 0.01  # last candidate: tiny grace
+                    target_timeout = min(target_timeout, remaining_budget)
             try:
                 response = await self.forward(
                     candidate, outbound, timeout=target_timeout
