@@ -340,3 +340,46 @@ def test_timeout_floor_rejects_invalid_values(
             "zero-timeout",
             [{"model": "m", "priority": 10, "timeout_seconds": 0}],
         )
+
+
+def test_update_route_optimistic_lock_rejects_stale(
+    store: ProductConsoleStore,
+) -> None:
+    """Passing an expected_version behind the current draft is rejected."""
+    route = store.create_route("lock", [{"model": "@a/v1", "priority": 10}])
+    assert route["draft_version"] == 1
+    # First save succeeds (matches expected_version=1)
+    updated = store.update_route(
+        route["id"], [{"model": "@a/v2", "priority": 10}], expected_version=1
+    )
+    assert updated["draft_version"] == 2
+    # Stale expected_version (1) now fails
+    from llm_budget_gateway.product_console import RouteVersionConflict
+
+    with pytest.raises(RouteVersionConflict):
+        store.update_route(
+            route["id"],
+            [{"model": "@a/v3", "priority": 10}],
+            expected_version=1,
+        )
+
+
+def test_update_route_no_version_check_when_none(
+    store: ProductConsoleStore,
+) -> None:
+    """Omitting expected_version keeps backward-compatible unchecked writes."""
+    route = store.create_route("no-lock", [{"model": "@a/v1", "priority": 10}])
+    store.update_route(route["id"], [{"model": "@a/v2", "priority": 10}])
+    # No exception — always succeeds
+    store.update_route(route["id"], [{"model": "@a/v3", "priority": 10}])
+
+
+def test_get_route_returns_fresh_data(
+    store: ProductConsoleStore,
+) -> None:
+    """route() always returns the latest DB state."""
+    route = store.create_route("fresh", [{"model": "@a/v1", "priority": 10}])
+    store.update_route(route["id"], [{"model": "@a/v2", "priority": 10}])
+    fresh = store.route(route["id"])
+    assert fresh["targets"][0]["model"] == "@a/v2"
+    assert fresh["draft_version"] == 2

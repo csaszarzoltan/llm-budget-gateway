@@ -83,7 +83,7 @@ from .priority_features import (
     SchemaFormService,
 )
 from .priority_routes import PriorityRouteStore
-from .product_console import ProductConsoleStore
+from .product_console import ProductConsoleStore, RouteVersionConflict
 from .product_extensions import ProductExtensions
 from .production_readiness import (
     AutopilotCandidate,
@@ -1005,14 +1005,29 @@ def create_console_app(
         except (ValueError, TypeError) as exc:
             raise HTTPException(422, str(exc)) from exc
 
+    @app.get("/v1/product/routes/{route_id}")
+    async def get_product_route(route_id: str) -> dict[str, object]:
+        """Return one route fresh from the DB (Studio opens this, not the list snapshot)."""
+        try:
+            return product.route(route_id)
+        except KeyError as exc:
+            raise HTTPException(404, "unknown route") from exc
+
     @app.put("/v1/product/routes/{route_id}")
     async def update_product_route(
         route_id: str, body: dict[str, object]
     ) -> dict[str, object]:
         try:
-            return product.update_route(route_id, list(body.get("targets", [])))
+            expected = body.get("expected_version")
+            return product.update_route(
+                route_id,
+                list(body.get("targets", [])),
+                expected_version=int(expected) if expected is not None else None,
+            )
         except KeyError as exc:
             raise HTTPException(404, "unknown route") from exc
+        except RouteVersionConflict as exc:
+            raise HTTPException(409, str(exc)) from exc
         except (ValueError, TypeError) as exc:
             raise HTTPException(422, str(exc)) from exc
 

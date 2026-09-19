@@ -49,6 +49,10 @@ def _sync_hermes_context_lengths(db: sqlite3.Connection) -> None:
         logger.warning("hermes config sync failed: %s", exc)
 
 
+class RouteVersionConflict(ValueError):
+    """Raised when a route draft save is based on a stale draft version."""
+
+
 class ProductConsoleStore:
     """Persist product-console objects and derive actionable dashboard state."""
 
@@ -228,9 +232,25 @@ CREATE TABLE IF NOT EXISTS pc_activity(id TEXT PRIMARY KEY,app_id TEXT,route TEX
         self.db.commit()
         return self.route(rid)
 
-    def update_route(self, rid: str, targets: list[dict[str, Any]]) -> dict[str, Any]:
-        """Create a new immutable draft version."""
+    def update_route(
+        self,
+        rid: str,
+        targets: list[dict[str, Any]],
+        expected_version: int | None = None,
+    ) -> dict[str, Any]:
+        """Create a new immutable draft version.
+
+        When ``expected_version`` is given, the save is rejected with
+        ``RouteVersionConflict`` if the stored draft has moved on — this is
+        optimistic locking so a stale Studio snapshot cannot silently
+        overwrite newer changes.
+        """
         route = self.route(rid)
+        if expected_version is not None and route["draft_version"] != expected_version:
+            raise RouteVersionConflict(
+                f"route draft changed since v{expected_version} "
+                f"(now v{route['draft_version']}); reload and re-apply your edit"
+            )
         v = route["draft_version"] + 1
         payload = json.dumps(_targets(targets), sort_keys=True)
         self.db.execute(
