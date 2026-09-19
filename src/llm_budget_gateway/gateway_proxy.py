@@ -99,6 +99,85 @@ class ProviderTimeoutError(TimeoutError):
     """
 
 
+# ---------------------------------------------------------------------------
+# Cooldown blame classification
+#
+# Every target in a route declares its own ``on_status_codes``, but the route's
+# fallback set is their UNION — so one status opens the whole chain. Parking a
+# healthy model because a REQUEST was malformed is therefore chain-wide damage:
+# the same bad turn fails on every model and, with the dynamic ladder, escalates
+# each of them (observed in production: two deepseek targets accumulated
+# strikes=4 / strikes=1 from a single "No tool output found" 400).
+#
+# Classify by blame instead of punishing everything:
+#   request-level statuses  → fail over, NO cooldown, NO strike. The request is
+#                             at fault; the next request may be fine (and a
+#                             smaller-context target may even serve it).
+#   terminal model statuses → the model is gone for good ("is not supported",
+#                             "unavailable for free"): park it long enough that
+#                             it stops burning a chain slot.
+#   transient provider      → 429/502/503/504: short cooldown, no strike climb.
+#   provider failure        → 5xx: full cooldown + strike escalation.
+# ---------------------------------------------------------------------------
+
+#: The REQUEST is at fault, not the provider.
+_REQUEST_LEVEL_STATUSES = frozenset(
+    {400, 405, 408, 409, 413, 415, 422, 424, 425, 428}
+)
+#: Momentary provider overload / rate limiting.
+_TRANSIENT_STATUSES = frozenset({429, 502, 503, 504})
+#: Model / entitlement level signals — could be a rotated key (transient) or a
+#: retired model (permanent); the body decides which.
+_MODEL_LEVEL_STATUSES = frozenset({401, 403, 404})
+#: Body fragments that mean "this model will never work again".
+_TERMINAL_PATTERNS = (
+    "is not supported",
+    "not supported",
+    "unavailable for free",
+    "model_not_found",
+    "does not exist",
+    "no longer available",
+    "decommissioned",
+    "retired",
+)
+#: Model-level parking that is NOT terminal (a key limit that resets daily).
+_MODEL_LEVEL_COOLDOWN_SECONDS = 900
+#: Terminal parking — effectively "disabled until someone clears it".
+TERMINAL_COOLDOWN_SECONDS = 30 * 24 * 3600
+
+
+def _is_terminal_unavailability(body: str | None) -> bool:
+    """True when an upstream body says the model itself is gone."""
+    low = (body or "").lower()
+    return any(pat in low for pat in _TERMINAL_PATTERNS)
+
+
+def _cooldown_decision(
+    status_code: int | None,
+    cooldown_info: dict,
+    body_text: str | None = None,
+) -> tuple[int, bool, bool, bool]:
+    """Decide the cooldown for one failed candidate.
+
+    Returns ``(seconds, count_strike, terminal, skip)`` where ``skip`` means
+    "record no cooldown at all".
+    """
+    code = int(status_code or 0)
+    base = int(cooldown_info.get("seconds", 3600))
+    dynamic = bool(cooldown_info.get("dynamic", True))
+    if code in _REQUEST_LEVEL_STATUSES:
+        return 0, False, False, True
+    if code in _MODEL_LEVEL_STATUSES:
+        if _is_terminal_unavailability(body_text):
+            return TERMINAL_COOLDOWN_SECONDS, False, True, False
+        # A per-key/daily entitlement limit resets on its own — park briefly
+        # without climbing the ladder on an auth signal.
+        return min(base, _MODEL_LEVEL_COOLDOWN_SECONDS), False, False, False
+    if code in _TRANSIENT_STATUSES:
+        return min(base, 60), False, False, False
+    return base, dynamic, False, False
+
+
 def _is_context_error(body: dict | str | list) -> bool:
     """True when a 400 error body signals context-window overflow.
 
@@ -1351,32 +1430,61 @@ class GatewayProxy:
                 #     (429, 400, …) to the client instead of a blanket 502,
                 #     so the upstream message and retry semantics survive.
                 upstream_status = int(getattr(exc, "status_code", 0) or 0)
-                transient = upstream_status in (429, 502, 503, 504)
                 cooldown_info = self._cooldown_info_for(
                     target_cooldowns, candidate
                 )
-                cooldown_seconds = int(cooldown_info.get("seconds", 3600))
-                if transient:
-                    cooldown_seconds = min(cooldown_seconds, 60)
-                count_strike = (
-                    False if transient else cooldown_info.get("dynamic", True)
-                )
                 body_text = (getattr(exc, "body", "") or "")[:500]
-                try:
-                    self._cost_tracker.set_model_cooldown(
-                        route_name,
-                        candidate,
+                if upstream_status:
+                    (
                         cooldown_seconds,
-                        reason=json.dumps(
-                            {
-                                "type": "http" if upstream_status else "error",
-                                "status_code": upstream_status or None,
-                                "error": str(exc)[:500],
-                                "body": body_text,
-                            }
-                        ),
-                        count_strike=count_strike,
+                        count_strike,
+                        is_terminal,
+                        skip_cooldown,
+                    ) = _cooldown_decision(
+                        upstream_status, cooldown_info, body_text
                     )
+                else:
+                    # No HTTP status ⇒ transport-level failure, which IS a
+                    # provider health signal: full cooldown, ladder escalation.
+                    cooldown_seconds = int(cooldown_info.get("seconds", 3600))
+                    count_strike = bool(cooldown_info.get("dynamic", True))
+                    is_terminal = False
+                    skip_cooldown = False
+                if is_terminal:
+                    reason_type = "terminal"
+                elif upstream_status:
+                    reason_type = "http"
+                else:
+                    reason_type = "error"
+                try:
+                    if skip_cooldown:
+                        # Request-level status: the model is healthy, only the
+                        # request was bad. Do not park it — the next turn may
+                        # be perfectly fine.
+                        logger.warning(
+                            "route=%s model=%s no cooldown for request-level "
+                            "status=%s request=%s body=%s",
+                            route_name,
+                            candidate,
+                            upstream_status,
+                            request_id,
+                            body_text[:300],
+                        )
+                    else:
+                        self._cost_tracker.set_model_cooldown(
+                            route_name,
+                            candidate,
+                            cooldown_seconds,
+                            reason=json.dumps(
+                                {
+                                    "type": reason_type,
+                                    "status_code": upstream_status or None,
+                                    "error": str(exc)[:500],
+                                    "body": body_text,
+                                }
+                            ),
+                            count_strike=count_strike,
+                        )
                 except Exception:
                     logger.exception(
                         "cooldown record failed route=%s model=%s",
@@ -1501,20 +1609,11 @@ class GatewayProxy:
             cooldown_info = self._cooldown_info_for(
                 target_cooldowns, candidate
             )
-            cooldown_seconds = int(cooldown_info.get("seconds", 3600))
-            # Transient 5xx (502/503/504) usually means the provider is
-            # momentarily overloaded, not that the model is unusable — a
-            # short cooldown (or none) lets the model come back quickly
-            # instead of being parked for the target's full cooldown
-            # (e.g. 600s), which is what the UI "cooldown" would do. Rate
-            # limits (429) also get the short cooldown: the model is parked
-            # just long enough to step out of the per-minute quota window,
-            # and the flow has already moved on to the next candidate (429
-            # is never retried). Only hard client errors keep the full
-            # cooldown.
-            transient = int(response.status_code or 0) in (502, 503, 504, 429)
-            if transient:
-                cooldown_seconds = min(cooldown_seconds, 60)
+            # Cooldown blame classification (see _cooldown_decision):
+            # request-level statuses park NOTHING, transient provider codes get
+            # the short cooldown without climbing the ladder, and the body
+            # decides whether a 401/403/404 is a retired model (terminal) or a
+            # resettable key limit.
             try:
                 body_text = ""
                 if isinstance(response.body, dict):
@@ -1530,19 +1629,40 @@ class GatewayProxy:
                         if isinstance(response.body, str)
                         else json.dumps(response.body)[:500]
                     )
-                self._cost_tracker.set_model_cooldown(
-                    route_name,
-                    candidate,
+                (
                     cooldown_seconds,
-                    reason=json.dumps(
-                        {
-                            "type": "http",
-                            "status_code": response.status_code,
-                            "body": body_text[:800],
-                        }
-                    ),
-                    count_strike=not transient and cooldown_info.get("dynamic", True),
+                    count_strike,
+                    is_terminal,
+                    skip_cooldown,
+                ) = _cooldown_decision(
+                    response.status_code, cooldown_info, body_text
                 )
+                if skip_cooldown:
+                    # The request was at fault; the model is healthy. Parking
+                    # it would take the whole chain down for one bad turn.
+                    logger.warning(
+                        "route=%s model=%s no cooldown for request-level "
+                        "status=%s request=%s body=%s",
+                        route_name,
+                        candidate,
+                        response.status_code,
+                        request_id,
+                        body_text[:300],
+                    )
+                else:
+                    self._cost_tracker.set_model_cooldown(
+                        route_name,
+                        candidate,
+                        cooldown_seconds,
+                        reason=json.dumps(
+                            {
+                                "type": "terminal" if is_terminal else "http",
+                                "status_code": response.status_code,
+                                "body": body_text[:800],
+                            }
+                        ),
+                        count_strike=count_strike,
+                    )
             except Exception:
                 logger.exception(
                     "cooldown record failed route=%s model=%s", route_name, candidate

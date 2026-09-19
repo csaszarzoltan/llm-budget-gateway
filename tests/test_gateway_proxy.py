@@ -1820,3 +1820,181 @@ class TestUpstreamExceptionStatusSemantics:
                 {},
             )
         assert "No tool output found for tool call abc_0" in caplog.text
+
+
+# ---------------------------------------------------------------------------
+# Cooldown blame classification: one malformed request must not park the chain.
+# ---------------------------------------------------------------------------
+
+
+class TestCooldownBlameClassification:
+    def test_request_level_statuses_skip_cooldown_entirely(self) -> None:
+        from llm_budget_gateway.gateway_proxy import _cooldown_decision
+
+        info = {"seconds": 3600, "dynamic": True}
+        for code in (400, 405, 408, 409, 413, 415, 422, 424, 425, 428):
+            seconds, strike, terminal, skip = _cooldown_decision(
+                code, info, "whatever"
+            )
+            assert skip is True, f"{code} must not park the model"
+            assert strike is False
+            assert terminal is False
+            assert seconds == 0
+
+    def test_transient_statuses_get_short_cooldown_without_strike(self) -> None:
+        from llm_budget_gateway.gateway_proxy import _cooldown_decision
+
+        info = {"seconds": 3600, "dynamic": True}
+        for code in (429, 502, 503, 504):
+            seconds, strike, terminal, skip = _cooldown_decision(code, info, "")
+            assert seconds <= 60, code
+            assert strike is False, code
+            assert terminal is False
+            assert skip is False
+
+    def test_provider_5xx_keeps_full_cooldown_and_strike(self) -> None:
+        from llm_budget_gateway.gateway_proxy import _cooldown_decision
+
+        info = {"seconds": 3600, "dynamic": True}
+        seconds, strike, terminal, skip = _cooldown_decision(500, info, "")
+        assert seconds == 3600
+        assert strike is True
+        assert skip is False
+
+    def test_retired_model_is_marked_terminal(self) -> None:
+        from llm_budget_gateway.gateway_proxy import (
+            TERMINAL_COOLDOWN_SECONDS,
+            _cooldown_decision,
+        )
+
+        info = {"seconds": 3600, "dynamic": True}
+        for code, body in (
+            (401, '{"error":{"message":"Model ox-alpha-free is not supported"}}'),
+            (404, '{"error":{"message":"This model is unavailable for free"}}'),
+            (403, '{"error":{"message":"model_not_found"}}'),
+        ):
+            seconds, strike, terminal, skip = _cooldown_decision(
+                code, info, body
+            )
+            assert terminal is True, (code, body)
+            assert seconds == TERMINAL_COOLDOWN_SECONDS
+            assert strike is False, "a dead model must not climb the ladder"
+            assert skip is False
+
+    def test_daily_key_limit_is_not_terminal(self) -> None:
+        """A resettable key limit must NOT be treated as a dead model."""
+        from llm_budget_gateway.gateway_proxy import (
+            TERMINAL_COOLDOWN_SECONDS,
+            _cooldown_decision,
+        )
+
+        info = {"seconds": 3600, "dynamic": True}
+        seconds, strike, terminal, skip = _cooldown_decision(
+            403,
+            info,
+            '{"error":{"message":"Key limit exceeded (daily limit)."}}',
+        )
+        assert terminal is False
+        assert seconds < TERMINAL_COOLDOWN_SECONDS
+        assert seconds <= 900
+        assert strike is False
+
+    @pytest.mark.asyncio
+    async def test_malformed_request_does_not_park_the_chain(
+        self, settings: Settings
+    ) -> None:
+        """End-to-end: a 400 walks to the next target WITHOUT a cooldown."""
+        store = _route_with(
+            [
+                {
+                    "model": "@a/primary",
+                    "priority": 10,
+                    "timeout_seconds": 15,
+                    "retries": 1,
+                    "on_status_codes": [400, 429, 500, 503],
+                },
+                {
+                    "model": "@b/fallback",
+                    "priority": 20,
+                    "timeout_seconds": 15,
+                    "retries": 1,
+                    "on_status_codes": [400, 429, 500, 503],
+                },
+            ]
+        )
+        tracker = Mock()
+        tracker.model_in_cooldown.return_value = 0
+        tracker.build_record.return_value = SimpleNamespace(total_cost=0.0)
+
+        async def _forward(model, body, stream=False, timeout=None):
+            if model == "@a/primary":
+                return ProviderResponse(
+                    400,
+                    {"error": {"message": "No tool output found for tool call x"}},
+                    {},
+                    model,
+                    None,
+                    5,
+                )
+            return ProviderResponse(200, {}, {}, model, None, 5)
+
+        proxy = _chain_proxy(settings, store, tracker, _forward)
+        result = await proxy.handle_chat_completion(
+            {"model": "hermes-default", "messages": [{"role": "user", "content": "hi"}]},
+            "sk_test_abc",
+            {},
+        )
+        assert result.status_code == 200
+        # The sibling model served, and the 400 parked NOTHING.
+        assert not tracker.set_model_cooldown.called
+
+    @pytest.mark.asyncio
+    async def test_retired_model_target_is_parked_terminal(
+        self, settings: Settings
+    ) -> None:
+        store = _route_with(
+            [
+                {
+                    "model": "@a/dead",
+                    "priority": 10,
+                    "timeout_seconds": 15,
+                    "retries": 1,
+                    "on_status_codes": [401, 403, 404, 429, 500, 503],
+                },
+                {
+                    "model": "@b/live",
+                    "priority": 20,
+                    "timeout_seconds": 15,
+                    "retries": 1,
+                    "on_status_codes": [401, 403, 404, 429, 500, 503],
+                },
+            ]
+        )
+        tracker = Mock()
+        tracker.model_in_cooldown.return_value = 0
+        tracker.build_record.return_value = SimpleNamespace(total_cost=0.0)
+
+        async def _forward(model, body, stream=False, timeout=None):
+            if model == "@a/dead":
+                return ProviderResponse(
+                    401,
+                    {"error": {"message": "Model ox-alpha-free is not supported"}},
+                    {},
+                    model,
+                    None,
+                    5,
+                )
+            return ProviderResponse(200, {}, {}, model, None, 5)
+
+        proxy = _chain_proxy(settings, store, tracker, _forward)
+        result = await proxy.handle_chat_completion(
+            {"model": "hermes-default", "messages": [{"role": "user", "content": "hi"}]},
+            "sk_test_abc",
+            {},
+        )
+        assert result.status_code == 200
+        first = tracker.set_model_cooldown.call_args_list[0]
+        assert first[0][1] == "@a/dead"
+        assert first[0][2] >= 30 * 24 * 3600
+        assert first[1]["count_strike"] is False
+        assert json.loads(first[1]["reason"])["type"] == "terminal"
