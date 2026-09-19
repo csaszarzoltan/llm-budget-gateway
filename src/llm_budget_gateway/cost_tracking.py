@@ -224,6 +224,16 @@ class CostStore:
         self._shared_lock: threading.Lock | None = None
         with self._lock:
             self._conn.execute("PRAGMA journal_mode=WAL")
+            # Python's sqlite3 already installs a 5s busy timeout by default, so
+            # this is HARDENING, not a fix for a live lock error (the database
+            # is locked entries in the service log date from weeks before this
+            # change). It makes the intent explicit and gives the 4-worker
+            # deployment more headroom than the implicit default: a lost write
+            # costs a cost record, never a client response, but the wider window
+            # keeps telemetry complete under a burst. NORMAL is safe with WAL
+            # and skips an fsync per commit.
+            self._conn.execute("PRAGMA busy_timeout=10000")
+            self._conn.execute("PRAGMA synchronous=NORMAL")
             self._conn.execute(_CREATE_TABLE)
             self._conn.execute(_CREATE_COOLDOWN_TABLE)
             self._migrate_legacy_schema()

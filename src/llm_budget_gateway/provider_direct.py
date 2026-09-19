@@ -1071,6 +1071,18 @@ class DirectProviderClient:
         """Every model name configured across all providers."""
         return sorted(self._model_index)
 
+    def knows_model(self, model: str) -> bool:
+        """True when ``model`` resolves to a configured provider model.
+
+        Accepts both keys ``_model_index`` carries: the bare model name and the
+        ``@slug/model`` alias (the form route targets use). Used by the proxy's
+        404 guard so a model this gateway can actually serve is never rejected
+        merely because it is missing from litellm's price map.
+        """
+        if not model:
+            return False
+        return model in self._model_index
+
     @property
     def registry(self) -> dict[str, ProviderEndpoint]:
         return dict(self._registry)

@@ -1998,3 +1998,67 @@ class TestCooldownBlameClassification:
         assert first[0][2] >= 30 * 24 * 3600
         assert first[1]["count_strike"] is False
         assert json.loads(first[1]["reason"])["type"] == "terminal"
+
+
+# ---------------------------------------------------------------------------
+# Hardening: SQLite pragmas + a 404 guard that cannot reject a served model.
+# ---------------------------------------------------------------------------
+
+
+class TestHardening:
+    def test_cost_store_sets_explicit_busy_timeout_and_synchronous(
+        self, tmp_path
+    ) -> None:
+        """Explicit, not implicit: the 4-worker deployment gets real headroom."""
+        store = CostStore(db_path=str(tmp_path / "cost.db"))
+        assert store._conn.execute("PRAGMA busy_timeout").fetchone()[0] == 10000
+        # 1 == NORMAL, the safe-with-WAL setting that skips an fsync per commit.
+        assert store._conn.execute("PRAGMA synchronous").fetchone()[0] == 1
+
+    def test_knows_model_accepts_bare_name_and_slug_alias(self) -> None:
+        from llm_budget_gateway.provider_direct import DirectProviderClient
+
+        client = DirectProviderClient({}, client=Mock())
+        client._model_index = {
+            "muse-spark-1.3-contributor": object(),
+            "@opencode-go/muse-spark-1.3-contributor": object(),
+        }
+        assert client.knows_model("muse-spark-1.3-contributor") is True
+        assert client.knows_model("@opencode-go/muse-spark-1.3-contributor") is True
+        assert client.knows_model("someone-elses-model") is False
+        assert client.knows_model("") is False
+
+    def test_model_known_accepts_a_model_the_direct_transport_serves(
+        self, settings: Settings
+    ) -> None:
+        """A served model must not 404 just because litellm lacks its price."""
+        proxy = GatewayProxy(
+            settings=settings,
+            cost_tracker=Mock(),
+            budget_enforcer=Mock(),
+            fallback_manager=FallbackManager([]),
+        )
+        direct = Mock()
+        direct.knows_model.side_effect = (
+            lambda m: m == "@opencode-go/muse-spark-1.3-contributor"
+        )
+        proxy._direct_client = direct  # type: ignore[attr-defined]
+        assert (
+            proxy._model_known("@opencode-go/muse-spark-1.3-contributor") is True
+        )
+        assert proxy._model_known("definitely-not-a-real-model") is False
+
+    def test_model_known_survives_a_broken_direct_client(
+        self, settings: Settings
+    ) -> None:
+        """A raising probe must not turn a 404 into a 500."""
+        proxy = GatewayProxy(
+            settings=settings,
+            cost_tracker=Mock(),
+            budget_enforcer=Mock(),
+            fallback_manager=FallbackManager([]),
+        )
+        direct = Mock()
+        direct.knows_model.side_effect = RuntimeError("registry exploded")
+        proxy._direct_client = direct  # type: ignore[attr-defined]
+        assert proxy._model_known("definitely-not-a-real-model") is False

@@ -58,6 +58,14 @@ class ProductConsoleStore:
 
     def __init__(self, connection: sqlite3.Connection) -> None:
         self.db = connection
+        # Same pragmas as the cost store: the cockpit connection is injected by
+        # the launcher, so set them here to make the intent explicit instead of
+        # relying on sqlite3's implicit 5s default.
+        try:
+            connection.execute("PRAGMA busy_timeout=10000")
+            connection.execute("PRAGMA synchronous=NORMAL")
+        except Exception:
+            pass
         connection.executescript("""
 CREATE TABLE IF NOT EXISTS pc_providers(id TEXT PRIMARY KEY,name TEXT,slug TEXT UNIQUE,region TEXT,healthy INTEGER,models TEXT,created TEXT);
 CREATE TABLE IF NOT EXISTS pc_routes(id TEXT PRIMARY KEY,name TEXT UNIQUE,draft_version INTEGER,published_version INTEGER,status TEXT,targets TEXT,created TEXT,metadata TEXT);

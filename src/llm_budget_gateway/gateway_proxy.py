@@ -2919,6 +2919,17 @@ class GatewayProxy:
                 model == cfg.get("model") or model in cfg.get("chain", [])
             ):
                 return True
+        # Anything the direct transport can serve: its index carries both the
+        # bare model name and the "@slug/model" alias, which is the form route
+        # targets use. Without this check a model the gateway is perfectly able
+        # to serve 404s only because litellm's price map has not heard of it.
+        knows = getattr(self._direct_client, "knows_model", None)
+        if callable(knows):
+            try:
+                if knows(model):
+                    return True
+            except Exception:
+                pass
         try:
             return model in litellm.model_cost
         except Exception:
