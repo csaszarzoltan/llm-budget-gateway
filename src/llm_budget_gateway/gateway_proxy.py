@@ -1336,13 +1336,32 @@ class GatewayProxy:
                 )
                 continue
             except Exception as exc:
-                if is_last:
-                    raise
+                # An upstream HTTP failure reaches this branch as an exception
+                # when it surfaces on the FIRST streamed byte — stream_chunks
+                # raises instead of returning a status response. The exception
+                # (UpstreamProviderError) still carries the upstream status and
+                # body, so it must follow the SAME semantics as a returned
+                # response with that status:
+                #   * transient limits (429/502/503/504) get the short
+                #     cooldown and must NOT escalate the strike ladder —
+                #     otherwise a rate-limited model is parked for the full
+                #     cooldown (up to 1 day) instead of stepping out of the
+                #     quota window;
+                #   * the last candidate surfaces the upstream's own status
+                #     (429, 400, …) to the client instead of a blanket 502,
+                #     so the upstream message and retry semantics survive.
+                upstream_status = int(getattr(exc, "status_code", 0) or 0)
+                transient = upstream_status in (429, 502, 503, 504)
                 cooldown_info = self._cooldown_info_for(
                     target_cooldowns, candidate
                 )
                 cooldown_seconds = int(cooldown_info.get("seconds", 3600))
-                count_strike = cooldown_info.get("dynamic", True)
+                if transient:
+                    cooldown_seconds = min(cooldown_seconds, 60)
+                count_strike = (
+                    False if transient else cooldown_info.get("dynamic", True)
+                )
+                body_text = (getattr(exc, "body", "") or "")[:500]
                 try:
                     self._cost_tracker.set_model_cooldown(
                         route_name,
@@ -1350,9 +1369,10 @@ class GatewayProxy:
                         cooldown_seconds,
                         reason=json.dumps(
                             {
-                                "type": "error",
+                                "type": "http" if upstream_status else "error",
+                                "status_code": upstream_status or None,
                                 "error": str(exc)[:500],
-                                "body": (getattr(exc, "body", "") or "")[:500],
+                                "body": body_text,
                             }
                         ),
                         count_strike=count_strike,
@@ -1363,14 +1383,47 @@ class GatewayProxy:
                         route_name,
                         candidate,
                     )
-                fallback = "provider_error"
+                fallback = (
+                    f"provider_status_{upstream_status}"
+                    if upstream_status
+                    else "provider_error"
+                )
+                # Include the upstream body: without it a provider 400/429 is
+                # undiagnosable from the log alone (the message only carries
+                # the status).
                 logger.warning(
-                    "route=%s model=%s failed request=%s error=%s",
+                    "route=%s model=%s failed request=%s error=%s body=%s",
                     route_name,
                     candidate,
                     request_id,
                     exc,
+                    body_text[:400],
                 )
+                if is_last and upstream_status:
+                    return (
+                        ProviderResponse(
+                            status_code=upstream_status,
+                            body={
+                                "error": {
+                                    "message": str(exc)
+                                    or "upstream provider error",
+                                    "type": "provider_error",
+                                    "provider_body": (
+                                        getattr(exc, "body", "") or ""
+                                    )[:2000],
+                                }
+                            },
+                            headers={},
+                            model=candidate,
+                            usage=None,
+                            latency_ms=0,
+                        ),
+                        candidate,
+                        fallback,
+                        chain_started,
+                    )
+                if is_last:
+                    raise
                 continue
             if response.status_code not in set(fallback_statuses):
                 if not (

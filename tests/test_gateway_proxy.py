@@ -1618,3 +1618,205 @@ class TestChainFailureRecorded:
         resp = await proxy._handle_inner({"model": "m"}, "sk_x", {}, "req-3")
         assert resp.status_code == 502
         assert resp.body["error"]["message"] == "upstream provider error"
+
+
+# ---------------------------------------------------------------------------
+# Upstream HTTP failures surfacing as EXCEPTIONS (first streamed byte) must
+# follow the same semantics as a returned response with that status.
+# ---------------------------------------------------------------------------
+
+
+def _chain_proxy(settings: Settings, store, tracker, forward_impl):
+    proxy = GatewayProxy(
+        settings=settings,
+        cost_tracker=tracker,
+        budget_enforcer=Mock(),
+        fallback_manager=FallbackManager([]),
+    )
+    proxy.attach_product_console(store)
+    proxy.forward = AsyncMock(side_effect=forward_impl)  # type: ignore[method-assign]
+    return proxy
+
+
+def _route_with(targets: list[dict]) -> Mock:
+    store = Mock()
+    store.published_route_by_name.return_value = {
+        "name": "hermes-default",
+        "targets": targets,
+    }
+    return store
+
+
+class TestUpstreamExceptionStatusSemantics:
+    @pytest.mark.asyncio
+    async def test_streaming_429_exception_gets_short_cooldown_no_strike(
+        self, settings: Settings
+    ) -> None:
+        """A 429 arriving as an exception must not park the model for a day."""
+        from llm_budget_gateway.provider_direct import UpstreamProviderError
+
+        store = _route_with(
+            [
+                {
+                    "model": "@a/primary",
+                    "priority": 10,
+                    "timeout_seconds": 15,
+                    "retries": 1,
+                    "on_status_codes": [429, 500, 503],
+                },
+                {
+                    "model": "@b/fallback",
+                    "priority": 20,
+                    "timeout_seconds": 15,
+                    "retries": 1,
+                    "on_status_codes": [429, 500, 503],
+                },
+            ]
+        )
+        tracker = Mock()
+        tracker.model_in_cooldown.return_value = 0
+        tracker.build_record.return_value = SimpleNamespace(total_cost=0.0)
+
+        calls: list[str] = []
+
+        async def _forward(model, body, stream=False, timeout=None):
+            calls.append(model)
+            if model == "@a/primary":
+                raise UpstreamProviderError(
+                    429, "upstream provider error: opencode-go (HTTP 429)", body='{"error":"rate limited"}'
+                )
+            return ProviderResponse(200, {}, {}, model, None, 5)
+
+        proxy = _chain_proxy(settings, store, tracker, _forward)
+        result = await proxy.handle_chat_completion(
+            {"model": "hermes-default", "messages": [{"role": "user", "content": "hi"}]},
+            "sk_test_abc",
+            {},
+        )
+        assert result.status_code == 200
+        assert calls == ["@a/primary", "@b/fallback"]
+        primary = tracker.set_model_cooldown.call_args_list[0]
+        assert primary[0][1] == "@a/primary"
+        # short transient cooldown, and the strike ladder is NOT escalated
+        assert primary[0][2] <= 60
+        assert primary[1]["count_strike"] is False
+
+    @pytest.mark.asyncio
+    async def test_last_candidate_upstream_status_reaches_client(
+        self, settings: Settings
+    ) -> None:
+        """The upstream's own status (429) must survive, not become a 502."""
+        from llm_budget_gateway.provider_direct import UpstreamProviderError
+
+        store = _route_with(
+            [
+                {
+                    "model": "@a/only",
+                    "priority": 10,
+                    "timeout_seconds": 15,
+                    "retries": 1,
+                    "on_status_codes": [429, 500, 503],
+                }
+            ]
+        )
+        tracker = Mock()
+        tracker.model_in_cooldown.return_value = 0
+        tracker.build_record.return_value = SimpleNamespace(total_cost=0.0)
+
+        async def _forward(model, body, stream=False, timeout=None):
+            raise UpstreamProviderError(
+                429,
+                "upstream provider error: opencode-go (HTTP 429)",
+                body='{"error":"weekly usage limit reached"}',
+            )
+
+        proxy = _chain_proxy(settings, store, tracker, _forward)
+        result = await proxy.handle_chat_completion(
+            {"model": "hermes-default", "messages": [{"role": "user", "content": "hi"}]},
+            "sk_test_abc",
+            {},
+        )
+        assert result.status_code == 429
+        assert "weekly usage limit reached" in str(result.body)
+
+    @pytest.mark.asyncio
+    async def test_last_candidate_transport_error_still_502(
+        self, settings: Settings
+    ) -> None:
+        """Transport failures without an upstream status keep the 502 path."""
+        store = _route_with(
+            [
+                {
+                    "model": "@a/only",
+                    "priority": 10,
+                    "timeout_seconds": 15,
+                    "retries": 1,
+                    "on_status_codes": [429, 500, 503],
+                }
+            ]
+        )
+        tracker = Mock()
+        tracker.model_in_cooldown.return_value = 0
+        tracker.build_record.return_value = SimpleNamespace(total_cost=0.0)
+
+        async def _forward(model, body, stream=False, timeout=None):
+            raise RuntimeError("connection reset by peer")
+
+        proxy = _chain_proxy(settings, store, tracker, _forward)
+        result = await proxy.handle_chat_completion(
+            {"model": "hermes-default", "messages": [{"role": "user", "content": "hi"}]},
+            "sk_test_abc",
+            {},
+        )
+        assert result.status_code == 502
+
+    @pytest.mark.asyncio
+    async def test_failed_warning_logs_upstream_body(
+        self, settings: Settings, caplog
+    ) -> None:
+        """Without the body an upstream 400/429 is undiagnosable."""
+        import logging
+
+        from llm_budget_gateway.provider_direct import UpstreamProviderError
+
+        store = _route_with(
+            [
+                {
+                    "model": "@a/primary",
+                    "priority": 10,
+                    "timeout_seconds": 15,
+                    "retries": 1,
+                    "on_status_codes": [429, 500, 503],
+                },
+                {
+                    "model": "@b/fallback",
+                    "priority": 20,
+                    "timeout_seconds": 15,
+                    "retries": 1,
+                    "on_status_codes": [429, 500, 503],
+                },
+            ]
+        )
+        tracker = Mock()
+        tracker.model_in_cooldown.return_value = 0
+        tracker.build_record.return_value = SimpleNamespace(total_cost=0.0)
+
+        async def _forward(model, body, stream=False, timeout=None):
+            if model == "@a/primary":
+                raise UpstreamProviderError(
+                    400,
+                    "upstream provider error: opencode-go (HTTP 400)",
+                    body='No tool output found for tool call abc_0',
+                )
+            return ProviderResponse(200, {}, {}, model, None, 5)
+
+        proxy = _chain_proxy(settings, store, tracker, _forward)
+        with caplog.at_level(
+            logging.WARNING, logger="llm_budget_gateway.gateway_proxy"
+        ):
+            await proxy.handle_chat_completion(
+                {"model": "hermes-default", "messages": [{"role": "user", "content": "hi"}]},
+                "sk_test_abc",
+                {},
+            )
+        assert "No tool output found for tool call abc_0" in caplog.text
