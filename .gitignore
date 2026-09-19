@@ -35,3 +35,6 @@ dist/
 .gateway-console/provider-master.key
 .gateway-console/providers.db*
 .gateway-console/product.db*
+
+# Rotated logs (logrotate): gateway.log.1.gz etc. — *.log alone misses them.
+*.log.[0-9]*
