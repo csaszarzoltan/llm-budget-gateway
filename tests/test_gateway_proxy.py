@@ -1852,12 +1852,13 @@ class TestCooldownBlameClassification:
             assert terminal is False
             assert skip is False
 
-    def test_provider_5xx_keeps_full_cooldown_and_strike(self) -> None:
+    def test_provider_5xx_floors_at_one_minute_and_keeps_the_strike(self) -> None:
+        """500 is a blip or a breakage — never proof the model needs an hour."""
         from llm_budget_gateway.gateway_proxy import _cooldown_decision
 
         info = {"seconds": 3600, "dynamic": True}
         seconds, strike, terminal, skip = _cooldown_decision(500, info, "")
-        assert seconds == 3600
+        assert seconds <= 60
         assert strike is True
         assert skip is False
 
@@ -2062,3 +2063,60 @@ class TestHardening:
         direct.knows_model.side_effect = RuntimeError("registry exploded")
         proxy._direct_client = direct  # type: ignore[attr-defined]
         assert proxy._model_known("definitely-not-a-real-model") is False
+
+
+class TestTransient5xxFloor:
+    """A single upstream 5xx must not cost the target's full cooldown."""
+
+    def test_generic_5xx_caps_the_floor_but_still_escalates(self) -> None:
+        from llm_budget_gateway.gateway_proxy import _cooldown_decision
+
+        info = {"seconds": 3600, "dynamic": True}
+        for code in (500, 501, 505, 507, 508):
+            seconds, strike, terminal, skip = _cooldown_decision(code, info, "")
+            assert seconds <= 60, code
+            assert strike is True, f"{code} must still climb on a repeat"
+            assert terminal is False
+            assert skip is False
+
+    def test_repeat_5xx_escalates_via_the_ladder(self, tmp_path) -> None:
+        """First 500 -> 1m, second -> 5m: the ladder, not the target floor."""
+        store = CostStore(db_path=str(tmp_path / "cost.db"))
+        store.set_model_cooldown(
+            "hermes-default", "@a/m", 60, reason="{}", count_strike=True
+        )
+        first = store._conn.execute(
+            "SELECT strikes, until_ts FROM model_cooldowns"
+        ).fetchone()
+        assert first[0] == 1
+        # 60s from the floor, not 3600
+        assert first[1] - int(__import__("time").time()) <= 61
+        store.set_model_cooldown(
+            "hermes-default", "@a/m", 60, reason="{}", count_strike=True
+        )
+        second = store._conn.execute(
+            "SELECT strikes, until_ts FROM model_cooldowns"
+        ).fetchone()
+        assert second[0] == 2
+        assert second[1] - int(__import__("time").time()) > 200  # 5m step
+
+    def test_static_target_keeps_its_explicit_duration(self) -> None:
+        from llm_budget_gateway.gateway_proxy import _cooldown_decision
+
+        seconds, strike, _, skip = _cooldown_decision(
+            500, {"seconds": 1800, "dynamic": False}, ""
+        )
+        assert seconds == 1800
+        assert strike is False
+        assert skip is False
+
+    def test_503_policy_unchanged(self) -> None:
+        """429/502/503/504 keep the soft 60s landing with no ladder climb."""
+        from llm_budget_gateway.gateway_proxy import _cooldown_decision
+
+        for code in (429, 502, 503, 504):
+            seconds, strike, _, _ = _cooldown_decision(
+                code, {"seconds": 3600, "dynamic": True}, ""
+            )
+            assert seconds <= 60
+            assert strike is False

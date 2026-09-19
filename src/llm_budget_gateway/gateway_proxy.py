@@ -175,6 +175,19 @@ def _cooldown_decision(
         return min(base, _MODEL_LEVEL_COOLDOWN_SECONDS), False, False, False
     if code in _TRANSIENT_STATUSES:
         return min(base, 60), False, False, False
+    if 500 <= code < 600:
+        # Generic upstream 5xx — the opencode proxy answers this in ~400ms
+        # ("Internal server error") from all three accounts when it rejects a
+        # request, so it says nothing about whether the model needs the target's
+        # full cooldown. Cap the FLOOR at the shortest ladder step and let the
+        # strike ladder punish a repeat: the first occurrence then costs a
+        # minute instead of an hour, while a genuinely broken model still
+        # escalates 60s -> 5m -> 15m -> 1h. Observed: single transient 500s
+        # parked EIGHT models for 300-3600s each. Static targets keep the
+        # operator's explicit duration.
+        if not dynamic:
+            return base, False, False, False
+        return min(base, 60), True, False, False
     return base, dynamic, False, False
 
 
