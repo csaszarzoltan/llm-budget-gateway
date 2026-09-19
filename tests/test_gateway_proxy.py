@@ -1550,3 +1550,71 @@ class TestCreateAppBehavior:
             "@b/fallback",
         ]
         assert tracker.set_model_cooldown.called
+
+
+class TestChainFailureRecorded:
+    """502 chain death must leave an error cost record (Usage honesty)."""
+
+    @pytest.mark.asyncio
+    async def test_chain_timeout_records_error(
+        self, proxy: GatewayProxy
+    ) -> None:
+        store = Mock()
+        proxy.attach_product_console(store)
+        recorded: list[dict] = []
+
+        class _Rec:
+            customer_id = None
+
+        def _build(**kwargs):
+            recorded.append(kwargs)
+            return _Rec()
+
+        proxy._cost_tracker.build_record = Mock(side_effect=_build)  # type: ignore[attr-defined]
+        proxy._cost_tracker.record = Mock(return_value=None)  # type: ignore[attr-defined]
+        proxy._handle_logical_route = AsyncMock(  # type: ignore[method-assign]
+            side_effect=ProviderTimeoutError("timed out after 90s")
+        )
+        resp = await proxy._handle_inner({"model": "m"}, "sk_x", {}, "req-1")
+        assert resp.status_code == 502
+        assert recorded and recorded[0]["status"] == "error"
+        assert recorded[0]["status_code"] == 502
+
+    @pytest.mark.asyncio
+    async def test_chain_error_records_error(
+        self, proxy: GatewayProxy
+    ) -> None:
+        store = Mock()
+        proxy.attach_product_console(store)
+        recorded: list[dict] = []
+
+        class _Rec:
+            customer_id = None
+
+        def _build(**kwargs):
+            recorded.append(kwargs)
+            return _Rec()
+
+        proxy._cost_tracker.build_record = Mock(side_effect=_build)  # type: ignore[attr-defined]
+        proxy._cost_tracker.record = Mock(return_value=None)  # type: ignore[attr-defined]
+        proxy._handle_logical_route = AsyncMock(  # type: ignore[method-assign]
+            side_effect=RuntimeError("boom")
+        )
+        resp = await proxy._handle_inner({"model": "m"}, "sk_x", {}, "req-2")
+        assert resp.status_code == 502
+        assert recorded and recorded[0]["status"] == "error"
+        assert recorded[0]["status_code"] == 502
+
+    @pytest.mark.asyncio
+    async def test_chain_failure_record_never_masks_upstream_error(
+        self, proxy: GatewayProxy
+    ) -> None:
+        store = Mock()
+        proxy.attach_product_console(store)
+        proxy._cost_tracker.build_record = Mock(side_effect=RuntimeError("db down"))  # type: ignore[attr-defined]
+        proxy._handle_logical_route = AsyncMock(  # type: ignore[method-assign]
+            side_effect=RuntimeError("boom")
+        )
+        resp = await proxy._handle_inner({"model": "m"}, "sk_x", {}, "req-3")
+        assert resp.status_code == 502
+        assert resp.body["error"]["message"] == "upstream provider error"

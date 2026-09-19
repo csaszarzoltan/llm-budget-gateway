@@ -461,6 +461,14 @@ class GatewayProxy:
                         scope=None,
                         customer_id=self._resolve_request_customer(body, headers),
                     )
+                    await self._record_chain_failure(
+                        request_id=request_id,
+                        api_key=api_key,
+                        headers=headers,
+                        body=body,
+                        model=model,
+                        status_code=502,
+                    )
                     return err_resp
                 except Exception:
                     logger.exception(
@@ -475,6 +483,14 @@ class GatewayProxy:
                         response=err_resp,
                         scope=None,
                         customer_id=self._resolve_request_customer(body, headers),
+                    )
+                    await self._record_chain_failure(
+                        request_id=request_id,
+                        api_key=api_key,
+                        headers=headers,
+                        body=body,
+                        model=model,
+                        status_code=502,
                     )
                     return err_resp
         if self._product_console is not None:
@@ -496,6 +512,14 @@ class GatewayProxy:
                         scope=None,
                         customer_id=self._resolve_request_customer(body, headers),
                     )
+                    await self._record_chain_failure(
+                        request_id=request_id,
+                        api_key=api_key,
+                        headers=headers,
+                        body=body,
+                        model=model,
+                        status_code=502,
+                    )
                     return err_resp
                 except Exception:
                     logger.exception(
@@ -510,6 +534,14 @@ class GatewayProxy:
                         response=err_resp,
                         scope=None,
                         customer_id=self._resolve_request_customer(body, headers),
+                    )
+                    await self._record_chain_failure(
+                        request_id=request_id,
+                        api_key=api_key,
+                        headers=headers,
+                        body=body,
+                        model=model,
+                        status_code=502,
                     )
                     return err_resp
         try:
@@ -2593,6 +2625,47 @@ class GatewayProxy:
                 scopes.append(BudgetScope(kind=kind, key=str(value)))
         scopes.append(BudgetScope(kind="global", key="default"))
         return scopes
+
+    async def _record_chain_failure(
+        self,
+        *,
+        request_id: str,
+        api_key: str,
+        headers: dict,
+        body: dict,
+        model: str,
+        status_code: int,
+    ) -> None:
+        """Persist an error cost record when the whole candidate chain dies.
+
+        The 502 paths in ``_handle_inner`` previously returned without a
+        ``cost_records`` row, so the Usage page's success rate only ever saw
+        successes (always 100%). Best-effort: recording must never turn an
+        upstream failure into an internal one.
+        """
+        try:
+            scope = BudgetScope(kind="key", key=str(api_key))
+            build = getattr(self._cost_tracker, "build_record", None)
+            if build is None:
+                return
+            record = build(
+                request_id=request_id,
+                scope=scope,
+                model=model,
+                provider="direct",
+                usage=None,
+                latency_ms=0,
+                status="error",
+                status_code=status_code,
+            )
+            record.customer_id = self._resolve_request_customer(body, headers)
+            result = self._cost_tracker.record(record)
+            if inspect.isawaitable(result):
+                await result
+        except Exception:
+            logger.exception(
+                "chain failure cost record failed request=%s", request_id
+            )
 
     async def _record(
         self,
