@@ -555,3 +555,108 @@ def test_transport_error_keeps_cause():
     # long causes truncated
     big = _transport_error("x", RuntimeError("z" * 900), "transport")
     assert len(str(big)) < 450
+
+
+# ---------------------------------------------------------------------------
+# Responses input ordering: a function_call MUST be immediately followed by
+# its function_call_output. Console Go fails the WHOLE request with
+#   400 "No tool output found for tool call <id>"
+# when any item (e.g. the turn's own narration text) sits between them.
+# ---------------------------------------------------------------------------
+
+
+def _tool_turn_body(model: str = "deepseek-v4.1-flash") -> dict[str, Any]:
+    return {
+        "model": model,
+        "messages": [
+            {"role": "user", "content": "list the files"},
+            {
+                "role": "assistant",
+                "content": "Let me check that directory first.",
+                "reasoning_content": "I should run ls.",
+                "tool_calls": [
+                    {
+                        "id": "call_0",
+                        "type": "function",
+                        "function": {"name": "terminal", "arguments": '{"command":"ls"}'},
+                    }
+                ],
+            },
+            {"role": "tool", "tool_call_id": "call_0", "content": "file1 file2"},
+            {"role": "user", "content": "thanks"},
+        ],
+    }
+
+
+def test_responses_function_call_output_stays_adjacent() -> None:
+    """Regression: narration text between call and output broke every request."""
+    client = DirectProviderClient(registry={})
+    _, items = client._responses_input_from_messages(
+        _tool_turn_body(), "deepseek-v4.1-flash"
+    )
+    call_idx = next(i for i, it in enumerate(items) if it.get("type") == "function_call")
+    out_idx = next(
+        i for i, it in enumerate(items) if it.get("type") == "function_call_output"
+    )
+    between = [items[i].get("type") or items[i].get("role") for i in range(call_idx + 1, out_idx)]
+    assert out_idx == call_idx + 1, f"output not adjacent; interleaved: {between}"
+
+
+def test_responses_assistant_text_precedes_tool_calls() -> None:
+    """The turn's text must come BEFORE the calls, never after them."""
+    client = DirectProviderClient(registry={})
+    _, items = client._responses_input_from_messages(
+        _tool_turn_body(), "deepseek-v4.1-flash"
+    )
+    text_idx = next(
+        i
+        for i, it in enumerate(items)
+        if it.get("role") == "assistant" and it.get("content")
+    )
+    call_idx = next(i for i, it in enumerate(items) if it.get("type") == "function_call")
+    assert text_idx < call_idx
+
+
+def test_responses_reasoning_item_emitted_for_thinking_model() -> None:
+    """Tool replays on thinking models need a reasoning item before the call."""
+    client = DirectProviderClient(registry={})
+    _, items = client._responses_input_from_messages(
+        _tool_turn_body(), "deepseek-v4.1-flash"
+    )
+    reason_idx = next(i for i, it in enumerate(items) if it.get("type") == "reasoning")
+    call_idx = next(i for i, it in enumerate(items) if it.get("type") == "function_call")
+    assert reason_idx < call_idx
+    assert items[reason_idx]["content"][0]["type"] == "reasoning_text"
+    # the client's own reasoning is replayed verbatim
+    assert items[reason_idx]["content"][0]["text"] == "I should run ls."
+
+
+def test_responses_reasoning_padded_when_client_stripped_it() -> None:
+    """A route hides the serving model, so the client may send no reasoning."""
+    client = DirectProviderClient(registry={})
+    body = _tool_turn_body()
+    del body["messages"][1]["reasoning_content"]
+    _, items = client._responses_input_from_messages(body, "deepseek-v4.1-flash")
+    reason = next(it for it in items if it.get("type") == "reasoning")
+    assert reason["content"][0]["text"] == " "
+
+
+def test_responses_no_reasoning_item_for_non_thinking_model() -> None:
+    """Non-thinking models must not receive a reasoning item."""
+    client = DirectProviderClient(registry={})
+    _, items = client._responses_input_from_messages(
+        _tool_turn_body("muse-spark-1.3-contributor"), "muse-spark-1.3-contributor"
+    )
+    assert all(it.get("type") != "reasoning" for it in items)
+
+
+def test_responses_model_omitted_keeps_plain_shape() -> None:
+    """Callers without a model name keep the pre-fix (reasoning-free) shape."""
+    client = DirectProviderClient(registry={})
+    _, items = client._responses_input_from_messages(_tool_turn_body())
+    assert all(it.get("type") != "reasoning" for it in items)
+    call_idx = next(i for i, it in enumerate(items) if it.get("type") == "function_call")
+    out_idx = next(
+        i for i, it in enumerate(items) if it.get("type") == "function_call_output"
+    )
+    assert out_idx == call_idx + 1

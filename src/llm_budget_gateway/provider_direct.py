@@ -303,6 +303,36 @@ def _pad_reasoning_content(messages: Any) -> None:
             msg["reasoning_content"] = " "
 
 
+def _message_text(content: Any) -> str:
+    """Flatten a chat message ``content`` (str | parts list | None) to text."""
+    if isinstance(content, str):
+        return content
+    if isinstance(content, list):
+        parts = []
+        for part in content:
+            if isinstance(part, dict):
+                parts.append(str(part.get("text") or ""))
+            else:
+                parts.append(str(part))
+        return "\n".join(parts)
+    return "" if content is None else json.dumps(content)
+
+
+def _reasoning_text_for(msg: dict[str, Any]) -> str:
+    """Reasoning text to replay for one assistant turn.
+
+    Chat clients send it as ``reasoning_content`` (DeepSeek/Kimi/MiMo
+    convention) or ``reasoning``. When the client stripped it — Hermes
+    cannot see the serving model behind a gateway route — a single space
+    keeps the upstream happy, matching ``_pad_reasoning_content``.
+    """
+    for key in ("reasoning_content", "reasoning"):
+        value = msg.get(key)
+        if isinstance(value, str) and value:
+            return value
+    return " "
+
+
 def _strip_tool_choice_for_thinking(payload: dict[str, Any] | None) -> None:
     """Drop ``tool_choice`` for reasoning-echo thinking models (in place).
 
@@ -1152,7 +1182,7 @@ class DirectProviderClient:
         # Use shared translation so tool replays (assistant tool_calls + role=tool)
         # become proper function_call / function_call_output items and arguments
         # are normalized to valid JSON (Console Go strict check).
-        instructions, input_items = self._responses_input_from_messages(body)
+        instructions, input_items = self._responses_input_from_messages(body, bare)
         payload: dict[str, Any] = {
             "model": bare,
             "input": input_items,
@@ -1303,9 +1333,15 @@ class DirectProviderClient:
         return response.status_code, chunks, served
 
     def _responses_input_from_messages(
-        self, body: dict[str, Any]
+        self, body: dict[str, Any], model: str | None = None
     ) -> tuple[str, list[dict[str, Any]]]:
-        """Shared chat-messages → (instructions, input items) translation."""
+        """Shared chat-messages → (instructions, input items) translation.
+
+        ``model`` (bare upstream name) selects the thinking-family rules: on
+        those models a replayed tool call must be preceded by a ``reasoning``
+        item, otherwise Console Go rejects the request with
+        "The `reasoning_text` in the thinking mode must be passed back".
+        """
         messages = body.get("messages", [])
         system_parts: list[str] = []
         input_items: list[dict[str, Any]] = []
@@ -1329,8 +1365,38 @@ class DirectProviderClient:
                     }
                 )
                 continue
-            # Assistant messages with tool_calls → function_call items
+            # Assistant messages with tool_calls → function_call items.
+            #
+            # ORDER IS LOAD-BEARING. The Responses API (Console Go) requires
+            # each function_call to be IMMEDIATELY followed by its
+            # function_call_output. Any item interleaved between the two —
+            # including this turn's own narration text, which used to be
+            # appended right after the calls — makes the upstream fail the
+            # whole request with:
+            #   400 "No tool output found for tool call <id>"
+            # So the reasoning item and the assistant text are emitted BEFORE
+            # the calls, never between a call and its result.
             if role == "assistant" and msg.get("tool_calls"):
+                text = _message_text(content)
+                if _model_needs_reasoning_echo(model or ""):
+                    input_items.append(
+                        {
+                            "type": "reasoning",
+                            "content": [
+                                {
+                                    "type": "reasoning_text",
+                                    "text": _reasoning_text_for(msg),
+                                }
+                            ],
+                        }
+                    )
+                if text.strip():
+                    input_items.append(
+                        {
+                            "role": "assistant",
+                            "content": [{"type": "output_text", "text": text}],
+                        }
+                    )
                 for tc in msg.get("tool_calls") or []:
                     if not isinstance(tc, dict):
                         continue
@@ -1341,20 +1407,6 @@ class DirectProviderClient:
                             "call_id": str(tc.get("id") or ""),
                             "name": str(fn.get("name") or ""),
                             "arguments": _normalize_arguments(fn.get("arguments")),
-                        }
-                    )
-                # If assistant also has text, keep it as output_text
-                if isinstance(content, str) and content.strip():
-                    text = content
-                elif isinstance(content, list):
-                    text = "\n".join(str(p.get("text") or "") if isinstance(p, dict) else str(p) for p in content)
-                else:
-                    text = "" if content is None else __import__("json").dumps(content)
-                if text.strip():
-                    input_items.append(
-                        {
-                            "role": "assistant",
-                            "content": [{"type": "output_text", "text": text}],
                         }
                     )
                 continue
@@ -1400,7 +1452,7 @@ class DirectProviderClient:
         ``response.completed`` → final chunk with usage + finish_reason.
         """
         bare = model.split("/", 1)[1] if model.startswith("@") else model
-        instructions, input_items = self._responses_input_from_messages(body)
+        instructions, input_items = self._responses_input_from_messages(body, bare)
         payload: dict[str, Any] = {
             "model": bare,
             "input": input_items,
