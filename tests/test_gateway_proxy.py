@@ -2199,3 +2199,137 @@ class TestChainBudgetTailReserve:
         # The tail gets the reserve, not 0.01s.
         assert seen["@c/last"] is not None
         assert seen["@c/last"] >= 30.0
+
+
+class TestTimeoutCooldownIsShortAndDoesNotEscalate:
+    """A timeout is a capacity/size signal, not proof the model is broken.
+
+    Live 2026-09-19..21: the target's default cooldown (3600s) PLUS a strike
+    meant one timeout parked the best model for an hour. 30 primary timeouts
+    produced 1068 "skipped (cooldown ...)" attempts in 2.8 days; the requests
+    that followed fell onto weaker candidates, timed out there as well, and
+    the route answered 502 (60 of them, all upstream timeouts, zero HTTP
+    errors). p90 context in this window was 140K tokens.
+    """
+
+    @pytest.mark.asyncio
+    async def test_timeout_parks_for_a_minute_without_a_strike(
+        self, settings: Settings, mocker
+    ) -> None:
+        store = Mock()
+        store.published_route_by_name.return_value = {
+            "name": "hermes-default",
+            "targets": [
+                {
+                    "model": "@a/primary",
+                    "priority": 10,
+                    "timeout_seconds": 15,
+                    "on_status_codes": [429, 500],
+                },
+                {
+                    "model": "@b/fallback",
+                    "priority": 20,
+                    "timeout_seconds": 30,
+                    "on_status_codes": [429, 500],
+                },
+            ],
+        }
+        tracker = Mock()
+        tracker.model_in_cooldown.return_value = 0
+        tracker.build_record.return_value = SimpleNamespace(total_cost=0.0)
+        proxy = GatewayProxy(
+            settings=settings,
+            cost_tracker=tracker,
+            budget_enforcer=Mock(),
+            fallback_manager=FallbackManager([]),
+        )
+        proxy.attach_product_console(store)
+
+        async def _forward(
+            model: str,
+            body: dict,
+            stream: bool = False,
+            timeout: float | None = None,
+        ):
+            if model == "@a/primary":
+                raise ProviderTimeoutError("upstream provider timed out after 15s")
+            return ProviderResponse(200, {}, {}, model, None, 5)
+
+        proxy.forward = AsyncMock(side_effect=_forward)  # type: ignore[method-assign]
+        result = await proxy.handle_chat_completion(
+            {
+                "model": "hermes-default",
+                "messages": [{"role": "user", "content": "hi"}],
+            },
+            "sk_test_abc",
+            {},
+        )
+        assert result.status_code == 200
+        assert result.model == "@b/fallback"
+        call = tracker.set_model_cooldown.call_args
+        assert call is not None, "a timeout must still park the target briefly"
+        assert call.args[2] == 60, f"timeout parked for {call.args[2]}s"
+        assert call.kwargs.get("count_strike") is False
+
+    @pytest.mark.asyncio
+    async def test_static_target_keeps_its_explicit_timeout_cooldown(
+        self, settings: Settings, mocker
+    ) -> None:
+        """dynamic: false is an explicit operator choice — respect it."""
+        store = Mock()
+        store.published_route_by_name.return_value = {
+            "name": "hermes-default",
+            "targets": [
+                {
+                    "model": "@a/primary",
+                    "priority": 10,
+                    "timeout_seconds": 15,
+                    "on_status_codes": [429, 500],
+                },
+                {
+                    "model": "@b/fallback",
+                    "priority": 20,
+                    "timeout_seconds": 30,
+                    "on_status_codes": [429, 500],
+                },
+            ],
+        }
+        tracker = Mock()
+        tracker.model_in_cooldown.return_value = 0
+        tracker.build_record.return_value = SimpleNamespace(total_cost=0.0)
+        proxy = GatewayProxy(
+            settings=settings,
+            cost_tracker=tracker,
+            budget_enforcer=Mock(),
+            fallback_manager=FallbackManager([]),
+        )
+        proxy.attach_product_console(store)
+        mocker.patch.object(
+            proxy,
+            "_cooldown_info_for",
+            return_value={"seconds": 3600, "dynamic": False},
+        )
+
+        async def _forward(
+            model: str,
+            body: dict,
+            stream: bool = False,
+            timeout: float | None = None,
+        ):
+            if model == "@a/primary":
+                raise ProviderTimeoutError("upstream provider timed out after 15s")
+            return ProviderResponse(200, {}, {}, model, None, 5)
+
+        proxy.forward = AsyncMock(side_effect=_forward)  # type: ignore[method-assign]
+        result = await proxy.handle_chat_completion(
+            {
+                "model": "hermes-default",
+                "messages": [{"role": "user", "content": "hi"}],
+            },
+            "sk_test_abc",
+            {},
+        )
+        assert result.status_code == 200
+        call = tracker.set_model_cooldown.call_args
+        assert call is not None
+        assert call.args[2] == 3600

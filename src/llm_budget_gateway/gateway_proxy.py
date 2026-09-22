@@ -145,6 +145,13 @@ _MODEL_LEVEL_COOLDOWN_SECONDS = 900
 #: Terminal parking — effectively "disabled until someone clears it".
 TERMINAL_COOLDOWN_SECONDS = 30 * 24 * 3600
 
+#: Seconds a TIMEOUT parks a candidate. A timeout is a capacity/size signal
+#: (this workload's p90 context is 140K tokens), so it gets the same short floor
+#: as a transient 5xx instead of the target's full cooldown, and it does not
+#: climb the strike ladder — one slow request must not cost an hour of the best
+#: model. Measured: 30 primary timeouts -> 1068 skipped attempts in 2.8 days.
+_TIMEOUT_COOLDOWN_SECONDS = 60
+
 #: Seconds of the chain budget reserved for the LAST candidate. Sized from the
 #: measured tail latencies of the fallback models (mimo q90 26.2s, qwen q90
 #: 72.9s), so the chain's final chance is a real attempt rather than a token one.
@@ -1410,8 +1417,26 @@ class GatewayProxy:
                 cooldown_info = self._cooldown_info_for(
                     target_cooldowns, candidate
                 )
-                cooldown_seconds = int(cooldown_info.get("seconds", 3600))
-                count_strike = cooldown_info.get("dynamic", True)
+                # A timeout means the model could not finish THIS request in
+                # time — a capacity/size signal, not evidence that the model is
+                # broken. This deployment's p50 context is 55K tokens and its p90
+                # is 140K (max 248K), so a 90s attempt on the largest prompts
+                # times out routinely. Parking the model for the target's full
+                # cooldown (3600s default) AND counting a strike made one slow
+                # request cost an HOUR of the best model: 30 primary timeouts
+                # produced 1068 "skipped (cooldown ...)" attempts in 2.8 days,
+                # which pushed the following requests onto the weaker fallbacks,
+                # where they timed out too — the cascade behind the route-level
+                # 502s. Same shape as the transient-5xx floor: a short park, no
+                # ladder climb. A target with an explicit static cooldown
+                # (dynamic: false) keeps the operator's duration.
+                base_seconds = int(cooldown_info.get("seconds", 3600))
+                cooldown_seconds = (
+                    min(base_seconds, _TIMEOUT_COOLDOWN_SECONDS)
+                    if bool(cooldown_info.get("dynamic", True))
+                    else base_seconds
+                )
+                count_strike = False
                 try:
                     self._cost_tracker.set_model_cooldown(
                         route_name,
