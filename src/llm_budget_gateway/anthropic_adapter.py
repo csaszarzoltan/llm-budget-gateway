@@ -289,10 +289,18 @@ def _openai_tool_calls_to_anthropic(tool_calls: list[dict]) -> list[dict]:
     blocks: list[dict] = []
     for tc in tool_calls:
         fn = tc.get("function", {}) if isinstance(tc, dict) else {}
-        try:
-            args = json.loads(fn.get("arguments") or "{}")
-        except (json.JSONDecodeError, TypeError, AttributeError):
-            args = {}
+        raw = fn.get("arguments")
+        # Several OpenAI-compatible upstreams return `arguments` ALREADY as a
+        # dict (not a JSON string). json.loads(dict) raises TypeError, which
+        # used to collapse the whole input to {} — a silent loss of the tool
+        # arguments. Accept both shapes.
+        if isinstance(raw, dict):
+            args: object = raw
+        else:
+            try:
+                args = json.loads(raw or "{}")
+            except (json.JSONDecodeError, TypeError, AttributeError):
+                args = {}
         blocks.append(
             {
                 "type": "tool_use",
@@ -302,6 +310,26 @@ def _openai_tool_calls_to_anthropic(tool_calls: list[dict]) -> list[dict]:
             }
         )
     return blocks
+
+
+def _openai_text_content(content: Any) -> str:
+    """OpenAI message content -> plain text.
+
+    A legal OpenAI shape is a LIST of parts (``[{"type":"text","text":...}]``)
+    as well as a plain string. str() on the list yields a Python repr, which
+    would ship a literal ``[{'type': 'text', 'text': 'hi'}]`` to the client.
+    """
+    if content is None:
+        return ""
+    if isinstance(content, str):
+        return content
+    if isinstance(content, list):
+        return "".join(
+            str(part.get("text", ""))
+            for part in content
+            if isinstance(part, dict) and part.get("type") in ("text", "output_text")
+        )
+    return str(content)
 
 
 def openai_to_anthropic(
@@ -316,9 +344,9 @@ def openai_to_anthropic(
     choice = choices[0]
     message = choice.get("message", {}) or {}
     content: list[dict] = []
-    text = message.get("content")
+    text = _openai_text_content(message.get("content"))
     if text:
-        content.append({"type": "text", "text": str(text)})
+        content.append({"type": "text", "text": text})
     tcs = message.get("tool_calls") or []
     if tcs:
         content.extend(_openai_tool_calls_to_anthropic(tcs))
@@ -373,21 +401,44 @@ def openai_sse_to_anthropic_sse(
                 }
             )
         )
-    for tc in delta.get("tool_calls") or []:
+    # Anthropic streams a tool call as content_block_start(id, name) THEN
+    # input_json_delta fragments keyed to the SAME index. Emitting only the
+    # fragment (hardcoded index 1) meant the client never learned the tool
+    # id/name and two concurrent tools collided on one index.
+    for position, tc in enumerate(delta.get("tool_calls") or [], start=1):
         fn = tc.get("function", {}) or {}
-        lines.append("event: content_block_delta")
-        lines.append(
-            json.dumps(
-                {
-                    "type": "content_block_delta",
-                    "index": 1,
-                    "delta": {
-                        "type": "input_json_delta",
-                        "partial_json": str(fn.get("arguments") or ""),
-                    },
-                }
+        block_index = int(tc.get("index", position - 1) or 0) + 1
+        if tc.get("id") or fn.get("name"):
+            lines.append("event: content_block_start")
+            lines.append(
+                json.dumps(
+                    {
+                        "type": "content_block_start",
+                        "index": block_index,
+                        "content_block": {
+                            "type": "tool_use",
+                            "id": str(tc.get("id", "")),
+                            "name": str(fn.get("name", "")),
+                            "input": {},
+                        },
+                    }
+                )
             )
-        )
+        fragment = str(fn.get("arguments") or "")
+        if fragment:
+            lines.append("event: content_block_delta")
+            lines.append(
+                json.dumps(
+                    {
+                        "type": "content_block_delta",
+                        "index": block_index,
+                        "delta": {
+                            "type": "input_json_delta",
+                            "partial_json": fragment,
+                        },
+                    }
+                )
+            )
     return lines
 
 
@@ -447,17 +498,23 @@ def _format_anthropic_sse(lines: list[str]) -> str:
 
 
 def extract_anthropic_key(headers: dict) -> str:
-    """Accept ``x-api-key`` (native) + ``Authorization: Bearer`` (fallback)."""
+    """Accept ``x-api-key`` (native) + ``Authorization: Bearer`` (fallback).
+
+    A non-Bearer Authorization value (Basic, Digest, a raw token left over
+    from a misconfigured client) must NOT be treated as a gateway key — it
+    would be forwarded as a bogus credential instead of producing a clean
+    401, and it makes auth failures look like routing failures.
+    """
     if not isinstance(headers, dict):
         return ""
     lowered = {str(k).lower(): v for k, v in headers.items()}
     xkey = str(lowered.get("x-api-key", "") or "").strip()
     if xkey:
         return xkey
-    auth = str(lowered.get("authorization", "") or "")
+    auth = str(lowered.get("authorization", "") or "").strip()
     if auth.lower().startswith("bearer "):
         return auth[7:].strip()
-    return auth.strip()
+    return ""
 
 
 def current_ms_id(prefix: str = "msg") -> str:
