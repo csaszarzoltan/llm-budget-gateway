@@ -28,7 +28,6 @@ import sqlite3
 
 import pytest
 
-from llm_budget_gateway import provider_connections as pc
 from llm_budget_gateway.provider_connections import (
     PROVIDER_TYPES,
     CredentialVault,
