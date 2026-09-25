@@ -143,7 +143,16 @@ def anthropic_to_openai(body: dict) -> dict:
             raise ValueError("each message must be an object")
         role = msg.get("role")
         content = msg.get("content")
-        if role == "user":
+        if role == "system":
+            # Claude Code puts the system prompt INSIDE messages (Anthropic
+            # accepts only the top-level `system` field, but several clients
+            # — and Claude Code itself — send a system-role row instead).
+            # OpenAI has no system role after the first message, so fold it
+            # into a leading system message (merging with a top-level one).
+            sys_text = _content_to_text(content)
+            if sys_text:
+                messages.append({"role": "system", "content": sys_text})
+        elif role == "user":
             blocks = content if isinstance(content, list) else [content]
             has_tool_result = any(
                 isinstance(b, dict) and b.get("type") == "tool_result" for b in blocks

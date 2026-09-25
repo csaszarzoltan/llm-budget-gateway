@@ -154,6 +154,37 @@ def test_key_extraction_prefers_x_api_key() -> None:
     assert ad.extract_anthropic_key({}) == ""
 
 
+def test_system_role_inside_messages_is_accepted() -> None:
+    """Claude Code sends the system prompt as a `system`-role ROW inside
+    `messages`, not (only) the top-level `system` field. Anthropic tolerates
+    it; an OpenAI-shaped upstream does not, so the adapter must fold it into
+    a leading system message instead of raising 400 unsupported role."""
+    body = {
+        "model": "m",
+        "max_tokens": 64,
+        "messages": [
+            {"role": "system", "content": "you are Claude Code"},
+            {"role": "user", "content": "hi"},
+        ],
+    }
+    oai = ad.anthropic_to_openai(body)
+    assert oai["messages"][0] == {"role": "system", "content": "you are Claude Code"}
+    assert oai["messages"][1] == {"role": "user", "content": "hi"}
+
+
+def test_system_role_string_content_is_accepted() -> None:
+    body = {
+        "model": "m",
+        "max_tokens": 64,
+        "messages": [
+            {"role": "system", "content": "sys-as-string"},
+            {"role": "user", "content": "hi"},
+        ],
+    }
+    oai = ad.anthropic_to_openai(body)
+    assert oai["messages"][0]["content"] == "sys-as-string"
+
+
 def test_create_app_serves_v1_messages() -> None:
     from llm_budget_gateway.main import create_app
 
