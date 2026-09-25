@@ -306,28 +306,42 @@ def create_app(settings: Settings | None = None) -> FastAPI:
             )
             return _provider_response(response)
         # Cancellable path: run the upstream call as a task and cancel it
-        # the moment the client disconnects.
+        # the moment the client disconnects. The try/except is REQUIRED: if
+        # this endpoint coroutine is itself cancelled mid-poll (server
+        # shutdown, client gone), the CancelledError would propagate while
+        # `upstream` kept running DETACHED — burning provider tokens with no
+        # one awaiting its result.
         upstream = asyncio.create_task(
             proxy.handle_chat_completion(
                 body, _bearer_token(request), dict(request.headers)
             )
         )
-        while not upstream.done():
-            try:
-                disconnected = await asyncio.wait_for(
-                    request.is_disconnected(), timeout=0.1
-                )
-            except TimeoutError:
-                disconnected = False
-            if disconnected:
-                upstream.cancel()
+        try:
+            while not upstream.done():
                 try:
-                    await upstream
-                except (asyncio.CancelledError, Exception):
-                    pass
-                return Response(status_code=499, content="client disconnected")
-        response = upstream.result()
-        return _provider_response(response)
+                    disconnected = await asyncio.wait_for(
+                        request.is_disconnected(), timeout=0.1
+                    )
+                except TimeoutError:
+                    disconnected = False
+                if disconnected:
+                    upstream.cancel()
+                    try:
+                        await upstream
+                    except (asyncio.CancelledError, Exception):
+                        pass
+                    return Response(status_code=499, content="client disconnected")
+            return _provider_response(upstream.result())
+        except asyncio.CancelledError:
+            # This endpoint was cancelled mid-poll: never leave `upstream`
+            # running detached — it would keep burning provider tokens with
+            # no one awaiting it, and its exception would be swallowed.
+            upstream.cancel()
+            try:
+                await upstream
+            except (asyncio.CancelledError, Exception):
+                pass
+            raise
 
     @app.post("/v1/completions")
     async def completions(request: Request) -> Response:
@@ -350,6 +364,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         """
         from .anthropic_adapter import (
             _format_anthropic_sse,
+            _openai_text_content,
             anthropic_error,
             anthropic_message_start,
             anthropic_to_openai,
@@ -410,33 +425,71 @@ def create_app(settings: Settings | None = None) -> FastAPI:
                 yield block
 
         async def _openai_events():
-            """Yield the upstream OpenAI SSE payloads, whatever the body shape."""
+            """Yield the upstream OpenAI SSE payloads, whatever the body shape.
+
+            Every shape ProviderResponse.body can carry must be handled:
+            dict (non-stream), str (drained SSE), list (the stream lines
+            `_provider_response` itself streams), and an async/sync iterable
+            of chunks. An unhandled shape used to raise into the caller's
+            error branch (a spurious `event: error` on a perfectly good
+            response), and a non-str chunk was mapped to "" and DROPPED —
+            a silently truncated stream that still ended with message_stop.
+            """
             body_iter = response.body
             if isinstance(body_iter, dict):
                 # upstream answered non-stream despite stream request
                 try:
-                    text = str(
-                        (body_iter.get("choices") or [{}])[0]
-                        .get("message", {}).get("content", "")
-                        or ""
-                    )
+                    content = (body_iter.get("choices") or [{}])[0].get(
+                        "message", {}
+                    ).get("content", "")
+                    text = _openai_text_content(content)
                 except Exception:
                     text = ""
                 if text:
                     yield {"choices": [{"delta": {"content": text}}]}
-            elif isinstance(body_iter, str):
-                for raw_line in body_iter.splitlines():
+            elif isinstance(body_iter, (str, bytes)):
+                for raw_line in _decode(body_iter).splitlines():
                     for event in _parse_sse_lines(raw_line):
+                        yield event
+            elif isinstance(body_iter, list):
+                # a list of `data: ...` lines / chunks, as _provider_response
+                # streams them
+                for raw in body_iter:
+                    for event in _chunk_events(raw):
                         yield event
             else:
                 # NO bare `except: pass` here: this generator's exceptions are
                 # what the caller's `event: error` branch reports. Swallowing
                 # them produced a successful-looking truncated stream.
-                async for raw in body_iter:  # type: ignore[union-attr]
-                    for event in _parse_sse_lines(
-                        raw.strip() if isinstance(raw, str) else ""
-                    ):
-                        yield event
+                if hasattr(body_iter, "__aiter__"):
+                    async for raw in body_iter:  # type: ignore[union-attr]
+                        for event in _chunk_events(raw):
+                            yield event
+                else:
+                    for raw in body_iter:  # type: ignore[union-attr]
+                        for event in _chunk_events(raw):
+                            yield event
+
+        def _decode(raw: object) -> str:
+            """bytes -> str; anything else -> its str form (never dropped)."""
+            if isinstance(raw, (bytes, bytearray)):
+                return raw.decode("utf-8", "replace")
+            return raw if isinstance(raw, str) else str(raw)
+
+        def _chunk_events(raw: object):
+            """One upstream chunk -> zero or more event dicts.
+
+            A dict chunk is already an event; a str/bytes chunk is SSE text
+            that may carry several lines.
+            """
+            if isinstance(raw, dict):
+                yield raw
+                return
+            text = _decode(raw).strip()
+            if not text:
+                return
+            for event in _parse_sse_lines(text):
+                yield event
 
         def _parse_sse_lines(s: str):
             """Parse one upstream `data:` line into an event dict (or nothing)."""
@@ -559,8 +612,12 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         ``provider`` (litellm|direct), ``since`` (epoch seconds),
         ``trace_id`` (single-trace lookup), ``limit``.
         """
-        telemetry = proxy._telemetry
-        store = telemetry.store
+        # getattr, not attribute access: when the telemetry attach in
+        # create_app raised (DB unavailable) `proxy._telemetry` stays None and
+        # `telemetry.store` raised AttributeError -> a 500 instead of the
+        # honest 503.
+        telemetry = getattr(proxy, "_telemetry", None)
+        store = getattr(telemetry, "store", None)
         if store is None:
             return JSONResponse(
                 status_code=503,
@@ -590,7 +647,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         model: str | None = None,
     ) -> Response:
         """Aggregate telemetry summary (request count, token totals, cost)."""
-        store = proxy._telemetry.store
+        store = getattr(getattr(proxy, "_telemetry", None), "store", None)
         if store is None:
             return JSONResponse(
                 status_code=503,
