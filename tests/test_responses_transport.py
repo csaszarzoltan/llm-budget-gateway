@@ -660,3 +660,164 @@ def test_responses_model_omitted_keeps_plain_shape() -> None:
         i for i, it in enumerate(items) if it.get("type") == "function_call_output"
     )
     assert out_idx == call_idx + 1
+
+
+def _client_with_url_routing(post_respond) -> tuple[DirectProviderClient, list[dict]]:
+    """Client stub whose POST answer depends on the URL (per-endpoint behavior)."""
+    calls: list[dict] = []
+
+    async def _post(url, json=None, headers=None):  # noqa: A002
+        calls.append({"url": url, "json": json})
+        status, payload = post_respond(url, json)
+        return httpx.Response(status, json=payload, request=httpx.Request("POST", url))
+
+    client = DirectProviderClient(registry={})
+    ep = _endpoint()
+    object.__setattr__(ep, "api_mode", "codex_responses")
+    client._registry["opencode-go"] = ep
+    client._model_index["glm-5.3-flash"] = ep
+    client._model_index["@opencode-go/glm-5.3-flash"] = ep
+    object.__setattr__(
+        client,
+        "_client",
+        type("C", (), {"post": staticmethod(_post), "aclose": staticmethod(lambda: None)})(),
+    )
+    return client, calls
+
+
+def _endpoint_unavailable(url: str) -> tuple[int, dict]:
+    return 503, {
+        "error": {
+            "type": "server_error",
+            "message": "Upstream request failed: Endpoint is unavailable.",
+        }
+    }
+
+
+def _chat_pong(url: str, request_json: dict) -> tuple[int, dict]:
+    return 200, {
+        "id": "c1",
+        "model": request_json["model"],
+        "choices": [{"message": {"role": "assistant", "content": "pong"}}],
+        "usage": {"prompt_tokens": 1, "completion_tokens": 1, "total_tokens": 2},
+    }
+
+
+@pytest.mark.asyncio
+async def test_responses_endpoint_unavailable_falls_back_to_chat():
+    """503 'Endpoint is unavailable' on /responses → same-attempt /chat/completions retry.
+
+    Live 2026-09-25: opencode-go serves glm-5.3-flash + mimo-v2.6-flash (+21 more)
+    on /chat/completions only; /responses answers 503 in ~0.4s. The provider-wide
+    api_mode=codex_responses sends them down the dead path, so one failed
+    endpoint must not cost the whole candidate — retry chat in the same attempt.
+    """
+    client, calls = _client_with_url_routing(
+        lambda url, payload: _endpoint_unavailable(url)
+        if url.endswith("/responses")
+        else _chat_pong(url, payload)
+    )
+
+    status, data, _served = await client.forward(
+        "@opencode-go/glm-5.3-flash",
+        {"messages": [{"role": "user", "content": "pong"}]},
+    )
+
+    assert status == 200
+    assert [c["url"].rsplit("/", 1)[-1] for c in calls] == ["responses", "completions"]
+    assert calls[1]["json"]["model"] == "glm-5.3-flash"
+    assert "messages" in calls[1]["json"]
+    assert data["choices"][0]["message"]["content"] == "pong"
+
+
+@pytest.mark.asyncio
+async def test_responses_other_error_does_not_fall_back():
+    """A non-endpoint error on /responses (e.g. 500) must surface, not retry chat.
+
+    Falling back on every 5xx would double calls for models broken on BOTH
+    endpoints (live: minimax-m2.7) and mask real outages.
+    """
+    client, calls = _client_with_url_routing(
+        lambda url, payload: (
+            (500, {"error": {"type": "server_error", "message": "boom"}})
+            if url.endswith("/responses")
+            else _chat_pong(url, payload)
+        )
+    )
+
+    with pytest.raises(UpstreamProviderError) as exc_info:
+        await client.forward(
+            "@opencode-go/glm-5.3-flash",
+            {"messages": [{"role": "user", "content": "pong"}]},
+        )
+
+    assert exc_info.value.status_code == 500
+    assert len(calls) == 1
+    assert calls[0]["url"].endswith("/responses")
+
+
+@pytest.mark.asyncio
+async def test_stream_chunks_endpoint_unavailable_falls_back_to_chat():
+    """Streaming variant: dead /responses stream → chat SSE in the same attempt."""
+    seen: list[str] = []
+
+    class _ErrCtx:
+        async def __aenter__(self):
+            class R:
+                status_code = 503
+
+                async def aread(self):
+                    return (
+                        b'{"error":{"type":"server_error","message":'
+                        b'"Upstream request failed: Endpoint is unavailable."}}'
+                    )
+
+                async def aiter_lines(self):
+                    yield ""
+                    raise AssertionError("must not read lines on 503")
+
+            return R()
+
+        async def __aexit__(self, *exc):
+            return False
+
+    class _OkCtx:
+        async def __aenter__(self):
+            class R:
+                status_code = 200
+
+                async def aread(self):
+                    return b""
+
+                async def aiter_lines(self):
+                    yield 'data: {"id":"c1","choices":[{"index":0,"delta":{"content":"pong"},"finish_reason":null}]}'
+                    yield "data: [DONE]"
+
+            return R()
+
+        async def __aexit__(self, *exc):
+            return False
+
+    def _stream(method, url, json=None, headers=None):  # noqa: A002
+        seen.append(url)
+        return _ErrCtx() if url.endswith("/responses") else _OkCtx()
+
+    client = DirectProviderClient(registry={})
+    ep = _endpoint()
+    object.__setattr__(ep, "api_mode", "codex_responses")
+    client._registry["opencode-go"] = ep
+    client._model_index["glm-5.3-flash"] = ep
+    object.__setattr__(client, "_client", type("C", (), {"stream": staticmethod(_stream)})())
+
+    chunks = [
+        c
+        async for c in client.stream_chunks(
+            "glm-5.3-flash",
+            {"messages": [{"role": "user", "content": "pong"}]},
+        )
+    ]
+
+    assert [u.rsplit("/", 1)[-1] for u in seen] == ["responses", "completions"]
+    assert any(
+        c.get("choices", [{}])[0].get("delta", {}).get("content") == "pong" for c in chunks
+    )

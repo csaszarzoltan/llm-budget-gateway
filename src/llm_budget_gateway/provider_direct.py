@@ -270,6 +270,23 @@ def _chat_tool_choice_to_responses(choice: Any) -> Any:
     return choice
 
 
+def _responses_endpoint_unavailable(exc: UpstreamProviderError) -> bool:
+    """True when /responses says the model has no endpoint there (same-attempt retry).
+
+    Live 2026-09-25: opencode-go serves most models on ONE endpoint only and
+    answers the other with ``503 {"type":"server_error","message":"Upstream
+    request failed: Endpoint is unavailable."}`` in ~0.4s. The provider-wide
+    ``api_mode=codex_responses`` sends chat-capable models (glm, mimo, kimi,
+    qwen, …) down the dead path. Narrow match on purpose: any other 5xx
+    (e.g. a real outage, or minimax-m2.7 which is dead on BOTH endpoints)
+    must surface so the route chain can fail over to the next candidate.
+    """
+    return (
+        exc.status_code == 503
+        and "endpoint is unavailable" in (exc.body or "").lower()
+    )
+
+
 _REASONING_ECHO_MODEL_SUBS = ("deepseek", "kimi", "mimo")
 
 
@@ -1121,7 +1138,19 @@ class DirectProviderClient:
         """
         endpoint = self.resolve(model)
         if kind == "chat" and getattr(endpoint, "api_mode", "") == "codex_responses":
-            return await self._forward_responses(endpoint, model, body)
+            try:
+                return await self._forward_responses(endpoint, model, body)
+            except UpstreamProviderError as exc:
+                if not _responses_endpoint_unavailable(exc):
+                    raise
+                logger.info(
+                    "direct forward %s: /responses has no endpoint (%s), "
+                    "retrying /chat/completions in the same attempt",
+                    model,
+                    exc.status_code,
+                )
+                # Fall through to the chat path below with the ORIGINAL body —
+                # this stays one candidate attempt (no cooldown, no chain skip).
         url = self._request_url(endpoint, kind)
         payload = {k: v for k, v in body.items() if k in _FORWARD_ALLOWLIST}
         # Provider-qualified aliases (@slug/model) select the endpoint, but
@@ -1678,9 +1707,25 @@ class DirectProviderClient:
         """
         endpoint = self.resolve(model)
         if kind == "chat" and getattr(endpoint, "api_mode", "") == "codex_responses":
-            async for chunk in self._stream_responses(endpoint, model, body):
-                yield chunk
-            return
+            yielded = 0
+            try:
+                async for chunk in self._stream_responses(endpoint, model, body):
+                    yielded += 1
+                    yield chunk
+            except UpstreamProviderError as exc:
+                if yielded or not _responses_endpoint_unavailable(exc):
+                    # Partial stream already reached the client: mid-stream
+                    # death belongs to the chain's MidStreamFailure recovery,
+                    # never to a same-attempt endpoint switch (mixed stream).
+                    raise
+                logger.info(
+                    "direct stream %s: /responses has no endpoint (%s), "
+                    "retrying /chat/completions in the same attempt",
+                    model,
+                    exc.status_code,
+                )
+            else:
+                return
         url = self._request_url(endpoint, kind)
         payload = {k: v for k, v in body.items() if k in _FORWARD_ALLOWLIST}
         payload["model"] = model.split("/", 1)[1] if model.startswith("@") else model
