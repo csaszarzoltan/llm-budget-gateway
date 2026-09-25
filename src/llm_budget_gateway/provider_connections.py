@@ -885,6 +885,28 @@ class CredentialVault:
         return json.loads(AESGCM(self.key).decrypt(raw[:12], raw[12:], None))
 
 
+def _redact_secrets(message: str) -> str:
+    """Strip credentials out of a message before it is persisted.
+
+    httpx embeds the full request URL in its exception text, and several
+    providers authenticate by query string (Gemini's `?key=`, Azure's
+    `api-key`). A sync failure therefore carried the live API key into
+    `provider_connections.last_error` — plaintext on disk, and served back
+    verbatim by `get()`. Redact at the single write point so no error path
+    can persist a secret.
+    """
+    if not message:
+        return message
+    out = re.sub(
+        r"([?&](?:key|api[-_]?key|access[-_]?token|token)=)[^&\s\"'<>]+",
+        r"\1<redacted>",
+        message,
+        flags=re.IGNORECASE,
+    )
+    out = re.sub(r"(?i)\bbearer\s+[A-Za-z0-9._\-]{8,}", "Bearer <redacted>", out)
+    return out
+
+
 class ProviderConnectionStore:
     """Persist named provider accounts and their discovered model catalog."""
 
@@ -1033,6 +1055,21 @@ CREATE TABLE IF NOT EXISTS provider_models(provider_id TEXT NOT NULL,model_id TE
                 protected[key] = new_value.strip()
             else:
                 protected[key] = current.get(key, "")
+        # A provider_type CHANGE must be validated against the NEW schema.
+        # create() enforces required fields; update() did not, so
+        # PUT {"provider_type": "azure_openai"} on an openai connection
+        # succeeded (200) and left a connection that can never sync — the
+        # missing api_version was filled with "" by the current.get above.
+        # Validate `protected`, not `config`: an edit that omits the api_key
+        # means "keep the stored one" (that is the whole point of the merge
+        # above), so a payload-only view would reject every such edit.
+        missing = [
+            field["label"]
+            for field in schema["fields"]
+            if field["required"] and not str(protected.get(field["name"], "")).strip()
+        ]
+        if missing:
+            raise ValueError("missing connection fields: " + ", ".join(missing))
         base_url = str(protected.get("base_url", ""))
         if base_url and not base_url.startswith(("https://", "http://")):
             raise ValueError("base URL must use HTTP or HTTPS")
@@ -1099,12 +1136,19 @@ CREATE TABLE IF NOT EXISTS provider_models(provider_id TEXT NOT NULL,model_id TE
             result["min_output_tokens"] = secret.get("min_output_tokens", "")
             result["api_mode"] = secret.get("api_mode", "chat_completions")
         except Exception:
-            result["base_url"] = ""
-            result["user_agent"] = ""
-            result["extra_headers_json"] = ""
-            result["extra_body_json"] = ""
-            result["min_output_tokens"] = ""
-            result["api_mode"] = "chat_completions"
+            # Do NOT present empty strings as valid data. A corrupt or
+            # replaced vault master key made this return 200 with
+            # base_url:"" and credential_status still "configured", and the
+            # UI prefilled the edit form from that — an operator then saved
+            # the empties over a working connection. Report the failure.
+            result["base_url"] = None
+            result["user_agent"] = None
+            result["extra_headers_json"] = None
+            result["extra_body_json"] = None
+            result["min_output_tokens"] = None
+            result["api_mode"] = None
+            result["credential_status"] = "unreadable"
+            result["credential_error"] = "vault could not be decrypted"
         return result
 
     def list(self) -> list[dict[str, Any]]:
@@ -1125,12 +1169,24 @@ CREATE TABLE IF NOT EXISTS provider_models(provider_id TEXT NOT NULL,model_id TE
         return self.vault.decrypt(row[0])
 
     def raw_encrypted_value(self, provider_id: str) -> str:
-        return self.db.execute(
+        row = self.db.execute(
             "SELECT encrypted_config FROM provider_connections WHERE id=?",
             (provider_id,),
-        ).fetchone()[0]
+        ).fetchone()
+        # Chaining .fetchone()[0] on a missing row raised TypeError -> a 500
+        # for what is a 404, and its message ("'NoneType' object is not
+        # subscriptable") said nothing about which id was missing. Every
+        # sibling read path already raises KeyError; match them.
+        if not row:
+            raise KeyError(provider_id)
+        return row[0]
 
     def save_models(self, provider_id: str, models: list[dict[str, Any]]) -> None:
+        # The parent check is load-bearing: there is no FOREIGN KEY, so a
+        # sync racing a delete (or a typo'd id) inserted ORPHAN model rows
+        # and the trailing UPDATE silently matched 0 rows — inside one
+        # transaction, so it still looked like a successful write.
+        self.get(provider_id)
         now = _now()
         with self.db:
             for model in models:
@@ -1155,9 +1211,19 @@ CREATE TABLE IF NOT EXISTS provider_models(provider_id TEXT NOT NULL,model_id TE
             )
 
     def mark_error(self, provider_id: str, message: str) -> None:
+        """Record a sync failure.
+
+        The message is redacted here, at the single choke point every
+        caller funnels through, because `str(HTTPStatusError)` embeds the
+        FULL REQUEST URL — and Gemini carries the API key in the query
+        string (`/models?key=sk-secret`). Storing that verbatim put the
+        credential in plaintext in SQLite AND in `last_error`, which
+        `get()` returns to any API caller. Losing a few path segments of
+        diagnostic detail is the right trade for never persisting a secret.
+        """
         self.db.execute(
             "UPDATE provider_connections SET status='error',last_error=? WHERE id=?",
-            (message, provider_id),
+            (_redact_secrets(message), provider_id),
         )
         self.db.commit()
 
@@ -1235,6 +1301,23 @@ class ProviderDiscovery:
             raise ValueError(message) from exc
 
 
+def _uses_openai_discovery(provider_type: str) -> bool:
+    """True when the preset's schema declares the OpenAI /models protocol.
+
+    The discovery and parsing branches must agree. `_parse_models` already
+    handled these types (anything non-custom, non-gemini reads `data` /
+    `value`), but `_discovery_request` matched a hardcoded two-element set, so
+    a preset could parse fine and still never be asked for its models.
+    """
+    schema = next(
+        (item for item in PROVIDER_TYPES if item["id"] == provider_type), None
+    )
+    if not schema:
+        return False
+    declared = str(schema.get("discovery") or schema.get("protocol") or "")
+    return declared == "openai"
+
+
 def _discovery_request(provider_type: str, config: dict[str, Any]) -> dict[str, Any]:
     base = str(config.get("base_url", "")).rstrip("/")
     if provider_type == "custom":
@@ -1256,7 +1339,17 @@ def _discovery_request(provider_type: str, config: dict[str, Any]) -> dict[str, 
         if api_key and auth_header:
             headers[auth_header] = str(config.get("auth_prefix", "Bearer ")) + api_key
         return {"method": "GET", "url": base + path, "headers": headers}
-    if provider_type in {"openai", "openai_compatible"}:
+    # Every preset whose schema declares discovery="openai" speaks the
+    # OpenAI /models shape — deepinfra, together, fireworks, nebius,
+    # siliconflow, moonshot, minimax, dashscope, volcengine_ark,
+    # xiaomi_mimo, xiaomi_coding_plan, zai, zai_coding_plan. Matching on
+    # the literal set {"openai", "openai_compatible"} made model discovery
+    # raise "not available for this provider type" for all 13 of them,
+    # while create() had already given them the OpenAI defaults. Branch on
+    # the declared protocol so a new preset cannot land in this gap.
+    if provider_type in {"openai", "openai_compatible"} or _uses_openai_discovery(
+        provider_type
+    ):
         headers = {"Authorization": f"Bearer {config['api_key']}"}
         if config.get("organization"):
             headers["OpenAI-Organization"] = str(config["organization"])
