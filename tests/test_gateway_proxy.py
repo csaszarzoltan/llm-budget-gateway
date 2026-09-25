@@ -1471,10 +1471,12 @@ class TestCreateAppBehavior:
         # The mid target is skipped by the budget; the last one serves.
         assert result.status_code == 200
         assert result.model == "@c/last"
-        # primary attempted, retried once (timeout retry), mid skipped by
-        # budget, last served
+        # The 0.2s timeout already spent the 0.1s chain budget, so the
+        # timeout-retry must NOT fire: re-running @a/primary with the same
+        # full timeout is exactly how a chain blows past its own budget
+        # (80s + backoff + 80s against a 90s budget). One attempt, then
+        # straight to the candidate that can still answer.
         assert [c.args[0] for c in proxy.forward.call_args_list] == [
-            "@a/primary",
             "@a/primary",
             "@c/last",
         ]

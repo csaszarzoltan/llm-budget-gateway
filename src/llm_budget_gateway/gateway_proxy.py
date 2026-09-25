@@ -239,6 +239,17 @@ def _is_context_error(body: dict | str | list) -> bool:
     )
 
 
+def _cache_namespace(route_name: str | None, alias: str | None) -> str:
+    """Cache key prefix for a logical route.
+
+    Cache entries MUST be namespaced per route. A single shared namespace
+    lets an identical request body on route A be served from a cache entry
+    written by route B — the caller gets another route's (i.e. another
+    model's) answer, which is a data-plane correctness bug, not a stale read.
+    """
+    return f"route:{route_name or alias or 'default'}"
+
+
 def _usage_int(usage: object, key: str) -> int:
     """Read a token count from a usage payload without raising.
 
@@ -1201,7 +1212,14 @@ class GatewayProxy:
         )
         if want_cache and self._intel_cache is not None:
             try:
-                cached = self._intel_cache.get("default", outbound)
+                # The route MUST be part of the cache key. With a hardcoded
+                # "default" namespace, an identical body sent to /route-a
+                # and then to /route-b returned the FIRST route's cached
+                # body and model to the second route — a different model's
+                # output than the caller asked for.
+                cached = self._intel_cache.get(
+                    _cache_namespace(route_name, route_name), outbound
+                )
                 if cached is not None:
                     resp = self._cache_hit_response(
                         cached, served, route_name
@@ -1464,10 +1482,21 @@ class GatewayProxy:
                     target_timeout=target_timeout,
                     is_last=is_last,
                     request_id=request_id,
+                    chain_deadline=chain_started + chain_budget,
                 )
                 if retry_succeeded:
                     served = candidate
                     break  # the retry succeeded — keep this candidate
+                # The retry may have produced a REAL response (e.g. the
+                # provider came back with a 400/401/429 instead of timing
+                # out). Discarding it and `continue`-ing to the next candidate
+                # reported the request as a timeout and hid the provider's
+                # actual status/body; on the last candidate it re-raised the
+                # stale original timeout. Hand the real response back to the
+                # normal status-code path instead.
+                if response is not None:
+                    served = candidate
+                    break
                 if is_last:
                     raise
                 cooldown_info = self._cooldown_info_for(
@@ -1709,6 +1738,7 @@ class GatewayProxy:
                 target_timeout=target_timeout,
                 is_last=is_last,
                 request_id=request_id,
+                chain_deadline=chain_started + chain_budget,
             )
             if transient_succeeded:
                 served = candidate
@@ -1789,16 +1819,48 @@ class GatewayProxy:
         target_timeout: float | None,
         is_last: bool,
         request_id: str,
+        chain_deadline: float | None = None,
     ) -> tuple:
         """Retry the SAME model after a provider timeout.
 
         Returns (response, succeeded): succeeded is True when a retry
         produced a <400 response. Raises when the last candidate keeps
         failing.
+
+        ``chain_deadline`` is the absolute ``perf_counter`` value at which
+        the route's whole chain budget is spent. Without it every retry
+        reused the ORIGINAL target_timeout and slept its full backoff, so a
+        2-candidate route with an 80s target and 2 retries burned
+        80 + backoff + 80 = far past a 90s chain budget before the second
+        candidate was ever tried.
         """
         response_retry_count = 0
         response: ProviderResponse | None = None
+
+        def _retry_budget() -> float | None:
+            """Timeout for the NEXT attempt, capped by the chain budget."""
+            if chain_deadline is None:
+                return target_timeout
+            left = chain_deadline - time.perf_counter()
+            if left <= 0:
+                return None
+            if target_timeout is None:
+                return left
+            return min(target_timeout, left)
+
         while response_retry_count < target_retries:
+            attempt_timeout = _retry_budget()
+            if attempt_timeout is None:
+                logger.info(
+                    "route=%s model=%s chain budget spent, no timeout retry %d/%d "
+                    "request=%s",
+                    route_name,
+                    candidate,
+                    response_retry_count + 1,
+                    target_retries,
+                    request_id,
+                )
+                break
             response_retry_count += 1
             logger.info(
                 "route=%s model=%s timeout retry %d/%d request=%s",
@@ -1809,16 +1871,19 @@ class GatewayProxy:
                 request_id,
             )
             if response_retry_count > 1:
-                await asyncio.sleep(
-                    min(
-                        self._settings.retry_backoff_seconds
-                        * (2 ** (response_retry_count - 2)),
-                        self._settings.retry_backoff_max_seconds,
-                    )
+                backoff = min(
+                    self._settings.retry_backoff_seconds
+                    * (2 ** (response_retry_count - 2)),
+                    self._settings.retry_backoff_max_seconds,
                 )
+                # Do not sleep past the chain deadline.
+                if chain_deadline is not None:
+                    backoff = min(backoff, max(0.0, chain_deadline - time.perf_counter()))
+                if backoff > 0:
+                    await asyncio.sleep(backoff)
             try:
                 response = await self.forward(
-                    candidate, outbound, timeout=target_timeout
+                    candidate, outbound, timeout=attempt_timeout
                 )
             except ProviderTimeoutError:
                 if response_retry_count >= target_retries:
@@ -1856,12 +1921,17 @@ class GatewayProxy:
         target_timeout: float | None,
         is_last: bool,
         request_id: str,
+        chain_deadline: float | None = None,
     ) -> tuple:
         """Retry transient 5xx (502/503/504) on the SAME model.
 
         429 rate limits are NOT retried: a rate-limited model goes straight
         to cooldown and the chain moves to the next candidate. Returns
         (response, succeeded).
+
+        ``chain_deadline`` caps each retry's timeout and the backoff sleep —
+        see ``_retry_on_timeout`` for why the budget must be re-read per
+        attempt instead of reusing the first candidate's timeout.
         """
         response_retry_count = 0
         transient_codes = {502, 503, 504}
@@ -1869,6 +1939,28 @@ class GatewayProxy:
             int(response.status_code or 0) in transient_codes
             and response_retry_count < target_retries
         ):
+            attempt_timeout = target_timeout
+            backoff = min(
+                self._settings.retry_backoff_seconds
+                * (2 ** response_retry_count),
+                self._settings.retry_backoff_max_seconds,
+            )
+            if chain_deadline is not None:
+                left = chain_deadline - time.perf_counter()
+                if left <= 0:
+                    logger.info(
+                        "route=%s model=%s chain budget spent, no transient "
+                        "retry %d/%d request=%s",
+                        route_name,
+                        candidate,
+                        response_retry_count + 1,
+                        target_retries,
+                        request_id,
+                    )
+                    break
+                if attempt_timeout is not None:
+                    attempt_timeout = min(attempt_timeout, left)
+                backoff = min(backoff, left)
             response_retry_count += 1
             logger.info(
                 "route=%s model=%s transient %s retry %d/%d request=%s",
@@ -1879,16 +1971,11 @@ class GatewayProxy:
                 target_retries,
                 request_id,
             )
-            await asyncio.sleep(
-                min(
-                    self._settings.retry_backoff_seconds
-                    * (2 ** (response_retry_count - 1)),
-                    self._settings.retry_backoff_max_seconds,
-                )
-            )
+            if backoff > 0:
+                await asyncio.sleep(backoff)
             try:
                 response = await self.forward(
-                    candidate, outbound, timeout=target_timeout
+                    candidate, outbound, timeout=attempt_timeout
                 )
             except ProviderTimeoutError:
                 if is_last:
@@ -2011,10 +2098,79 @@ class GatewayProxy:
             async def _wrapped_stream() -> AsyncIterator[str]:
                 nonlocal cost
                 stream_usage: TokenUsage | None = None
+                # Count what the CLIENT actually received. Once a chunk is on
+                # the wire it cannot be retracted, so a mid-stream re-drive
+                # would splice the dead model's partial prefix onto the
+                # fallback model's full reply — TWO models' output in one SSE
+                # stream. Past the first chunk the only honest options are a
+                # clean error or a truncated stream, never a second model.
+                emitted = 0
                 try:
                     async for ev in original_body:
+                        emitted += 1
                         yield ev
                 except MidStreamFailure as msf:
+                    if emitted:
+                        logger.error(
+                            "route=%s model=%s mid-stream failure after %s "
+                            "chunks ALREADY SENT request=%s error=%s — not "
+                            "re-driving: the client's partial prefix cannot "
+                            "be retracted",
+                            route_name,
+                            msf.candidate,
+                            msf.chunks_yielded,
+                            request_id,
+                            str(msf)[:300],
+                        )
+                        # Park the dead candidate even though we are NOT
+                        # re-driving: it still just died mid-response, and the
+                        # next request must not walk into the same wall.
+                        try:
+                            cooldown_info = self._cooldown_info_for(
+                                _target_cooldowns, msf.candidate
+                            )
+                            self._cost_tracker.set_model_cooldown(
+                                route_name,
+                                msf.candidate,
+                                min(int(cooldown_info.get("seconds", 3600)), 300),
+                                reason=json.dumps(
+                                    {
+                                        "type": "mid_stream",
+                                        "error": str(msf)[:500],
+                                        "body": msf.body[:500],
+                                    }
+                                ),
+                                count_strike=True,
+                            )
+                        except Exception:
+                            logger.exception(
+                                "mid-stream cooldown record failed route=%s model=%s",
+                                route_name,
+                                msf.candidate,
+                            )
+                        yield "data: " + json.dumps(
+                            {
+                                "error": {
+                                    "message": (
+                                        "upstream stream failed mid-response "
+                                        f"after {emitted} chunks: {msf}"
+                                    ),
+                                    "type": "provider_error",
+                                }
+                            },
+                            ensure_ascii=False,
+                        ) + "\n\n"
+                        yield "data: [DONE]\n\n"
+                        response.status_code = 502
+                        # The re-drive is refused, but the failure IS a
+                        # fallback event: the client must see which candidate
+                        # served it and that the chain broke mid-response.
+                        response.headers["X-Gateway-Fallback"] = (
+                            f"mid_stream_{msf.candidate}"
+                        )
+                        return
+                    # Nothing was sent yet: a fresh stream is safe and gives
+                    # the client one complete reply from a live model.
                     # Winning candidate died mid-stream (opencode
                     # [server_error]). The partial SSE is discarded; re-drive
                     # the remaining candidates as a FRESH stream so the
@@ -2108,8 +2264,41 @@ class GatewayProxy:
                     )
                     response.model = fb_served or fb_response.model
                     if isinstance(fb_response.body, AsyncIterator):
-                        async for ev2 in fb_response.body:
-                            yield ev2
+                        # The re-driven candidate can die mid-stream TOO. That
+                        # second MidStreamFailure used to escape uncaught to
+                        # ASGI (an aborted response, no [DONE]) while the
+                        # `finally` below still recorded the request as
+                        # success off the dead winner's status.
+                        fb_emitted = 0
+                        try:
+                            async for ev2 in fb_response.body:
+                                fb_emitted += 1
+                                yield ev2
+                        except MidStreamFailure as msf2:
+                            logger.error(
+                                "route=%s fallback model=%s also died "
+                                "mid-stream after %s chunks request=%s error=%s",
+                                route_name,
+                                msf2.candidate,
+                                fb_emitted,
+                                request_id,
+                                str(msf2)[:300],
+                            )
+                            response.status_code = 502
+                            yield "data: " + json.dumps(
+                                {
+                                    "error": {
+                                        "message": (
+                                            "upstream stream failed mid-response "
+                                            f"on both candidates: {msf2}"
+                                        ),
+                                        "type": "provider_error",
+                                    }
+                                },
+                                ensure_ascii=False,
+                            ) + "\n\n"
+                            yield "data: [DONE]\n\n"
+                            return
                     elif isinstance(fb_response.body, dict):
                         # Non-stream fallback (shouldn't happen for
                         # stream=true, but stay total): emit as one chunk.
@@ -2296,7 +2485,10 @@ class GatewayProxy:
             cache_ttl = int(metadata.get("cache_ttl", 300))
             try:
                 self._intel_cache.put(
-                    "default", outbound, response.body, ttl=cache_ttl
+                    _cache_namespace(route_name, alias),
+                    outbound,
+                    response.body,
+                    ttl=cache_ttl,
                 )
             except Exception:
                 logger.exception("cache put failed request=%s", request_id)

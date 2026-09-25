@@ -534,7 +534,17 @@ async def test_mid_stream_recovery_serves_next_candidate():
     async for ev in finalized.body:
         events.append(ev)
     text = "\n".join(events)
-    assert "full reply" in text, text[:500]
+    # The dead candidate already put ONE chunk on the wire. A partial SSE
+    # prefix cannot be retracted, so re-driving the good candidate here would
+    # splice two models' output into one stream: the client would store
+    # "partial full reply" as a single coherent answer. Past the first chunk
+    # the only honest contract is: error event, then [DONE].
+    assert "partial " in text, text[:500]
+    assert "full reply" not in text, (
+        "the fallback candidate must NOT be spliced onto an already-sent "
+        f"partial prefix: {text[:500]}"
+    )
+    assert "provider_error" in text, text[:500]
     assert events[-1].strip() == "data: [DONE]"
     assert "mid_stream_@dead/m" in finalized.headers["X-Gateway-Fallback"]
     assert tracker.set_model_cooldown.called
