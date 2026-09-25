@@ -338,7 +338,11 @@ def create_console_app(
                     channel=row["channel"],
                     config=json.loads(row["config"]),
                 )
-                adapters[row["channel"]] = build_alert_adapter(rule)  # type: ignore[assignment]
+                # Key by RULE ID, not by channel. Keying by channel made the
+                # second enabled `webhook` rule overwrite the first, so a
+                # deployment with two webhook targets silently dispatched to
+                # only the last one while the endpoint reported success.
+                adapters[f"{row['channel']}#{row['id']}"] = build_alert_adapter(rule)  # type: ignore[assignment]
             except (ValueError, TypeError, KeyError):
                 continue
         # Every channel must have an adapter in the registry (matching the
@@ -1358,11 +1362,21 @@ def create_console_app(
         return {"cleared": True, "route": route["name"], "model": model}
 
     @app.post("/v1/product/applications/{app_id}/keys/rotate")
-    async def rotate_product_key(app_id: str) -> dict[str, object]:
-        return extensions.rotate_key(app_id)
+    async def rotate_product_key(app_id: str, request: Request) -> dict[str, object]:
+        # Rotating a key RETURNS THE NEW SECRET and immediately invalidates the
+        # old one. Unguarded, anyone who can reach the console could DoS the
+        # owner and walk away with the replacement credential — the same
+        # reason the credential-adjacent siblings call _require_local_client.
+        _require_local_client(request)
+        try:
+            return extensions.rotate_key(app_id)
+        except KeyError as exc:
+            raise HTTPException(404, "unknown application") from exc
 
     @app.post("/v1/product/keys/{key_id}/revoke")
-    async def revoke_product_key(key_id: str) -> dict[str, object]:
+    async def revoke_product_key(key_id: str, request: Request) -> dict[str, object]:
+        # Revocation is destructive and unauthenticated in the same way.
+        _require_local_client(request)
         try:
             return extensions.revoke_key(key_id)
         except KeyError as exc:
@@ -1425,8 +1439,14 @@ def create_console_app(
     async def check_product_provider(
         provider_id: str, body: dict[str, object]
     ) -> dict[str, object]:
+        # int() on a client string must not become a 500: the sibling
+        # create_product_provider maps the same ValueError/TypeError to 422.
+        try:
+            latency_ms = int(body.get("latency_ms", 0) or 0)
+        except (TypeError, ValueError) as exc:
+            raise HTTPException(422, "latency_ms must be a number") from exc
         return extensions.provider_check(
-            provider_id, bool(body.get("healthy", True)), int(body.get("latency_ms", 0))
+            provider_id, bool(body.get("healthy", True)), latency_ms
         )
 
     @app.post("/v1/product/routes/{route_id}/snapshots/{version}")
@@ -1913,13 +1933,20 @@ def create_console_app(
         total = 0
         failed = 0
         try:
-            for row in cost_store._conn.execute(
-                "SELECT COUNT(*), COALESCE(SUM(CASE WHEN status_code >= 400 THEN 1 ELSE 0 END),0) "
-                "FROM cost_records WHERE timestamp >= ?",
-                (int(time.time()) - 86400,),
-            ):
-                total, failed = int(row[0]), int(row[1])
+            # The connection is shared with check_same_thread=False, so an
+            # unlocked execute can interleave with a concurrent writer and
+            # raise ProgrammingError — which the bare `except sqlite3.Error`
+            # swallowed, reporting availability from a TORN read. The sibling
+            # intelligence_cache_stats wraps the same store in _lock.
+            with cost_store._lock:
+                for row in cost_store._conn.execute(
+                    "SELECT COUNT(*), COALESCE(SUM(CASE WHEN status_code >= 400 THEN 1 ELSE 0 END),0) "
+                    "FROM cost_records WHERE timestamp >= ?",
+                    (int(time.time()) - 86400,),
+                ):
+                    total, failed = int(row[0]), int(row[1])
         except sqlite3.Error:
+            logging.getLogger(__name__).exception("product_slo query failed")
             total = failed = 0
         if total <= 0:
             return {
