@@ -230,7 +230,7 @@ class CostStore:
         #: gateway DB), callers may set ``_shared_lock`` so both stores
         #: serialize on the same mutex. Otherwise each store owns its lock.
         self._shared_lock: threading.Lock | None = None
-        with self._lock:
+        with self.shared_lock:
             self._conn.execute("PRAGMA journal_mode=WAL")
             # Python's sqlite3 already installs a 5s busy timeout by default, so
             # this is HARDENING, not a fix for a live lock error (the database
@@ -347,7 +347,7 @@ class CostStore:
 
     def insert(self, record: UsageRecord) -> None:
         """Persist one usage record (upsert on request_id)."""
-        with self._lock:
+        with self.shared_lock:
             self._conn.execute(
                 """
                 INSERT OR REPLACE INTO cost_records (
@@ -402,7 +402,7 @@ class CostStore:
         attributed to that exact tool (e.g. ``"server_id:tool_name"``) count.
         """
         kind, _, key = scope_key.partition(":")
-        with self._lock:
+        with self.shared_lock:
             if kind == "global":
                 sql = (
                     "SELECT COALESCE(SUM(total_cost), 0) FROM cost_records "
@@ -435,7 +435,7 @@ class CostStore:
 
     def close(self) -> None:
         """Close the underlying SQLite connection."""
-        with self._lock:
+        with self.shared_lock:
             self._conn.close()
 
     def daily_usage(
@@ -467,22 +467,32 @@ class CostStore:
         page = max(1, int(page))
         page_size = max(1, min(int(page_size), 1000))
         offset = (page - 1) * page_size
-        with self._lock:
+        with self.shared_lock:
+            # The route predicate belongs in SQL. Filtering in Python after
+            # the fetch put OTHER routes' cost and token sums into this
+            # route's day buckets and total_calls, and applied LIMIT/OFFSET
+            # to the UNFILTERED set — so page 1 for route A could come back
+            # empty while A's rows sat past the window.
+            route_sql = " AND route = ?" if route else ""
+            route_args: tuple = (route,) if route else ()
             day_rows = self._conn.execute(
                 """
                 SELECT date(timestamp, 'unixepoch') AS day, model,
                        SUM(prompt_tokens), SUM(completion_tokens),
                        SUM(total_tokens), COUNT(*), SUM(total_cost)
                 FROM cost_records
-                WHERE timestamp >= ?
+                WHERE timestamp >= ?"""
+                + route_sql
+                + """
                 GROUP BY day, model
                 ORDER BY day ASC
                 """,
-                (since,),
+                (since, *route_args),
             ).fetchall()
             total_calls = self._conn.execute(
-                "SELECT COUNT(*) FROM cost_records WHERE timestamp >= ?",
-                (since,),
+                "SELECT COUNT(*) FROM cost_records WHERE timestamp >= ?"
+                + route_sql,
+                (since, *route_args),
             ).fetchone()[0]
             call_rows = self._conn.execute(
                 """
@@ -491,11 +501,13 @@ class CostStore:
                        status_code, reasoning_tokens, client_id, client_profile, cache_hit,
                        conversation_id
                 FROM cost_records
-                WHERE timestamp >= ?
+                WHERE timestamp >= ?"""
+                + route_sql
+                + """
                 ORDER BY timestamp DESC
                 LIMIT ? OFFSET ?
                 """,
-                (since, page_size, offset),
+                (since, *route_args, page_size, offset),
             ).fetchall()
         by_day: dict[str, list[dict[str, object]]] = {}
         for day, model, pt, ct, tt, reqs, cost in day_rows:
@@ -512,9 +524,9 @@ class CostStore:
         days_out = [
             {"date": day, "models": by_day[day]} for day in sorted(by_day)
         ]
-        calls = (
-            [c for c in call_rows if c[2] == route] if route else list(call_rows)
-        )
+        # No Python-side route filter any more: SQL already restricted the
+        # page, and re-filtering here could only ever shrink it.
+        calls = list(call_rows)
         return {
             "days": days_out,
             "calls": [
@@ -579,7 +591,7 @@ class CostStore:
         """
         if not self.cooldown_dynamic:
             until = int(time.time()) + max(1, int(seconds))
-            with self._lock:
+            with self.shared_lock:
                 self._conn.execute(
                     "INSERT OR REPLACE INTO model_cooldowns "
                     "(route, model, until_ts, reason, strikes) VALUES (?, ?, ?, ?, ?)",
@@ -589,7 +601,7 @@ class CostStore:
             return
 
         ladder = self.cooldown_ladder or _DEFAULT_COOLDOWN_LADDER
-        with self._lock:
+        with self.shared_lock:
             row = self._conn.execute(
                 "SELECT strikes FROM model_cooldowns "
                 "WHERE route = ? AND model = ?",
@@ -612,7 +624,7 @@ class CostStore:
 
     def cooldown_strikes(self, route: str, model: str) -> int:
         """Return the current strike count for (route, model); 0 = none."""
-        with self._lock:
+        with self.shared_lock:
             row = self._conn.execute(
                 "SELECT strikes FROM model_cooldowns "
                 "WHERE route = ? AND model = ?",
@@ -627,7 +639,7 @@ class CostStore:
         so a model that recovers starts from the bottom of the ladder again
         instead of being parked for escalating durations forever.
         """
-        with self._lock:
+        with self.shared_lock:
             self._conn.execute(
                 "DELETE FROM model_cooldowns WHERE route = ? AND model = ?",
                 (route, model),
@@ -637,7 +649,7 @@ class CostStore:
     def model_in_cooldown(self, route: str, model: str) -> int:
         """Return remaining cooldown seconds for (route, model); 0 = live."""
         now = int(time.time())
-        with self._lock:
+        with self.shared_lock:
             row = self._conn.execute(
                 "SELECT until_ts FROM model_cooldowns "
                 "WHERE route = ? AND model = ?",
@@ -647,7 +659,7 @@ class CostStore:
             return 0
         remaining = int(row[0]) - now
         if remaining <= 0:
-            with self._lock:
+            with self.shared_lock:
                 self._conn.execute(
                     "DELETE FROM model_cooldowns WHERE route = ? AND model = ?",
                     (route, model),
@@ -659,7 +671,7 @@ class CostStore:
     def active_cooldowns(self) -> list[dict[str, object]]:
         """List not-yet-expired cooldowns (for the UI Routes tab)."""
         now = int(time.time())
-        with self._lock:
+        with self.shared_lock:
             rows = self._conn.execute(
                 "SELECT route, model, until_ts, reason, strikes FROM model_cooldowns "
                 "WHERE until_ts > ? ORDER BY until_ts ASC",
@@ -679,7 +691,7 @@ class CostStore:
 
     def clear_cooldown(self, route: str, model: str) -> None:
         """Manually reset a route-scoped model cooldown."""
-        with self._lock:
+        with self.shared_lock:
             self._conn.execute(
                 "DELETE FROM model_cooldowns WHERE route = ? AND model = ?",
                 (route, model),
@@ -707,7 +719,13 @@ class CostStore:
         page = max(1, int(page))
         page_size = max(1, min(int(page_size), 1000))
         offset = (page - 1) * page_size
-        with self._lock:
+        with self.shared_lock:
+            # Route filtering belongs in SQL here too: the bucket sums,
+            # total_calls and the LIMIT/OFFSET page all ran unfiltered, so
+            # usage_by_period(route="A") reported other routes' cost and
+            # requests, and page 1 for A could come back empty.
+            route_sql = " AND route = ?" if route else ""
+            route_args: tuple = (route,) if route else ()
             bucket_rows = self._conn.execute(
                 f"""
                 SELECT strftime('{fmt}', timestamp, 'unixepoch') AS bucket, model,
@@ -725,15 +743,18 @@ class CostStore:
                        SUM(CASE WHEN status!='success' OR empty_response=1
                                 THEN 1 ELSE 0 END)
                 FROM cost_records
-                WHERE timestamp >= ?
+                WHERE timestamp >= ?"""
+                + route_sql
+                + """
                 GROUP BY bucket, model, route
                 ORDER BY bucket ASC
                 """,
-                (since,),
+                (since, *route_args),
             ).fetchall()
             total_calls = self._conn.execute(
-                "SELECT COUNT(*) FROM cost_records WHERE timestamp >= ?",
-                (since,),
+                "SELECT COUNT(*) FROM cost_records WHERE timestamp >= ?"
+                + route_sql,
+                (since, *route_args),
             ).fetchone()[0]
             call_rows = self._conn.execute(
                 """
@@ -742,17 +763,19 @@ class CostStore:
                        status_code, reasoning_tokens, client_id, client_profile, cache_hit,
                        conversation_id
                 FROM cost_records
-                WHERE timestamp >= ?
+                WHERE timestamp >= ?"""
+                + route_sql
+                + """
                 ORDER BY timestamp DESC
                 LIMIT ? OFFSET ?
                 """,
-                (since, page_size, offset),
+                (since, *route_args, page_size, offset),
             ).fetchall()
         by_bucket, by_bucket_route = self._shape_bucket_rows(bucket_rows)
         buckets_out = self._shape_buckets_out(by_bucket, by_bucket_route)
-        calls = (
-            [c for c in call_rows if c[2] == route] if route else list(call_rows)
-        )
+        # No Python-side route filter any more: SQL already restricted the
+        # page, and re-filtering here could only ever shrink it.
+        calls = list(call_rows)
         return {
             "days": buckets_out,
             "calls": [self._shape_call_row(r) for r in calls],
@@ -887,7 +910,7 @@ class CostStore:
                         outside_schedule.add(t)
                     break
         per_model: dict[str, object] = {}
-        with self._lock:
+        with self.shared_lock:
             for model in models:
                 last = self._conn.execute(
                     "SELECT timestamp, status FROM cost_records "
@@ -993,6 +1016,11 @@ class CostTracker:
             api_key=scope.key if scope.kind == "key" else "",
             user_id=scope.key if scope.kind == "user" else None,
             team=scope.key if scope.kind == "team" else None,
+            # Without this, a project-scoped record stored project=None and
+            # spend_since("project:p1") stayed 0 forever despite the spend
+            # being recorded — the column and the scope both existed, only
+            # the mapping was missing.
+            project=scope.key if scope.kind == "project" else None,
             model=model,
             provider=provider,
             prompt_tokens=prompt_tokens,
@@ -1107,9 +1135,14 @@ class CostTracker:
                 if value:
                     return str(value)
             if client_id:
-                row = self._store._conn.execute(  # noqa: SLF001
-                    "SELECT id FROM customers WHERE name = ?", (client_id,)
-                ).fetchone()
+                # Same shared connection, so it needs the same mutex: an
+                # unlocked cursor here can interleave with a concurrent
+                # record() insert and raise ProgrammingError or read a
+                # half-written row.
+                with self._store.shared_lock:  # noqa: SLF001
+                    row = self._store._conn.execute(  # noqa: SLF001
+                        "SELECT id FROM customers WHERE name = ?", (client_id,)
+                    ).fetchone()
                 if row is not None:
                     return str(row[0])
         except Exception:
