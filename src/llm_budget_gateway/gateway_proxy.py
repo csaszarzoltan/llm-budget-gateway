@@ -273,10 +273,15 @@ def _model_supports_vision(model: str | None) -> bool:
     )
     if any(m in text for m in markers):
         return True
+    # Compare against the LOWERCASED text, and without a stray '@' prefix:
+    # the entry used to be "@xiaomi/mimo-v2.5" tested against the raw `model`,
+    # so the curated check could never fire — a vision model whose slug
+    # carries no marker marker was routed to a text-only provider and got a
+    # 400 ("unknown variant image_url") on every image request.
     curated = (
-        "@xiaomi/mimo-v2.5",
+        "xiaomi/mimo-v2.5",
     )
-    return model in curated
+    return any(c in text for c in curated)
 
 
 def _body_has_images(body: dict | None) -> bool:
@@ -958,12 +963,29 @@ class GatewayProxy:
         else:
             # 2) Logical routing plane (admin-created routes).
             from_plane = True
+            # Parse the client's cost cap SEPARATELY: float("abc") is a
+            # client error (400), not a missing route. Sharing the try with
+            # resolve_alias() reported every malformed max_cost_usd as
+            # "404 unknown route" for a route that does exist.
+            try:
+                max_cost_usd = float(metadata.get("max_cost_usd", 0) or 0)
+            except (TypeError, ValueError):
+                return {
+                    "error": {
+                        "status": 400,
+                        "message": (
+                            "metadata.max_cost_usd must be a number, got "
+                            f"{metadata.get('max_cost_usd')!r}"
+                        ),
+                        "model": alias,
+                    }
+                }
             try:
                 decision = plane.resolve_alias(
                     alias,
                     now=self._routing_now(),
                     quality_tier=str(metadata.get("quality_tier", "balanced")),
-                    estimated_cost=float(metadata.get("max_cost_usd", 0)),
+                    estimated_cost=max_cost_usd,
                     region=str(metadata.get("region", "eu")),
                     capabilities=capabilities,
                 )
@@ -976,7 +998,18 @@ class GatewayProxy:
                     }
                 }
             candidates = list(decision.get("candidate_models", []))
-            selected = str(decision["selected_model"])
+            # .get, not [..]: a decision without selected_model is a
+            # routing-layer gap, not a crash — an unhandled KeyError here
+            # escaped as a 502 + traceback.
+            selected = str(decision.get("selected_model") or "")
+            if not selected:
+                return {
+                    "error": {
+                        "status": 404,
+                        "message": f"unknown route: {alias}",
+                        "model": alias,
+                    }
+                }
             if selected in candidates:
                 candidates.remove(selected)
             candidates.insert(0, selected)
@@ -1074,10 +1107,19 @@ class GatewayProxy:
             capabilities.append("tools")
         if body.get("response_format"):
             capabilities.append("structured_output")
-        for value in metadata.get("capabilities", []):
+        # A client may send metadata.capabilities as a bare string
+        # ("tools"); iterating that yields ['t','o','l','s'], which no target
+        # satisfies -> every route reported "no eligible target" (422).
+        requested = metadata.get("capabilities", [])
+        if isinstance(requested, str):
+            requested = [requested]
+        elif not isinstance(requested, (list, tuple, set)):
+            requested = [requested] if requested else []
+        for value in requested:
             if isinstance(value, str) and value not in capabilities:
                 capabilities.append(value)
         return capabilities
+
     async def _prepare_route_request(
         self,
         body: dict,
