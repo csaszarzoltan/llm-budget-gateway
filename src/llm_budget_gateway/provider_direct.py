@@ -139,6 +139,18 @@ class UpstreamProviderError(Exception):
         self.body = str(body)[:2000]
 
 
+def _is_upstream_error(status_code: int) -> bool:
+    """True for any non-2xx upstream status.
+
+    The checks used to be `status_code >= 400`, which let a 3xx fall through
+    to the success path: a misconfigured base_url that redirects answered 302
+    and the code either tried `response.json()` on an HTML body (a generic
+    "invalid JSON" 502 that hid the redirect) or returned `(302, data)` as a
+    SUCCESS. The contract UpstreamProviderError documents is non-2xx.
+    """
+    return status_code < 200 or status_code >= 300
+
+
 def _transport_error(endpoint_name: str, exc: BaseException, kind: str) -> UpstreamProviderError:
     """Build a transport-layer UpstreamProviderError that keeps the cause.
 
@@ -1115,10 +1127,21 @@ class DirectProviderClient:
             "completion": "/completions",
             "embedding": "/embeddings",
         }[kind]
-        url = endpoint.url(path)
+        return self._with_auth_query(endpoint.url(path), endpoint)
+
+    @staticmethod
+    def _with_auth_query(url: str, endpoint: ProviderEndpoint) -> str:
+        """Append ``?key=`` for query-auth providers.
+
+        Both the chat paths and the two ``/responses`` paths MUST go through
+        this. The /responses builders used a bare ``endpoint.url("/responses")``
+        while ``headers()`` returns ``{}`` for query auth, so a Gemini-style
+        ``auth: "query"`` provider received NO credential at all and answered
+        401/403 for every request.
+        """
         if endpoint.auth == "query":
             sep = "&" if "?" in url else "?"
-            url = f"{url}{sep}key={endpoint.api_key()}"
+            return f"{url}{sep}key={endpoint.api_key()}"
         return url
 
     async def forward(
@@ -1187,7 +1210,7 @@ class DirectProviderClient:
             raise _transport_error(endpoint.name, exc, "timeout") from exc
         except httpx.HTTPError as exc:
             raise _transport_error(endpoint.name, exc, "transport") from exc
-        if response.status_code >= 400:
+        if _is_upstream_error(response.status_code):
             raise UpstreamProviderError(
                 response.status_code,
                 f"upstream provider error: {endpoint.name} (HTTP {response.status_code})",
@@ -1233,19 +1256,35 @@ class DirectProviderClient:
             payload["instructions"] = instructions
         max_tokens = body.get("max_completion_tokens") or body.get("max_tokens")
         if max_tokens:
-            v = int(max_tokens)
-            eff = _reasoning_min(bare, endpoint)
-            # Respect explicit 0 (disable), otherwise universal floor 4096 for tiny max
-            if eff == 0:
-                if endpoint.min_output_tokens is None:
-                    # No provider override and no pattern → use safe universal floor
-                    eff = 4096
-                else:
-                    # Explicit 0 means disable
-                    eff = 0
-            if eff and v < eff:
-                v = eff
-            payload["max_output_tokens"] = v
+            # A non-numeric cap ("unlimited", "4096k") is a client typo, not a
+            # server error: int() raised an unhandled ValueError -> a 500 for
+            # the whole request. The chat path already guards this via
+            # _clamp_chat_max; mirror it by leaving the cap unset so the
+            # provider applies its own default.
+            try:
+                v = int(max_tokens)
+            except (TypeError, ValueError):
+                logger.warning(
+                    "ignoring non-numeric max_tokens=%r for %s",
+                    max_tokens,
+                    endpoint.name,
+                )
+                v = None
+            if v is not None:
+                eff = _reasoning_min(bare, endpoint)
+                # Respect explicit 0 (disable), else universal floor 4096
+                if eff == 0:
+                    if endpoint.min_output_tokens is None:
+                        eff = 4096
+                    else:
+                        eff = 0
+                if eff and v < eff:
+                    v = eff
+                payload["max_output_tokens"] = v
+            else:
+                eff = _reasoning_min(bare, endpoint)
+                if eff:
+                    payload["max_output_tokens"] = eff
         else:
             # No max from client: set safe default for reasoning models (prevents provider default truncation)
             eff = _reasoning_min(bare, endpoint)
@@ -1263,7 +1302,7 @@ class DirectProviderClient:
                 payload["tool_choice"] = tc
         if endpoint.extra_body:
             payload.update(endpoint.extra_body)
-        url = endpoint.url("/responses")
+        url = self._with_auth_query(endpoint.url("/responses"), endpoint)
         headers = endpoint.headers()
         try:
             response = await self._client.post(url, json=payload, headers=headers)
@@ -1271,7 +1310,7 @@ class DirectProviderClient:
             raise _transport_error(endpoint.name, exc, "timeout") from exc
         except httpx.HTTPError as exc:
             raise _transport_error(endpoint.name, exc, "transport") from exc
-        if response.status_code >= 400:
+        if _is_upstream_error(response.status_code):
             raise UpstreamProviderError(
                 response.status_code,
                 f"upstream provider error: {endpoint.name} (HTTP {response.status_code})",
@@ -1326,7 +1365,7 @@ class DirectProviderClient:
             async with self._client.stream(
                 "POST", url, json=payload, headers=endpoint.headers()
             ) as response:
-                if response.status_code >= 400:
+                if _is_upstream_error(response.status_code):
                     body_text = ""
                     try:
                         body_text = (await response.aread()).decode(
@@ -1384,9 +1423,19 @@ class DirectProviderClient:
         "The `reasoning_text` in the thinking mode must be passed back".
         """
         messages = body.get("messages", [])
+        # A malformed `messages` (a list of strings, or a dict) is a client
+        # error, not a crash: iterating a dict yields string keys and a
+        # list-of-strings yields strings, and `msg.get(...)` on either raised
+        # AttributeError -> a 500 for the whole request.
+        if isinstance(messages, dict):
+            messages = [messages]
+        elif not isinstance(messages, (list, tuple)):
+            messages = []
         system_parts: list[str] = []
         input_items: list[dict[str, Any]] = []
         for msg in messages:
+            if not isinstance(msg, dict):
+                continue
             role = msg.get("role")
             content = msg.get("content")
             # Tool result messages (role=tool) → function_call_output
@@ -1503,19 +1552,35 @@ class DirectProviderClient:
             payload["instructions"] = instructions
         max_tokens = body.get("max_completion_tokens") or body.get("max_tokens")
         if max_tokens:
-            v = int(max_tokens)
-            eff = _reasoning_min(bare, endpoint)
-            # Respect explicit 0 (disable), otherwise universal floor 4096 for tiny max
-            if eff == 0:
-                if endpoint.min_output_tokens is None:
-                    # No provider override and no pattern → use safe universal floor
-                    eff = 4096
-                else:
-                    # Explicit 0 means disable
-                    eff = 0
-            if eff and v < eff:
-                v = eff
-            payload["max_output_tokens"] = v
+            # A non-numeric cap ("unlimited", "4096k") is a client typo, not a
+            # server error: int() raised an unhandled ValueError -> a 500 for
+            # the whole request. The chat path already guards this via
+            # _clamp_chat_max; mirror it by leaving the cap unset so the
+            # provider applies its own default.
+            try:
+                v = int(max_tokens)
+            except (TypeError, ValueError):
+                logger.warning(
+                    "ignoring non-numeric max_tokens=%r for %s",
+                    max_tokens,
+                    endpoint.name,
+                )
+                v = None
+            if v is not None:
+                eff = _reasoning_min(bare, endpoint)
+                # Respect explicit 0 (disable), else universal floor 4096
+                if eff == 0:
+                    if endpoint.min_output_tokens is None:
+                        eff = 4096
+                    else:
+                        eff = 0
+                if eff and v < eff:
+                    v = eff
+                payload["max_output_tokens"] = v
+            else:
+                eff = _reasoning_min(bare, endpoint)
+                if eff:
+                    payload["max_output_tokens"] = eff
         else:
             eff = _reasoning_min(bare, endpoint)
             if eff:
@@ -1531,7 +1596,7 @@ class DirectProviderClient:
                 payload["tool_choice"] = tc
         if endpoint.extra_body:
             payload.update(endpoint.extra_body)
-        url = endpoint.url("/responses")
+        url = self._with_auth_query(endpoint.url("/responses"), endpoint)
         index = 0
         chunk_id = ""
         usage_raw: dict[str, Any] = {}
@@ -1539,7 +1604,7 @@ class DirectProviderClient:
             async with self._client.stream(
                 "POST", url, json=payload, headers=endpoint.headers()
             ) as response:
-                if response.status_code >= 400:
+                if _is_upstream_error(response.status_code):
                     body_text = ""
                     try:
                         body_text = (await response.aread()).decode(
@@ -1669,7 +1734,18 @@ class DirectProviderClient:
                             "usage": {
                                 "prompt_tokens": int(usage_raw.get("input_tokens", 0) or 0),
                                 "completion_tokens": int(usage_raw.get("output_tokens", 0) or 0),
-                                "total_tokens": int(usage_raw.get("total_tokens", 0) or 0),
+                                # Fall back to input + output: a provider that
+                                # sends only input_tokens/output_tokens (no
+                                # total_tokens) otherwise billed the stream at
+                                # $0. The non-streaming mapper already had this
+                                # fallback; the streaming one did not.
+                                "total_tokens": int(
+                                    usage_raw.get("total_tokens", 0)
+                                    or (
+                                        (usage_raw.get("input_tokens", 0) or 0)
+                                        + (usage_raw.get("output_tokens", 0) or 0)
+                                    )
+                                ),
                             },
                         }
                     elif etype == "response.failed":
@@ -1743,7 +1819,7 @@ class DirectProviderClient:
             async with self._client.stream(
                 "POST", url, json=payload, headers=endpoint.headers()
             ) as response:
-                if response.status_code >= 400:
+                if _is_upstream_error(response.status_code):
                     body_text = ""
                     try:
                         body_text = (await response.aread()).decode(
