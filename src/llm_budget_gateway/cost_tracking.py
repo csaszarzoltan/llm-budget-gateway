@@ -114,6 +114,14 @@ class UsageRecord:
     cache_hit: bool = False
     conversation_id: str | None = None
     customer_id: str | None = None
+    #: Upstream finish reason (stop | length | tool_calls | content_filter).
+    #: NULL on pre-migration rows. Without it a `success` row cannot tell a
+    #: natural stop from a provider-side cut — the reason "the answer got cut
+    #: off" reports stayed undecidable.
+    finish_reason: str | None = None
+    #: True when status="success" but total_tokens==0: the client received an
+    #: EMPTY answer, which the usage page must not score as a success.
+    empty_response: bool = False
 
 
 def accumulate_usage(chunks: list[dict]) -> TokenUsage:
@@ -306,6 +314,13 @@ class CostStore:
             ("client_profile", "TEXT"),
             ("cache_hit", "INTEGER NOT NULL DEFAULT 0"),
             ("customer_id", "TEXT"),
+            # Truncation diagnosis (2026-09-25): a `success` row could not
+            # distinguish a natural stop from a provider-side length cut, and
+            # a 200 with zero output tokens scored as a success on the Usage
+            # page. Both are idempotent additive migrations; old rows get NULL
+            # / 0 and stay readable by every existing query.
+            ("finish_reason", "TEXT"),
+            ("empty_response", "INTEGER NOT NULL DEFAULT 0"),
         ):
             if column not in existing:
                 self._conn.execute(
@@ -343,8 +358,8 @@ class CostStore:
                     latency_ms, status, status_code, timestamp,
                     tool_name, project, route,
                     client_id, client_profile, cache_hit, conversation_id,
-                    customer_id
-                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    customer_id, finish_reason, empty_response
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 """,
                 (
                     record.request_id,
@@ -373,6 +388,8 @@ class CostStore:
                     1 if record.cache_hit else 0,
                     record.conversation_id,
                     record.customer_id,
+                    record.finish_reason,
+                    1 if record.empty_response else 0,
                 ),
             )
             self._conn.commit()
@@ -696,9 +713,17 @@ class CostStore:
                 SELECT strftime('{fmt}', timestamp, 'unixepoch') AS bucket, model,
                        route, SUM(prompt_tokens), SUM(completion_tokens),
                        SUM(total_tokens), COUNT(*), SUM(total_cost),
-                       SUM(CASE WHEN status='success' THEN 1 ELSE 0 END),
-                       SUM(CASE WHEN status='success' THEN latency_ms ELSE 0 END),
-                       SUM(CASE WHEN status!='success' THEN 1 ELSE 0 END)
+                       -- An empty_response=1 row is a 200 that produced no
+                       -- output tokens: the client got NOTHING. Counting it
+                       -- as a success is what made the Usage page read 100%
+                       -- while callers were getting empty answers, so it is
+                       -- counted as a failure instead (requests still count).
+                       SUM(CASE WHEN status='success' AND empty_response=0
+                                THEN 1 ELSE 0 END),
+                       SUM(CASE WHEN status='success' AND empty_response=0
+                                THEN latency_ms ELSE 0 END),
+                       SUM(CASE WHEN status!='success' OR empty_response=1
+                                THEN 1 ELSE 0 END)
                 FROM cost_records
                 WHERE timestamp >= ?
                 GROUP BY bucket, model, route

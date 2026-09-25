@@ -2122,6 +2122,13 @@ class GatewayProxy:
                             status_code=response.status_code,
                             conversation_id=conversation_id,
                         )
+                        # Truncation diagnosis: why the stream ended, and did
+                        # the client actually receive any output?
+                        record.finish_reason = self._extract_finish_reason(gen_chunks)
+                        record.empty_response = bool(
+                            record.status == "success"
+                            and record.total_tokens == 0
+                        )
                         record.client_id = client_id
                         record.client_profile = client_profile
                         record.cache_hit = False
@@ -2160,6 +2167,13 @@ class GatewayProxy:
                 route=route_name,
                 status_code=response.status_code,
                 conversation_id=conversation_id,
+            )
+            # Truncation diagnosis: `finish_reason=length` = a real cut at the
+            # provider's output cap; empty_response marks a 200 the client
+            # received no output for (scored as a failure by the usage API).
+            record.finish_reason = self._extract_finish_reason(response.body)
+            record.empty_response = bool(
+                record.status == "success" and record.total_tokens == 0
             )
             # Tag the record with client identity and cache status.
             record.client_id = client_id
@@ -2775,6 +2789,42 @@ class GatewayProxy:
         ]
         lines.append("data: [DONE]\n\n")
         return lines
+
+    @staticmethod
+    def _extract_finish_reason(source: object) -> str | None:
+        """Upstream finish_reason from a non-stream body or the last stream chunks.
+
+        This is what makes "the answer got cut off" decidable: `length` means
+        the provider stopped at its output cap (a real cut), `stop`/`tool_calls`
+        are natural endings. ``None`` when the upstream never said (older
+        providers, error rows).
+        """
+        # Non-stream body: {"choices": [{"finish_reason": ...}]}
+        if isinstance(source, dict):
+            for choice in source.get("choices") or []:
+                if isinstance(choice, dict):
+                    fr = choice.get("finish_reason")
+                    if fr:
+                        return str(fr)
+            # Responses-API shape: {"status": "completed"|"incomplete"}
+            status = source.get("status")
+            if isinstance(status, str) and status:
+                if status == "incomplete":
+                    return "length"
+                if status in ("completed", "in_progress"):
+                    return "completed"
+            return None
+        # Stream chunks: scan from the end for the terminal choice.
+        if isinstance(source, (list, tuple)):
+            for chunk in reversed(list(source)):
+                if not isinstance(chunk, dict):
+                    continue
+                for choice in chunk.get("choices") or []:
+                    if isinstance(choice, dict) and choice.get("finish_reason"):
+                        return str(choice["finish_reason"])
+                if chunk.get("status") in ("completed", "incomplete"):
+                    return "length" if chunk["status"] == "incomplete" else "completed"
+        return None
 
     @staticmethod
     def _collect_stream_usage(chunks: list) -> TokenUsage | None:

@@ -141,6 +141,8 @@ class TestUsageRecordInterface:
             "cache_hit",
             "conversation_id",
             "customer_id",
+            "finish_reason",
+            "empty_response",
         }
 
     def test_constructible(self) -> None:

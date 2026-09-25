@@ -105,7 +105,11 @@ async def test_proxy_executes_logical_alias_and_adds_decision_headers() -> None:
     enforcer.check_sync.return_value = None
     enforcer.check_hard = AsyncMock(return_value=None)
     tracker = Mock()
-    tracker.build_record.return_value = SimpleNamespace(total_cost=0.12)
+    # The proxy stamps truncation-diagnosis fields on the built record, so the
+    # stub carries the attributes that read touches.
+    tracker.build_record.return_value = SimpleNamespace(
+        total_cost=0.12, status="success", total_tokens=0
+    )
     tracker.record = AsyncMock(return_value=None)
     proxy = GatewayProxy(Settings(virtual_keys={}), tracker, enforcer, Mock())
     proxy.attach_routing_control_plane(
