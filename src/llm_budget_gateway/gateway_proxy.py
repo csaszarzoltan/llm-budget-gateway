@@ -239,6 +239,20 @@ def _is_context_error(body: dict | str | list) -> bool:
     )
 
 
+def _usage_int(usage: object, key: str) -> int:
+    """Read a token count from a usage payload without raising.
+
+    Providers disagree on shape: some send a dict, some a pydantic/litellm
+    object, some null, some a string. A malformed count must degrade to 0,
+    never blow up a completed stream's accounting.
+    """
+    value = usage.get(key, 0) if isinstance(usage, dict) else getattr(usage, key, 0)
+    try:
+        return int(value or 0)
+    except (TypeError, ValueError):
+        return 0
+
+
 def _model_supports_vision(model: str | None) -> bool:
     """True when a model can accept image content (image_url parts).
 
@@ -2479,14 +2493,19 @@ class GatewayProxy:
                 )
             except StopAsyncIteration:
                 await agen.aclose()  # type: ignore[union-attr]
-                return ProviderResponse(
-                    status_code=200,
-                    body=[],
-                    headers={},
-                    model=served or model,
-                    usage=None,
-                    latency_ms=int((time.perf_counter() - start) * 1000),
-                )
+                from .provider_direct import UpstreamProviderError
+
+                # An upstream that closes BEFORE the first chunk is not a
+                # successful empty answer: returning status 200 + body=[] gave
+                # the SSE client no frames and no terminal `data: [DONE]`, and
+                # the cost hook recorded a $0 SUCCESS for a request that never
+                # produced output. 502 lets the route layer fall back to the
+                # next candidate, which is what a dead first byte deserves.
+                raise UpstreamProviderError(
+                    502,
+                    "upstream returned an empty stream (no first chunk)",
+                    body="",
+                ) from None
             except TimeoutError as exc:
                 try:
                     await agen.aclose()  # type: ignore[union-attr]
@@ -2524,16 +2543,22 @@ class GatewayProxy:
                     # route layer can re-drive the REMAINING candidates as a
                     # fresh stream instead of an ASGI traceback + truncated
                     # client reply.
-                    try:
-                        await agen.aclose()  # type: ignore[union-attr]
-                    except Exception:
-                        pass
                     raise MidStreamFailure(
                         model,
                         str(exc) or "upstream stream failed mid-response",
                         body=getattr(exc, "body", "") or "",
                         chunks_yielded=yielded,
                     ) from exc
+                finally:
+                    # ALWAYS close the upstream generator — the `except` above
+                    # used to be the only close, so every SUCCESSFUL stream
+                    # leaked the underlying HTTP response until GC. One leaked
+                    # upstream connection per streaming request is how a
+                    # long-lived gateway exhausts its socket/FD budget.
+                    try:
+                        await agen.aclose()  # type: ignore[union-attr]
+                    except Exception:
+                        pass
                 yield "data: [DONE]\n\n"
                 # Usage is aggregated here (last usage chunk), so the cost
                 # record written by the caller with usage=None is stale —
@@ -2725,7 +2750,7 @@ class GatewayProxy:
             # recorded at real cost, not $0 (budget bypass). Chunks are then
             # serialized into SSE lines — StreamingResponse requires
             # bytes/str, raw litellm chunk objects crash it.
-            chunks, usage = await self._drain_stream(response)
+            chunks, usage = await self._drain_stream(response, timeout=timeout)
             body_out = self._sse_lines(chunks)
             if chunks:
                 served_model = self._chunk_model(chunks[0]) or served_model
@@ -2761,7 +2786,9 @@ class GatewayProxy:
             latency_ms=latency_ms,
         )
 
-    async def _drain_stream(self, response: object) -> tuple[list, TokenUsage | None]:
+    async def _drain_stream(
+        self, response: object, timeout: float | None = None
+    ) -> tuple[list, TokenUsage | None]:
         """Consume an async streaming iterator, aggregating chunk usage.
 
         Each chunk must arrive within ``Settings.provider_timeout`` seconds;
@@ -2771,7 +2798,7 @@ class GatewayProxy:
         """
         chunks: list = []
         usage_parts: list[dict] = []
-        async for chunk in self._iter_with_timeout(response):
+        async for chunk in self._iter_with_timeout(response, timeout=timeout):
             chunks.append(chunk)
             chunk_usage = (
                 chunk.get("usage")
@@ -2794,23 +2821,34 @@ class GatewayProxy:
         usage = accumulate_usage(usage_parts) if usage_parts else None
         return chunks, usage
 
-    async def _iter_with_timeout(self, response: object):
+    async def _iter_with_timeout(
+        self, response: object, timeout: float | None = None
+    ):
         """Yield each chunk from ``response``, raising ProviderTimeoutError
-        when a chunk does not arrive within ``Settings.provider_timeout``
-        seconds. A healthy stream may run arbitrarily long chunk-to-chunk;
-        only silence past the deadline fails."""
+        when a chunk does not arrive within ``timeout`` seconds. A healthy
+        stream may run arbitrarily long chunk-to-chunk; only silence past the
+        deadline fails.
+
+        ``timeout`` defaults to ``Settings.provider_timeout``. Callers MUST
+        pass the effective per-target timeout: a route target declaring
+        ``timeout_seconds=5`` against a 60s global used to get 60s here, so
+        the target's own deadline was silently ignored on the stream leg.
+        """
+        deadline = (
+            timeout if timeout is not None else self._settings.provider_timeout
+        )
         aiter = response.__aiter__()  # type: ignore[union-attr]
         while True:
             try:
                 chunk = await asyncio.wait_for(
                     aiter.__anext__(),
-                    timeout=self._settings.provider_timeout,
+                    timeout=deadline,
                 )
             except StopAsyncIteration:
                 return
             except TimeoutError as exc:
                 raise ProviderTimeoutError(
-                    f"upstream stream stalled for {self._settings.provider_timeout}s"
+                    f"upstream stream stalled for {deadline}s"
                 ) from exc
             yield chunk
 
@@ -2877,13 +2915,24 @@ class GatewayProxy:
         record is written after the response is fully streamed.
         """
         for c in reversed(chunks):
-            if isinstance(c, dict) and c.get("usage"):
-                last = c["usage"]
-                return TokenUsage(
-                    prompt_tokens=int(last.get("prompt_tokens", 0) or 0),
-                    completion_tokens=int(last.get("completion_tokens", 0) or 0),
-                    total_tokens=int(last.get("total_tokens", 0) or 0),
-                )
+            # The live-stream path appends the RAW upstream chunks, which on
+            # the direct transport are litellm/pydantic OBJECTS (that is why
+            # _chunk_to_dict exists for serialisation). Reading usage with
+            # a dict-only `.get` skipped them, returned None, and the stream
+            # was billed $0 / total_tokens=0 despite real output.
+            usage = None
+            usage = c.get("usage") if isinstance(c, dict) else getattr(c, "usage", None)
+            if not usage:
+                continue
+            # Do NOT force the payload through _chunk_to_dict: class attributes
+            # (prompt_tokens=11 on a usage model) are invisible to vars(), so the
+            # projection would turn a real usage object into {} and re-break the
+            # $0 billing. _usage_int reads dicts and objects alike.
+            return TokenUsage(
+                prompt_tokens=_usage_int(usage, "prompt_tokens"),
+                completion_tokens=_usage_int(usage, "completion_tokens"),
+                total_tokens=_usage_int(usage, "total_tokens"),
+            )
         return None
 
     @staticmethod
@@ -3181,13 +3230,21 @@ class GatewayProxy:
                         except Exception:
                             content = str(b)[:80]
                     elif isinstance(b, list):
-                        # SSE chunks list — extract the last chunk's delta
+                        # SSE chunks list — extract the last chunk's delta.
+                        # A terminal usage-only chunk is {"choices": []} (or
+                        # "choices": None); `chunk.get("choices", [{}])[0]`
+                        # raised IndexError/TypeError on those and aborted the
+                        # whole probe loop, so one empty tail chunk made the
+                        # probe crash instead of reporting per-target status.
                         for chunk in reversed(b):
-                            if isinstance(chunk, dict):
-                                delta = chunk.get("choices", [{}])[0].get("delta", {})
-                                if delta.get("content"):
-                                    content = str(delta["content"])
-                                    break
+                            if not isinstance(chunk, dict):
+                                continue
+                            choices = chunk.get("choices") or [{}]
+                            first = choices[0] if choices else {}
+                            delta = first.get("delta", {}) if isinstance(first, dict) else {}
+                            if delta.get("content"):
+                                content = str(delta["content"])
+                                break
                     else:
                         # async generator (streaming) — cannot read here
                         content = "[streaming]"
