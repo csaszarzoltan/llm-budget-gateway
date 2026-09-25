@@ -420,6 +420,33 @@ def anthropic_error(status_code: int, message: str) -> dict:
     return {"type": "error", "error": {"type": kind, "message": str(message)}}
 
 
+def _format_anthropic_sse(lines: list[str]) -> str:
+    """Serialize adapter lines into one valid Anthropic SSE block.
+
+    The adapter returns raw ``["event: <name>", "<json>"]`` pairs; SSE
+    requires the event name and its data on CONSECUTIVE lines inside ONE
+    block terminated by a blank line. Emitting the event line bare (or
+    prefixing BOTH lines with `data:`) produces a stream clients reject
+    with "Could not parse message into JSON" — Claude Code surfaced
+    exactly that against this endpoint.
+    """
+    event_name = ""
+    data_parts: list[str] = []
+    for line in lines:
+        if line.startswith("event: "):
+            event_name = line[len("event: "):].strip()
+        else:
+            data_parts.append(line)
+    # An upstream chunk with no choices yields NO lines — emitting a bare
+    # `data: null` for it confuses the client's SSE parser, so produce
+    # nothing at all for an empty translation.
+    if not event_name and not data_parts:
+        return ""
+    data = "\n".join(data_parts) if data_parts else "{}"
+    block = f"event: {event_name}\n" if event_name else ""
+    return f"{block}data: {data}\n\n"
+
+
 def extract_anthropic_key(headers: dict) -> str:
     """Accept ``x-api-key`` (native) + ``Authorization: Bearer`` (fallback)."""
     if not isinstance(headers, dict):

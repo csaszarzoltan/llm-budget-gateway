@@ -349,6 +349,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         returns a Messages object; ``stream: true`` returns Anthropic SSE.
         """
         from .anthropic_adapter import (
+            _format_anthropic_sse,
             anthropic_error,
             anthropic_message_start,
             anthropic_to_openai,
@@ -397,23 +398,22 @@ def create_app(settings: Settings | None = None) -> FastAPI:
             out["id"] = message_id
             return JSONResponse(out)
 
-        def _sse(lines: list[str]):
-            for line in lines:
-                yield f"data: {line}\n\n"
+        # One translation unit: the adapter returns raw ["event: X", json]
+        # pairs, and _format_anthropic_sse() folds each pair into a single
+        # valid SSE block. Emitting the event line bare (or prefixing BOTH
+        # lines with `data:`) makes Claude Code reject the stream with
+        # "Could not parse message into JSON"; an empty translation must emit
+        # NOTHING rather than a bare `data: null`.
+        def _emit(lines: list[str]):
+            block = _format_anthropic_sse(lines)
+            if block:
+                yield block
 
-        async def _anthropic_stream():
-            for line in anthropic_message_start(
-                message_id=message_id, model=model_name
-            ):
-                yield f"data: {line}\n\n" if not line.startswith("event:") else f"{line}\n\n"
-            yield "event: content_block_start\n" + "data: " + json.dumps(
-                {"type": "content_block_start", "index": 0,
-                 "content_block": {"type": "text", "text": ""}}
-            ) + "\n\n"
+        async def _openai_events():
+            """Yield the upstream OpenAI SSE payloads, whatever the body shape."""
             body_iter = response.body
             if isinstance(body_iter, dict):
-                # upstream answered non-stream despite stream request: emit as one delta
-                text = ""
+                # upstream answered non-stream despite stream request
                 try:
                     text = str(
                         (body_iter.get("choices") or [{}])[0]
@@ -423,54 +423,63 @@ def create_app(settings: Settings | None = None) -> FastAPI:
                 except Exception:
                     text = ""
                 if text:
-                    for line in openai_sse_to_anthropic_sse(
-                        {"choices": [{"delta": {"content": text}}]},
-                        message_id=message_id, model=model_name,
-                    ):
-                        yield (line + "\n\n") if line.startswith("event:") else ("data: " + line + "\n\n")
+                    yield {"choices": [{"delta": {"content": text}}]}
             elif isinstance(body_iter, str):
                 for raw_line in body_iter.splitlines():
-                    s = raw_line.strip()
-                    if not s.startswith("data:"):
-                        continue
-                    payload = s[5:].strip()
-                    if payload in ("[DONE]", ""):
-                        continue
-                    try:
-                        event = json.loads(payload)
-                    except (json.JSONDecodeError, ValueError):
-                        continue
-                    if not isinstance(event, dict):
-                        continue
-                    for line in openai_sse_to_anthropic_sse(
-                        event, message_id=message_id, model=model_name
-                    ):
-                        yield (line + "\n\n") if line.startswith("event:") else ("data: " + line + "\n\n")
+                    for event in _parse_sse_lines(raw_line):
+                        yield event
             else:
                 try:
                     async for raw in body_iter:  # type: ignore[union-attr]
-                        s = raw.strip() if isinstance(raw, str) else ""
-                        if not s.startswith("data:"):
-                            continue
-                        payload = s[5:].strip()
-                        if payload in ("[DONE]", ""):
-                            continue
-                        try:
-                            event = json.loads(payload)
-                        except (json.JSONDecodeError, ValueError):
-                            continue
-                        if not isinstance(event, dict):
-                            continue
-                        for line in openai_sse_to_anthropic_sse(
-                            event, message_id=message_id, model=model_name
+                        for event in _parse_sse_lines(
+                            raw.strip() if isinstance(raw, str) else ""
                         ):
-                            yield (line + "\n\n") if line.startswith("event:") else ("data: " + line + "\n\n")
+                            yield event
                 except Exception:
                     pass
-            for line in openai_sse_to_anthropic_sse(
-                {}, message_id=message_id, model=model_name, emit_done=True
+
+        def _parse_sse_lines(s: str):
+            """Parse one upstream `data:` line into an event dict (or nothing)."""
+            if not s.startswith("data:"):
+                return
+            payload = s[5:].strip()
+            if payload in ("[DONE]", ""):
+                return
+            try:
+                event = json.loads(payload)
+            except (json.JSONDecodeError, ValueError):
+                return
+            if isinstance(event, dict):
+                yield event
+
+        async def _anthropic_stream():
+            for block in _emit(
+                anthropic_message_start(message_id=message_id, model=model_name)
             ):
-                yield (line + "\n\n") if line.startswith("event:") else ("data: " + line + "\n\n")
+                yield block
+            for block in _emit(
+                [
+                    "event: content_block_start",
+                    json.dumps(
+                        {"type": "content_block_start", "index": 0,
+                         "content_block": {"type": "text", "text": ""}}
+                    ),
+                ]
+            ):
+                yield block
+            async for event in _openai_events():
+                for block in _emit(
+                    openai_sse_to_anthropic_sse(
+                        event, message_id=message_id, model=model_name
+                    )
+                ):
+                    yield block
+            for block in _emit(
+                openai_sse_to_anthropic_sse(
+                    {}, message_id=message_id, model=model_name, emit_done=True
+                )
+            ):
+                yield block
 
         return StreamingResponse(_anthropic_stream(), media_type="text/event-stream")
 

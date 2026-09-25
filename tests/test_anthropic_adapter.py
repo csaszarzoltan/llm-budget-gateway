@@ -185,6 +185,28 @@ def test_system_role_string_content_is_accepted() -> None:
     assert oai["messages"][0]["content"] == "sys-as-string"
 
 
+def test_format_anthropic_sse_block_shape() -> None:
+    """SSE framing: the event name and its data must be CONSECUTIVE lines in
+    ONE block. Claude Code rejects the whole stream with "Could not parse
+    message into JSON" otherwise — it surfaced against this endpoint."""
+    lines = ad.anthropic_message_start(message_id="msg_1", model="m")
+    block = ad._format_anthropic_sse(lines)
+    assert block.startswith("event: message_start\ndata: {")
+    assert block.endswith("\n\n")
+    assert "data: event:" not in block
+    # no choices -> no lines -> emit NOTHING (a bare `data: null` breaks it)
+    assert ad._format_anthropic_sse([]) == ""
+    assert ad._format_anthropic_sse(ad.openai_sse_to_anthropic_sse(
+        {"choices": []}, message_id="m", model="m"
+    )) == ""
+    # done event carries a JSON object, not the literal null
+    done = ad._format_anthropic_sse(
+        ad.openai_sse_to_anthropic_sse({}, message_id="m", model="m", emit_done=True)
+    )
+    assert "event: message_stop" in done
+    assert json.loads(done.split("data: ", 1)[1]) == {"type": "message_stop"}
+
+
 def test_create_app_serves_v1_messages() -> None:
     from llm_budget_gateway.main import create_app
 
