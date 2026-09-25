@@ -22,6 +22,7 @@ MVP signals (confirmed by operator decision):
 
 from __future__ import annotations
 
+import hashlib
 import json
 import logging
 import sqlite3
@@ -61,6 +62,21 @@ CREATE TABLE IF NOT EXISTS telemetry_requests (
     recorded_at    INTEGER NOT NULL
 )
 """
+
+
+def _key_fingerprint(key: str | None) -> str | None:
+    """Non-reversible identifier for an API key, safe to store and display.
+
+    A raw key must never reach the telemetry table: both the observability
+    list endpoint and the trace lookup return these rows verbatim, so storing
+    the secret made every Cockpit reader a holder of every key. A salted
+    digest keeps "which key made this request" answerable without ever
+    holding the credential.
+    """
+    if not key:
+        return None
+    digest = hashlib.sha256(key.encode("utf-8", "replace")).hexdigest()
+    return f"key:{digest[:16]}"
 
 
 @dataclass
@@ -142,7 +158,15 @@ class RequestTelemetryStore:
         # both stores serialise on one mutex — two locks on one connection races.
         self._lock = lock or threading.Lock()
         self._conn = connection or sqlite3.connect(db_path, check_same_thread=False)
-        self._conn.row_factory = sqlite3.Row
+        # row_factory is PER-CONNECTION state. On a connection shared with
+        # CostStore, setting it here permanently changed that store's read
+        # contract — its positional tuple rows became sqlite3.Row, which
+        # changes unpack behaviour for every consumer — and the write itself
+        # happened outside the shared mutex. Only a self-opened connection may
+        # be configured; the shared handle keeps CostStore's contract and this
+        # store converts its own rows locally instead.
+        if connection is None:
+            self._conn.row_factory = sqlite3.Row
         with self._lock:
             self._conn.execute(_TELEMETRY_SCHEMA)
             self._conn.execute(
@@ -163,8 +187,9 @@ class RequestTelemetryStore:
             )
             self._conn.commit()
 
-    def record(self, entry: TelemetryEntry) -> str:
-        """Persist a telemetry entry.  Returns the trace_id.
+    def record(self, entry: TelemetryEntry) -> str | None:
+        """Persist a telemetry entry.  Returns the trace_id, or None when the
+        write failed.
 
         Best-effort by design: a DB failure is logged, never raised into
         the proxy request path.
@@ -217,6 +242,12 @@ class RequestTelemetryStore:
             logger.exception(
                 "telemetry record failed trace_id=%s", entry.trace_id
             )
+            # A silent failure here is worse than the insert itself: the
+            # caller got the trace_id back and a later lookup returned
+            # nothing, so the gap was undetectable and never retried. Tell
+            # the caller the row is missing; telemetry must never break the
+            # proxy path, so this is a signal, not a raise.
+            return None
         return entry.trace_id
 
     def query(
@@ -247,7 +278,20 @@ class RequestTelemetryStore:
         if since_epoch is not None:
             sql += " AND recorded_at >= ?"
             params.append(since_epoch)
-        sql += f" ORDER BY recorded_at DESC LIMIT {int(limit)} OFFSET {int(offset)}"
+        # limit/offset arrive straight from a query string, so `?limit=abc`
+        # made int() raise and 500 the observability endpoint. Clamp to a
+        # sane range and fall back to the default rather than failing.
+        try:
+            safe_limit = int(limit)
+        except (TypeError, ValueError):
+            safe_limit = 100
+        safe_limit = max(1, min(safe_limit, 1000))
+        try:
+            safe_offset = int(offset)
+        except (TypeError, ValueError):
+            safe_offset = 0
+        safe_offset = max(0, safe_offset)
+        sql += f" ORDER BY recorded_at DESC LIMIT {safe_limit} OFFSET {safe_offset}"
         with self._lock:
             rows = self._conn.execute(sql, params).fetchall()
         return [_row_to_dict(r) for r in rows]
@@ -390,7 +434,18 @@ class RequestTelemetryLogger:
         user_id = None
         team = None
         if scope is not None:
-            api_key = getattr(scope, "key", None) if getattr(scope, "kind", "") == "key" else None
+            # NEVER persist the raw credential. Telemetry is the most-read
+            # data in the product (GET /v1/observability/requests and the
+            # trace lookup both return these rows verbatim), so storing
+            # scope.key here handed every Cockpit reader a working API key —
+            # confirmed live: the gateway's own key came back in the
+            # observability response. Keep a non-reversible fingerprint so
+            # "which key made this request" is still answerable.
+            api_key = (
+                _key_fingerprint(getattr(scope, "key", None))
+                if getattr(scope, "kind", "") == "key"
+                else None
+            )
             user_id = getattr(scope, "key", None) if getattr(scope, "kind", "") == "user" else None
             team = getattr(scope, "key", None) if getattr(scope, "kind", "") == "team" else None
 

@@ -297,7 +297,13 @@ class TestTelemetryStore:
         assert len(tables) == 1
 
     def test_store_best_effort_on_failure(self, tmp_path, monkeypatch):
-        """record swallows DB exceptions and returns trace_id."""
+        """record swallows DB exceptions (never breaks the proxy path) but
+        returns None, so the caller can SEE that the row is missing.
+
+        Returning the trace_id on a failed write made the gap undetectable:
+        the caller believed the row existed and a later lookup returned
+        nothing, so it was never retried.
+        """
         conn = sqlite3.connect(str(tmp_path / "ok.db"))
         store = RequestTelemetryStore(str(tmp_path / "ok.db"), connection=conn)
         # Force the insert to fail
@@ -309,7 +315,7 @@ class TestTelemetryStore:
         )
         # Should not raise
         result = store.record(entry)
-        assert result == "t"
+        assert result is None, "a failed insert must not report a trace_id"
 
 
 # ---------------------------------------------------------------------------
@@ -336,7 +342,14 @@ class TestTelemetryLogger:
         assert entry.latency_ms == 242
         assert entry.status == "success"
         assert entry.status_code == 200
-        assert entry.api_key == "sk_test_abc"
+        # The raw key must NEVER be stored: both the observability list
+        # endpoint and the trace lookup return this row verbatim, so
+        # plaintext here made every Cockpit reader a holder of every key
+        # (confirmed live against the running gateway). A non-reversible
+        # fingerprint keeps "which key" answerable.
+        assert entry.api_key != "sk_test_abc"
+        assert "sk_test_abc" not in (entry.api_key or "")
+        assert entry.api_key and entry.api_key.startswith("key:")
 
     def test_from_response_with_cost_calc(self, logger_instance, sample_response):
         """When cost_calc is provided, costs are populated."""
