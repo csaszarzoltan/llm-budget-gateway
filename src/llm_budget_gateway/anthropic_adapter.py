@@ -18,7 +18,6 @@ import time
 import uuid
 from typing import Any
 
-
 # ---------------------------------------------------------------------------
 # inbound: Anthropic Messages -> OpenAI chat completion
 # ---------------------------------------------------------------------------
@@ -130,8 +129,8 @@ def anthropic_to_openai(body: dict) -> dict:
     if max_tokens is not None:
         try:
             out["max_tokens"] = int(max_tokens)
-        except (TypeError, ValueError):
-            raise ValueError("'max_tokens' must be an integer")
+        except (TypeError, ValueError) as exc:
+            raise ValueError("'max_tokens' must be an integer") from exc
 
     system = body.get("system")
     messages: list[dict] = []

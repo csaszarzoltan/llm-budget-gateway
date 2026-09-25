@@ -429,14 +429,14 @@ def create_app(settings: Settings | None = None) -> FastAPI:
                     for event in _parse_sse_lines(raw_line):
                         yield event
             else:
-                try:
-                    async for raw in body_iter:  # type: ignore[union-attr]
-                        for event in _parse_sse_lines(
-                            raw.strip() if isinstance(raw, str) else ""
-                        ):
-                            yield event
-                except Exception:
-                    pass
+                # NO bare `except: pass` here: this generator's exceptions are
+                # what the caller's `event: error` branch reports. Swallowing
+                # them produced a successful-looking truncated stream.
+                async for raw in body_iter:  # type: ignore[union-attr]
+                    for event in _parse_sse_lines(
+                        raw.strip() if isinstance(raw, str) else ""
+                    ):
+                        yield event
 
         def _parse_sse_lines(s: str):
             """Parse one upstream `data:` line into an event dict (or nothing)."""
@@ -467,19 +467,39 @@ def create_app(settings: Settings | None = None) -> FastAPI:
                 ]
             ):
                 yield block
-            async for event in _openai_events():
+            # A mid-stream upstream death must NOT look like a clean stop:
+            # swallowing it and still emitting `message_stop` hands the
+            # client a successful, silently truncated answer. Emit the
+            # protocol's explicit `event: error` and skip message_stop.
+            upstream_failed = False
+            try:
+                async for event in _openai_events():
+                    for block in _emit(
+                        openai_sse_to_anthropic_sse(
+                            event, message_id=message_id, model=model_name
+                        )
+                    ):
+                        yield block
+            except Exception as exc:  # noqa: BLE001 — surfaced to the client
+                upstream_failed = True
+                logger.warning(
+                    "anthropic stream aborted mid-response: %s", exc
+                )
+                yield _format_anthropic_sse(
+                    [
+                        "event: error",
+                        json.dumps(
+                            anthropic_error(502, f"upstream stream failed: {exc}")
+                        ),
+                    ]
+                )
+            if not upstream_failed:
                 for block in _emit(
                     openai_sse_to_anthropic_sse(
-                        event, message_id=message_id, model=model_name
+                        {}, message_id=message_id, model=model_name, emit_done=True
                     )
                 ):
                     yield block
-            for block in _emit(
-                openai_sse_to_anthropic_sse(
-                    {}, message_id=message_id, model=model_name, emit_done=True
-                )
-            ):
-                yield block
 
         return StreamingResponse(_anthropic_stream(), media_type="text/event-stream")
 

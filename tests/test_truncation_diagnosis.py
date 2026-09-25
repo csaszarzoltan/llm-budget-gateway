@@ -16,14 +16,12 @@ import time
 
 import pytest
 
-from llm_budget_gateway.budget_enforcement import BudgetScope
 from llm_budget_gateway.cost_tracking import (
     CostCalculator,
     CostStore,
     CostTracker,
     ModelPrice,
     PriceMap,
-    TokenUsage,
     UsageRecord,
 )
 

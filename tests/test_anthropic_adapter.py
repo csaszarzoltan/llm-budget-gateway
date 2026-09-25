@@ -10,8 +10,6 @@ from __future__ import annotations
 
 import json
 
-import pytest
-
 from llm_budget_gateway import anthropic_adapter as ad
 
 
