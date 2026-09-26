@@ -133,6 +133,16 @@ _MODEL_LEVEL_STATUSES = frozenset({401, 403, 404})
 _TERMINAL_PATTERNS = (
     "is not supported",
     "not supported",
+    # opencode-go answers `400 ModelProtocolUnsupported: "Model does not
+    # support this protocol."` — the model exists but cannot serve the
+    # Anthropic/OpenAI shape. Neither "is not supported" nor "not supported"
+    # matches it ("support" is not "supported"), so the model was retried on
+    # every request forever: 74 attempts in 24h on hermes-default, each
+    # burning a chain slot before falling through to a working target.
+    "does not support",
+    "unsupported",
+    "protocolunsupported",
+    "not compatible with",
     "unavailable for free",
     "model_not_found",
     "does not exist",
@@ -178,6 +188,14 @@ def _cooldown_decision(
     base = int(cooldown_info.get("seconds", 3600))
     dynamic = bool(cooldown_info.get("dynamic", True))
     if code in _REQUEST_LEVEL_STATUSES:
+        # A 400 is only a client error when the body says so. A model that
+        # cannot speak the protocol also answers 400 ("Model does not
+        # support this protocol"), and skipping that parked nothing — the
+        # same model was retried on every request forever. A body that
+        # names the model as the problem is model-level, exactly like the
+        # 401/403/404 branch below.
+        if code == 400 and _is_terminal_unavailability(body_text):
+            return TERMINAL_COOLDOWN_SECONDS, False, True, False
         return 0, False, False, True
     if code in _MODEL_LEVEL_STATUSES:
         if _is_terminal_unavailability(body_text):
