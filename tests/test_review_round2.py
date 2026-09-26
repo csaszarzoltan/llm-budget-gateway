@@ -140,6 +140,13 @@ class TestProviderTimeout:
         promptly (no infinite hang)."""
         settings = _app_settings(tmp_path)
         settings.provider_timeout = 0.05
+        # The idle floor is a SEPARATE clock from provider_timeout (added
+        # 2026-09-25 so a reasoning model's mid-stream thinking gap — 61s
+        # measured on hermes-default — cannot be killed by a 90s route
+        # target). These tests are about the stall -> 502 mapping, so BOTH
+        # budgets must be small; setting only provider_timeout made the
+        # drain wait the full 300s idle budget.
+        settings.stream_idle_timeout = 0.05
         app = create_app(settings=settings)
 
         async def _hang(*args, **kwargs):
@@ -193,6 +200,13 @@ class TestProviderTimeout:
         timeout) must also surface as a 502, not hang the worker."""
         settings = _app_settings(tmp_path)
         settings.provider_timeout = 0.05
+        # The idle floor is a SEPARATE clock from provider_timeout (added
+        # 2026-09-25 so a reasoning model's mid-stream thinking gap — 61s
+        # measured on hermes-default — cannot be killed by a 90s route
+        # target). These tests are about the stall -> 502 mapping, so BOTH
+        # budgets must be small; setting only provider_timeout made the
+        # drain wait the full 300s idle budget.
+        settings.stream_idle_timeout = 0.05
         app = create_app(settings=settings)
 
         async def _chunks():

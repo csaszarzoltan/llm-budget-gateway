@@ -114,20 +114,55 @@ async def test_collect_stream_usage_reads_object_chunks() -> None:
 
 @pytest.mark.asyncio
 async def test_per_target_timeout_reaches_the_stream_leg() -> None:
-    """A target's own timeout must bound chunk-to-chunk silence."""
+    """A target's own timeout RAISES the chunk-to-chunk deadline.
+
+    It must not LOWER it. A route target pins timeout_seconds=90 and the
+    measured mid-stream thinking gap on hermes-default is 61s
+    (scripts/measure_stream_gaps.py: 856 frames, median gap 0.0s, p95
+    0.1s, one 61s gap), so using 90s as a stall deadline killed streams that
+    had already delivered tens of thousands of tokens — the "Claude Code
+    stops and waits" symptom. The deadline is
+    max(target_timeout, Settings.stream_idle_timeout): a target may only
+    make the deadline MORE generous.
+
+    Here the idle budget is 0.2s and the target asks for 0.05s, so the
+    effective deadline is 0.2s — a stall must still fail, and the message
+    must name the deadline that actually applied.
+    """
 
     async def stalling():
         yield {"choices": [{"delta": {"content": "first"}}]}
         await asyncio.sleep(30)  # never resolves within the test
-        yield {"choices": [{"delta": {"content": "late"}}]}
+        yield {"choices": [{"delta": {"content": "late"}}]}  # pragma: no cover
 
     proxy = _proxy()
-    proxy._settings = Settings(provider_timeout=60.0)
+    proxy._settings = Settings(provider_timeout=60.0, stream_idle_timeout=0.2)
 
     with pytest.raises(ProviderTimeoutError) as ei:
-        async for _ in proxy._iter_with_timeout(stalling(), timeout=0.2):
+        async for _ in proxy._iter_with_timeout(stalling(), timeout=0.05):
             pass
+    # the applied deadline is the 0.2s idle floor, NOT the 0.05s the caller
+    # asked for — this is the whole point of the max()
     assert "0.2" in str(ei.value), str(ei.value)
+
+
+@pytest.mark.asyncio
+async def test_a_target_timeout_below_the_idle_floor_cannot_shorten_it() -> None:
+    """The regression in its purest form: a 0.05s target must not turn a
+    0.3s pause into a failure when the idle budget is 300s."""
+
+    async def slow_but_healthy():
+        yield {"choices": [{"delta": {"content": "a"}}]}
+        await asyncio.sleep(0.3)  # a thinking pause, well under 300s
+        yield {"choices": [{"delta": {"content": "b"}}]}
+
+    proxy = _proxy()
+    proxy._settings = Settings(provider_timeout=60.0, stream_idle_timeout=300.0)
+
+    seen = []
+    async for chunk in proxy._iter_with_timeout(slow_but_healthy(), timeout=0.05):
+        seen.append(chunk)
+    assert len(seen) == 2, seen
 
 
 @pytest.mark.asyncio
@@ -177,8 +212,11 @@ async def test_probe_route_survives_an_empty_choices_chunk() -> None:
 
 @pytest.mark.asyncio
 async def test_iter_with_timeout_defaults_to_settings() -> None:
+    """With no timeout argument the deadline is
+    max(provider_timeout, stream_idle_timeout) — the idle floor, not the
+    provider timeout alone."""
     proxy = _proxy()
-    proxy._settings = Settings(provider_timeout=0.2)
+    proxy._settings = Settings(provider_timeout=0.2, stream_idle_timeout=0.2)
     seen: list[float] = []
 
     async def stalling():

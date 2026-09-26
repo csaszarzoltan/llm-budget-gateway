@@ -2719,8 +2719,33 @@ class GatewayProxy:
                     default=str,
                 ) + "\n\n"
                 yielded = 1
+                # The LIVE stream needs the same idle guard as the drained
+                # one. Iterating `agen` directly bypassed
+                # _iter_with_timeout, so a mid-stream pause was unbounded
+                # here while the drained path had a deadline — the exact
+                # asymmetry that made long Claude Code turns hang. A hung
+                # upstream must not hold a worker forever on either leg.
+                idle = float(
+                    getattr(self._settings, "stream_idle_timeout", 300.0)
+                )
+                stall_deadline = max(float(effective_timeout), idle)
+                aiter = agen.__aiter__()  # type: ignore[union-attr]
                 try:
-                    async for chunk in agen:
+                    while True:
+                        try:
+                            chunk = await asyncio.wait_for(
+                                aiter.__anext__(),
+                                timeout=stall_deadline,
+                            )
+                        except StopAsyncIteration:
+                            break
+                        except TimeoutError as stall:
+                            # A mid-stream pause, not a dead first byte:
+                            # raise through the outer handler so the route
+                            # layer can re-drive the remaining candidates.
+                            raise RuntimeError(
+                                f"upstream stream stalled for {stall_deadline}s"
+                            ) from stall
                         chunks.append(chunk)
                         yield "data: " + json.dumps(
                             GatewayProxy._chunk_to_dict(chunk),
@@ -3017,18 +3042,32 @@ class GatewayProxy:
         self, response: object, timeout: float | None = None
     ):
         """Yield each chunk from ``response``, raising ProviderTimeoutError
-        when a chunk does not arrive within ``timeout`` seconds. A healthy
-        stream may run arbitrarily long chunk-to-chunk; only silence past the
-        deadline fails.
+        when a chunk does not arrive within the idle deadline.
 
-        ``timeout`` defaults to ``Settings.provider_timeout``. Callers MUST
-        pass the effective per-target timeout: a route target declaring
-        ``timeout_seconds=5`` against a 60s global used to get 60s here, so
-        the target's own deadline was silently ignored on the stream leg.
+        A healthy stream may run arbitrarily long chunk-to-chunk; only
+        SILENCE past the deadline fails.
+
+        ``timeout`` defaults to ``Settings.provider_timeout`` (the
+        time-to-first-byte budget) and callers MUST pass the effective
+        per-target timeout: a route target declaring ``timeout_seconds=5``
+        against a 60s global used to get 60s here, so the target's own
+        deadline was silently ignored on the stream leg.
+
+        But that value is wrong for a mid-stream pause. Measured on
+        hermes-default 2026-09-25: 856 frames, median inter-chunk gap 0.0s,
+        p95 0.1s, and ONE 61s gap while a reasoning model thought. A target's
+        90s timeout therefore sat ~30s away from killing a stream that had
+        already delivered tens of thousands of tokens — the "Claude Code
+        stops and waits" symptom, and it gets worse with every long turn.
+        So the idle deadline is ``Settings.stream_idle_timeout`` (300s by
+        default), floored at the caller's timeout so a caller asking for
+        MORE than the idle budget still gets it.
         """
-        deadline = (
+        requested = (
             timeout if timeout is not None else self._settings.provider_timeout
         )
+        idle = float(getattr(self._settings, "stream_idle_timeout", 300.0))
+        deadline = max(float(requested), idle)
         aiter = response.__aiter__()  # type: ignore[union-attr]
         while True:
             try:

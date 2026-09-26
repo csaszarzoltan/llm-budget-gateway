@@ -37,6 +37,17 @@ class Settings(BaseSettings):
     #: remaining candidates are skipped and the last one is tried with the
     #: leftover time. Env ``GATEWAY_ROUTE_TIMEOUT_BUDGET``.
     route_timeout_budget: float = 150.0
+    #: How long a STREAM may stay silent between chunks. Deliberately much
+    #: looser than ``provider_timeout``: that value bounds time-to-first-byte,
+    #: whereas a reasoning model legitimately thinks for MINUTES mid-stream
+    #: before the next token. Measured on hermes-default 2026-09-25: 856
+    #: frames, median gap 0.0s, p95 0.1s, but ONE 61s thinking gap — a
+    #: first-token-only reading hides it. Reusing the 90s target timeout as a
+    #: chunk-to-chunk deadline is what made Claude Code "stop and wait" on a
+    #: long turn: the client already held tens of thousands of tokens and
+    #: the gateway killed the stream for a pause. Env
+    #: ``GATEWAY_STREAM_IDLE_TIMEOUT``.
+    stream_idle_timeout: float = 300.0
     #: Dynamic cooldown ladder in seconds. A target that fails repeatedly
     #: (429/5xx/timeout) escalates through this ladder instead of being
     #: parked for a fixed duration: 1m → 5m → 15m → 1h → 2h → 4h → 8h →
