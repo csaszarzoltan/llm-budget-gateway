@@ -17,8 +17,6 @@ param) and not to a body that says the model is gone.
 """
 from __future__ import annotations
 
-import pytest
-
 from llm_budget_gateway.gateway_proxy import (
     _cooldown_decision,
     _is_terminal_unavailability,
