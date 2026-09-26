@@ -201,8 +201,20 @@ def test_format_anthropic_sse_block_shape() -> None:
     done = ad._format_anthropic_sse(
         ad.openai_sse_to_anthropic_sse({}, message_id="m", model="m", emit_done=True)
     )
+    # The closing sequence the adapter owns is TWO events, each its own
+    # block: the tool blocks it opened (none here) and then message_delta +
+    # message_stop. It is TWO because the adapter no longer closes the text
+    # block: the endpoint wrapper opens index 0 and is what closes it, and a
+    # second stop for an already-closed index is a frame the client rejects.
     assert "event: message_stop" in done
-    assert json.loads(done.split("data: ", 1)[1]) == {"type": "message_stop"}
+    frames = [f for f in done.strip().split("\n\n") if f.strip()]
+    assert len(frames) == 2, frames
+    last = frames[-1]
+    assert last.startswith("event: message_stop")
+    assert json.loads(last.split("data: ", 1)[1]) == {"type": "message_stop"}
+    assert frames[0].startswith("event: message_delta")
+    payload = json.loads(frames[0].split("data: ", 1)[1])
+    assert payload["delta"]["stop_reason"] == "end_turn"
 
 
 def test_create_app_serves_v1_messages() -> None:

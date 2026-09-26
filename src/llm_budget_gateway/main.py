@@ -525,8 +525,16 @@ def create_app(settings: Settings | None = None) -> FastAPI:
             # client a successful, silently truncated answer. Emit the
             # protocol's explicit `event: error` and skip message_stop.
             upstream_failed = False
+            # The last upstream chunk carries `finish_reason` and `usage`.
+            # Both are needed for the closing `message_delta`, and the
+            # `[DONE]` sentinel carries neither, so hold on to the last real
+            # event and hand THAT to the done-emitter. Passing `{}` (as this
+            # did) discarded both, which is why every turn closed with
+            # stop_reason=end_turn and output_tokens=0.
+            last_event: dict = {}
             try:
                 async for event in _openai_events():
+                    last_event = event
                     for block in _emit(
                         openai_sse_to_anthropic_sse(
                             event, message_id=message_id, model=model_name
@@ -547,9 +555,19 @@ def create_app(settings: Settings | None = None) -> FastAPI:
                     ]
                 )
             if not upstream_failed:
+                # The text block (index 0) was opened by the wrapper above, so
+                # the wrapper is what must close it — the adapter only tracks
+                # the tool_use blocks it opened itself.
+                for block in _emit(["event: content_block_stop",
+                                    json.dumps(
+                                        {"type": "content_block_stop", "index": 0})]):
+                    yield block
                 for block in _emit(
                     openai_sse_to_anthropic_sse(
-                        {}, message_id=message_id, model=model_name, emit_done=True
+                        last_event,
+                        message_id=message_id,
+                        model=model_name,
+                        emit_done=True,
                     )
                 ):
                     yield block

@@ -372,6 +372,13 @@ def openai_to_anthropic(
     }
 
 
+#: message_id -> set of content-block indexes opened for that message.
+#: The closing sequence must terminate every one of them, not just the text
+#: block: a tool_use block left unterminated is unparseable by the client.
+#: Bounded by the number of in-flight streams and cleared on `emit_done`.
+_open_block_indexes: dict[str, set[int]] = {}
+
+
 def openai_sse_to_anthropic_sse(
     openai_event: dict, *, message_id: str, model: str, emit_done: bool = False
 ) -> list[str]:
@@ -379,9 +386,69 @@ def openai_sse_to_anthropic_sse(
 
     The endpoint wrapper owns ``message_start``/``ping`` framing; this maps
     the per-chunk deltas (text + tool-call streaming).
+
+    On ``emit_done`` the stream must be CLOSED, not just ended. Anthropic
+    terminates a turn with, in order:
+
+        content_block_stop   (once per open block)
+        message_delta        (final stop_reason + real usage)
+        message_stop
+
+    Emitting only ``message_stop`` leaves the client with no completion
+    signal — Claude Code falls back to its own internal timer and the
+    session sits "thinking" forever, which is the stall this gateway
+    introduced. The final usage also has to travel somewhere: `message_start`
+    is emitted before the upstream is read, so its counters are necessarily
+    zero, and a client that never sees the real numbers drifts by the whole
+    conversation.
     """
     lines: list[str] = []
     if emit_done:
+        # Close EVERY block that was opened, each with its own index. Closing
+        # only index 0 left a tool_use block (index 1+) unterminated, and an
+        # unterminated tool_use block is unparseable — Claude Code answers
+        # "The model's tool call could not be parsed (retry also failed)" and
+        # the session never continues, which is the reported stall.
+        # Only the blocks THIS adapter opened. The endpoint wrapper opens the
+        # text block (index 0) and closes it itself; emitting a second stop
+        # for an index that is already closed is a frame the client rejects
+        # ("The response stream was malformed") — verified live, the 0 stop
+        # appeared twice in a tool-less follow-up turn.
+        for block_index in sorted(_open_block_indexes.pop(message_id, set())):
+            lines.append("event: content_block_stop")
+            lines.append(
+                json.dumps({"type": "content_block_stop", "index": block_index})
+            )
+        finish = openai_event.get("choices") or []
+        stop_reason = "end_turn"
+        if finish and isinstance(finish[0], dict):
+            reason = finish[0].get("finish_reason")
+            # OpenAI's vocabulary, mapped to Anthropic's.
+            if reason == "tool_calls" or reason == "function_call":
+                stop_reason = "tool_use"
+            elif reason == "length":
+                stop_reason = "max_tokens"
+            elif reason == "stop":
+                stop_reason = "end_turn"
+        usage = openai_event.get("usage") or {}
+        prompt = int(usage.get("prompt_tokens", 0) or 0)
+        completion = int(usage.get("completion_tokens", 0) or 0)
+        lines.append("event: message_delta")
+        lines.append(
+            json.dumps(
+                {
+                    "type": "message_delta",
+                    "delta": {
+                        "stop_reason": stop_reason,
+                        "stop_sequence": None,
+                    },
+                    "usage": {
+                        "input_tokens": prompt,
+                        "output_tokens": completion,
+                    },
+                }
+            )
+        )
         lines.append("event: message_stop")
         lines.append(json.dumps({"type": "message_stop"}))
         return lines
@@ -409,6 +476,12 @@ def openai_sse_to_anthropic_sse(
         fn = tc.get("function", {}) or {}
         block_index = int(tc.get("index", position - 1) or 0) + 1
         if tc.get("id") or fn.get("name"):
+            # Record the open block so `emit_done` can terminate it. NOT
+            # seeded with index 0: the text block is opened by the endpoint
+            # wrapper, not here, so this adapter has not opened it and must
+            # not close it. Closing an index that was never opened makes the
+            # client reject the frame.
+            _open_block_indexes.setdefault(message_id, set()).add(block_index)
             lines.append("event: content_block_start")
             lines.append(
                 json.dumps(
@@ -482,19 +555,38 @@ def _format_anthropic_sse(lines: list[str]) -> str:
     """
     event_name = ""
     data_parts: list[str] = []
+    blocks: list[str] = []
     for line in lines:
         if line.startswith("event: "):
+            # A new event name means a new SSE block. The previous pairing of
+            # ONE event name with ONE data line assumed a translation never
+            # emitted more than one event per call — but the closing sequence
+            # legitimately emits three (content_block_stop, message_delta,
+            # message_stop). Folding them into a single block produced
+            # `event: message_stop` followed by three bare JSON lines, with
+            # `data:` only on the first: unparseable, and the client lost the
+            # terminator it was waiting for. Flush the previous block first.
+            if event_name or data_parts:
+                blocks.append(_sse_block(event_name, data_parts))
             event_name = line[len("event: "):].strip()
+            data_parts = []
         else:
             data_parts.append(line)
+    if event_name or data_parts:
+        blocks.append(_sse_block(event_name, data_parts))
     # An upstream chunk with no choices yields NO lines — emitting a bare
     # `data: null` for it confuses the client's SSE parser, so produce
     # nothing at all for an empty translation.
+    return "".join(b for b in blocks if b)
+
+
+def _sse_block(event_name: str, data_parts: list[str]) -> str:
+    """One SSE frame: optional `event:` name, then exactly one `data:` line."""
     if not event_name and not data_parts:
         return ""
     data = "\n".join(data_parts) if data_parts else "{}"
-    block = f"event: {event_name}\n" if event_name else ""
-    return f"{block}data: {data}\n\n"
+    head = f"event: {event_name}\n" if event_name else ""
+    return f"{head}data: {data}\n\n"
 
 
 def extract_anthropic_key(headers: dict) -> str:
