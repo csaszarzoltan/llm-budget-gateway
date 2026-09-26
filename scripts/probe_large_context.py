@@ -1,18 +1,20 @@
-"""Reproduce the large-context stall against the LIVE gateway.
+"""Reproduce a large-context request against the LIVE gateway.
 
-Hypothesis: hermes-default pins every target at timeout_seconds=90. A
-Claude Code request carries 100k+ prompt tokens, so the upstream PREFILL
-alone can exceed 90s and the request dies BEFORE the first chunk — while a
-5-token "pong" passes easily. That is why the agent works for me and fails
-for the user.
+RESULT (2026-09-25, hermes-default): context size is NOT the problem. First
+byte at 400 / 20k / 80k / 240k prompt tokens came in 6.3s / 8.7s / 11.4s /
+11.6s — the prefill is fast.
 
-This measures first-byte latency as a function of prompt size, and shows
-whether the gateway's own timeout fires or the upstream is simply slow.
+What actually killed long Claude Code turns was a different clock: the route
+target's timeout_seconds (90) doubled as the chunk-to-chunk stream deadline,
+and a reasoning model's measured mid-stream thinking gap was 61s. See
+scripts/measure_stream_gaps.py and the stream_idle_timeout setting.
+
+Kept as the regression check for that: if a future change makes large-context
+first byte degrade again, this is what catches it.
 """
 from __future__ import annotations
 
 import json
-import sys
 import time
 import urllib.request
 
@@ -56,8 +58,11 @@ def post(path: str, body: dict, stream: bool) -> tuple[int, float, str]:
 
 
 def main() -> None:
-    model = sys.argv[2] if len(sys.argv) > 2 else "@opencode-go/space-bunny-free"
-
+    # The route IS the model: Claude Code sends the alias `hermes-default` in
+    # the `model` field, and the gateway resolves it through the UI-managed
+    # route chain. Passing a concrete provider model here returns 404
+    # "unknown route" — there is no separate route parameter in the body.
+    model = "hermes-default"
     print(f"model alias (the route) = {model}")
     print(f"{'approx_prompt_tokens':>20}  {'status':>6}  {'first_byte_s':>13}  detail")
 
@@ -74,7 +79,6 @@ def main() -> None:
                 "messages": messages,
                 "stream": True,
                 "max_tokens": 16,
-                
             },
             stream=True,
         )
