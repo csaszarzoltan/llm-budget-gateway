@@ -23,9 +23,6 @@ published version, raising when there is none.
 """
 from __future__ import annotations
 
-import os
-import tempfile
-
 import pytest
 
 from llm_budget_gateway.routing_control_plane import RoutingControlPlane
