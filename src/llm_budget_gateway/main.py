@@ -16,6 +16,7 @@ from pathlib import Path
 from fastapi import FastAPI, HTTPException, Request
 from fastapi.responses import JSONResponse, Response, StreamingResponse
 
+from .anthropic_adapter import extract_anthropic_key
 from .budget_enforcement import (
     BudgetEnforcer,
     InMemoryCounterStore,
@@ -369,7 +370,6 @@ def create_app(settings: Settings | None = None) -> FastAPI:
             anthropic_message_start,
             anthropic_to_openai,
             current_ms_id,
-            extract_anthropic_key,
             openai_sse_to_anthropic_sse,
             openai_to_anthropic,
         )
@@ -571,9 +571,16 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         body = await _read_json_body(request)
         if isinstance(body, ProviderResponse):
             return _provider_response(body)
-        try:
-            proxy.resolve_scopes(_bearer_token(request), dict(request.headers))
-        except Exception:
+        headers = dict(request.headers)
+        # `accepts_api_key` + `extract_anthropic_key`, NOT
+        # `_bearer_token` + `resolve_scopes`. Those two only know the static
+        # `Settings.virtual_keys` table and only the Authorization header,
+        # while the message path serves the routing control plane's and the
+        # product console's application keys and reads x-api-key too. On a
+        # natively configured gateway (virtual_keys empty by default) that
+        # made this endpoint answer 401 for the very key it serves —
+        # verified live: /v1/messages 200, this endpoint 401, same key.
+        if not proxy.accepts_api_key(extract_anthropic_key(headers)):
             return _provider_response(
                 GatewayProxy._error_response(
                     401, "invalid or missing api key", str(body.get("model", ""))
@@ -593,6 +600,59 @@ def create_app(settings: Settings | None = None) -> FastAPI:
             return _provider_response(
                 GatewayProxy._error_response(400, str(exc), str(body.get("model", "")))
             )
+
+    @app.post("/v1/messages/count_tokens")
+    async def count_tokens(request: Request) -> Response:
+        """Anthropic's token-counting endpoint, which Claude Code calls every turn.
+
+        Without it the SDK got a 404 each turn and silently fell back to its
+        own estimate (verified in ~/.claude/debug: 4 calls, 4× 404). That
+        estimate is not the gateway's tokenization, so near
+        CLAUDE_CODE_MAX_CONTEXT_TOKENS the client can believe it has room when
+        the real prompt would overflow — and the difference grows with every
+        turn's tool output.
+
+        The estimate is pre-computed, so it is only ever an approximation;
+        the response shape is what matters, and the real number comes back in
+        the provider's usage block on the actual call.
+        """
+        body = await _read_json_body(request)
+        if isinstance(body, ProviderResponse):
+            return _provider_response(body)
+        headers = dict(request.headers)
+        # `accepts_api_key` + `extract_anthropic_key`, NOT
+        # `_bearer_token` + `resolve_scopes`. Those two only know the static
+        # `Settings.virtual_keys` table and only the Authorization header,
+        # while the message path serves the routing control plane's and the
+        # product console's application keys and reads x-api-key too. On a
+        # natively configured gateway (virtual_keys empty by default) that
+        # made this endpoint answer 401 for the very key it serves —
+        # verified live: /v1/messages 200, this endpoint 401, same key.
+        if not proxy.accepts_api_key(extract_anthropic_key(headers)):
+            return _provider_response(
+                GatewayProxy._error_response(
+                    401, "invalid or missing api key", str(body.get("model", ""))
+                )
+            )
+        if not proxy._model_known(str(body.get("model", ""))):
+            return _provider_response(
+                GatewayProxy._error_response(
+                    404,
+                    f"unknown model: {body.get('model', '')}",
+                    str(body.get("model", "")),
+                )
+            )
+        try:
+            estimate = estimator.estimate(body)
+        except ValueError as exc:
+            return _provider_response(
+                GatewayProxy._error_response(400, str(exc), str(body.get("model", "")))
+            )
+        # Anthropic's shape: a bare {"input_tokens": N}. CostEstimate calls it
+        # estimated_input_tokens, and it is the prompt side — which is exactly
+        # what count_tokens is asked for.
+        prompt = int(getattr(estimate, "estimated_input_tokens", 0) or 0)
+        return JSONResponse({"input_tokens": prompt})
 
     @app.get("/v1/observability/requests")
     async def observability_requests(

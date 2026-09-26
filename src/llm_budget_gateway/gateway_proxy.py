@@ -3223,6 +3223,32 @@ class GatewayProxy:
             return "****"
         return f"{api_key[:4]}…{len(api_key)}ch"
 
+    def accepts_api_key(self, api_key: str) -> bool:
+        """Whether ``api_key`` is a key this proxy would SERVE.
+
+        The message path accepts three key stores in order: the routing
+        control plane's application keys, the product console's, and the
+        static `Settings.virtual_keys` table. `resolve_scopes` only knows the
+        third, so any auxiliary endpoint that authenticated with it alone
+        answered 401 for exactly the keys the proxy serves — verified live
+        with the working Claude Code key: /v1/messages 200, /v1/cost-estimates
+        401. Auxiliary endpoints (count_tokens, cost-estimates) must ask
+        here instead, or they stay permanently dead for a natively
+        configured gateway, where `virtual_keys` is empty by default.
+        """
+        if not api_key:
+            return False
+        for store in (self._routing_control_plane, self._product_console):
+            if store is None:
+                continue
+            try:
+                store.authenticate_application(api_key)
+            except PermissionError:
+                continue
+            else:
+                return True
+        return api_key in self._settings.virtual_keys
+
     def resolve_scopes(self, api_key: str, headers: dict) -> list[BudgetScope]:
         """Combine key scope + header-mapped user/team scopes + global scope.
 
@@ -3346,6 +3372,38 @@ class GatewayProxy:
         result = estimator(body)
         return result if isinstance(result, int) else 0
 
+    def _route_alias_known(self, model: str) -> bool:
+        """True when ``model`` names a PUBLISHED route, not a model.
+
+        The message path treats the body's `model` as a route alias first
+        (`_resolve_route_plan` reads it as the alias), so a cockpit route
+        like `hermes-default` is a valid request target even though no price
+        map, fallback config or provider index has ever heard of it.
+        `_model_known` is what every auxiliary endpoint gates on, and without
+        this check those endpoints 404 on exactly the aliases the proxy
+        serves — verified live: /v1/messages 200, /v1/cost-estimates 401
+        then 404 for `hermes-default` with the working key.
+        """
+        if not model:
+            return False
+        # Ask the same stores _resolve_route_plan asks, in the same order, so
+        # the two can never disagree about which names are routes.
+        for store, method in (
+            (self._product_console, "published_route_by_name"),
+            (self._routing_control_plane, "has_published_route"),
+        ):
+            probe = getattr(store, method, None) if store is not None else None
+            if not callable(probe):
+                continue
+            try:
+                found = probe(model)
+            except Exception:
+                continue
+            if found is None or found is False:
+                continue
+            return True
+        return False
+
     def _model_known(self, model: str) -> bool:
         """True when ``model`` is gateway-configured or litellm-known.
 
@@ -3353,6 +3411,8 @@ class GatewayProxy:
         """
         if not model:
             return False
+        if self._route_alias_known(model):
+            return True
         if model in self._settings.pricing_overrides:
             return True
         for cfg in getattr(self._settings, "fallback_configs", []):
