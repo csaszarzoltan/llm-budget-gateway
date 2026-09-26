@@ -23,6 +23,7 @@ class RoutingControlPlane:
         CREATE TABLE IF NOT EXISTS gateway_applications(id TEXT PRIMARY KEY,name TEXT NOT NULL,default_route TEXT NOT NULL,api_key_hash TEXT NOT NULL,created_at TEXT NOT NULL);
         CREATE TABLE IF NOT EXISTS logical_routes(id TEXT PRIMARY KEY,name TEXT UNIQUE NOT NULL,draft_version INTEGER NOT NULL,published_version INTEGER,status TEXT NOT NULL);
         CREATE TABLE IF NOT EXISTS route_versions(route_id TEXT NOT NULL,version INTEGER NOT NULL,config_json TEXT NOT NULL,created_at TEXT NOT NULL,PRIMARY KEY(route_id,version));
+        CREATE TABLE IF NOT EXISTS route_publications(route_id TEXT NOT NULL,version INTEGER NOT NULL,published_at TEXT NOT NULL,PRIMARY KEY(route_id,version));
         CREATE TABLE IF NOT EXISTS route_activity(decision_id TEXT PRIMARY KEY,route_id TEXT NOT NULL,version INTEGER NOT NULL,selected_model TEXT NOT NULL,fallback_reason TEXT,decision_json TEXT NOT NULL,created_at TEXT NOT NULL);
         CREATE TABLE IF NOT EXISTS route_model_spend(route_name TEXT NOT NULL,model TEXT NOT NULL,period TEXT NOT NULL,spend REAL NOT NULL,PRIMARY KEY(route_name,model,period));
         CREATE TABLE IF NOT EXISTS route_model_health(route_name TEXT NOT NULL,model TEXT NOT NULL,healthy INTEGER NOT NULL,updated_at TEXT NOT NULL,PRIMARY KEY(route_name,model));
@@ -155,24 +156,49 @@ class RoutingControlPlane:
 
     def publish_route(self, route_id: str) -> dict[str, Any]:
         """Atomically make the current draft the active production version."""
-        self.get_route(route_id)
+        route = self.get_route(route_id)
         with self.connection:
             self.connection.execute(
                 "UPDATE logical_routes SET published_version=draft_version,status='active' WHERE id=?",
                 (route_id,),
             )
+            # Record WHICH versions have actually served traffic. Without
+            # this history `published_version - 1` is a version number, not
+            # a rollback target: drafts that were never published sit in
+            # between, so a rollback could promote untested config.
+            self.connection.execute(
+                "INSERT INTO route_publications VALUES(?,?,?) "
+                "ON CONFLICT(route_id,version) DO UPDATE SET published_at=excluded.published_at",
+                (route_id, int(route["draft_version"]), _utcnow()),
+            )
         return self.get_route(route_id)
 
     def rollback_route(self, route_id: str) -> dict[str, Any]:
-        """Roll back to the version immediately before the active version."""
+        """Roll back to the most recent version that was ACTUALLY published.
+
+        Walking back by arithmetic (`published - 1`) picked drafts that had
+        never been live, so a rollback could promote a config that had served
+        no production traffic at all — the exact opposite of a rollback's
+        purpose. The publication history is what makes the target real.
+        """
         route = self.get_route(route_id)
         published = route["published_version"]
-        if published is None or int(published) <= 1:
+        previous = None
+        if published is not None:
+            previous = self.connection.execute(
+                "SELECT version FROM route_publications WHERE route_id=? AND version<? "
+                "ORDER BY version DESC LIMIT 1",
+                (route_id, int(published)),
+            ).fetchone()
+        if previous is None:
+            # Covers both "never published at all" and "nothing was ever
+            # published before this version" — same operator-visible state:
+            # there is no earlier production version to return to.
             raise ValueError("no previous published version exists")
         with self.connection:
             self.connection.execute(
                 "UPDATE logical_routes SET published_version=?,status='active' WHERE id=?",
-                (int(published) - 1, route_id),
+                (int(previous[0]), route_id),
             )
         return self.get_route(route_id)
 

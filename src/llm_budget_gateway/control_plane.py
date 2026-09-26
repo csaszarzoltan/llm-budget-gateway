@@ -199,11 +199,19 @@ class ControlPlane:
             "SELECT tenant,id,expires,status,overlap_until FROM keys WHERE secret_hash=?",
             (digest,),
         ).fetchone()
-        if (
-            not row
-            or row["status"] != "active"
-            or (row["expires"] and row["expires"] <= self.clock())
-        ):
+        if not row or row["status"] != "active":
+            return None
+        # `overlap_until` is the rotation grace window: rotate_key sets it on
+        # the OLD key so clients can be rolled to the new secret without an
+        # outage. It was selected here and then never read, so the window was
+        # inert — a rotation cut over instantly no matter what
+        # overlap_seconds said, and every client holding the old secret was
+        # rejected the moment the new key existed. Past the window the key
+        # is dead: `overlap_until` in the past is the only thing that stops
+        # it being valid forever.
+        if row["overlap_until"] and row["overlap_until"] <= self.clock():
+            return None
+        if row["expires"] and row["expires"] <= self.clock():
             return None
         return {"tenant": row["tenant"], "key_id": row["id"]}
 
