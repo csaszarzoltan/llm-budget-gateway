@@ -57,7 +57,13 @@ class _FakeDirect:
         self.calls = 0
     def resolve(self, model):  # direct client knows every model
         return model
-    async def forward(self, model, body, *, kind="chat", timeout=None, stream=False):
+    async def forward(
+        self, model, body, *, kind="chat", timeout=None, stream=False,
+        target_seconds=None,
+    ):
+        # `target_seconds` is the route target's timeout_seconds, forwarded
+        # so provider_direct can bound the handshake without capping the
+        # whole non-streaming request. See split_timeout.
         self.calls += 1
         return 200, self.body, model
 

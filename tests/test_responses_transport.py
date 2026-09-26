@@ -46,7 +46,9 @@ def _client_with(monkeypatch, respond) -> tuple[DirectProviderClient, list[httpx
     """Build a client whose HTTP posts are captured; ``respond`` builds the JSON."""
     calls: list[dict] = []
 
-    async def _post(url, json=None, headers=None):  # noqa: A002
+    async def _post(url, json=None, headers=None, timeout=None):  # noqa: A002
+        # `timeout` is a structured httpx.Timeout, forwarded so a per-target
+        # timeout bounds the handshake without capping the whole request.
         calls.append({"url": url, "json": json, "headers": headers})
         return httpx.Response(200, json=respond(json), request=httpx.Request("POST", url))
 
@@ -676,7 +678,7 @@ def _client_with_url_routing(post_respond) -> tuple[DirectProviderClient, list[d
     """Client stub whose POST answer depends on the URL (per-endpoint behavior)."""
     calls: list[dict] = []
 
-    async def _post(url, json=None, headers=None):  # noqa: A002
+    async def _post(url, json=None, headers=None, timeout=None):  # noqa: A002
         calls.append({"url": url, "json": json})
         status, payload = post_respond(url, json)
         return httpx.Response(status, json=payload, request=httpx.Request("POST", url))

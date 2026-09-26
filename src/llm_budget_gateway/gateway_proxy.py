@@ -2816,14 +2816,35 @@ class GatewayProxy:
 
         status = 502
         data: dict = {}
+        # A non-streaming call's WALL budget must be at least the streaming
+        # idle budget, for the same reason: `timeout` here is the route
+        # target's `timeout_seconds` (90 on every hermes-default target), and
+        # applied to a non-streaming call it covered the upstream's entire
+        # think PLUS the entire answer. A reasoning model that thought for
+        # 100s and then answered perfectly was cut off mid-flight; the
+        # `timeout` error then parked the model for 90s, and every later
+        # request skipped it — measured live in model_cooldowns
+        # (`{"type": "timeout", "seconds": 90}` on muse-spark). That is the
+        # "the agent stops and waits and does not continue" symptom.
+        #
+        # The streaming branch above already uses `max(effective_timeout,
+        # idle)` for its mid-stream deadline. Do the same here: the target's
+        # value still bounds the FIRST byte (inside `forward`, where
+        # `split_timeout` puts it on connect/write), it just no longer caps
+        # the total wall time of a slow think.
+        wall_timeout = max(
+            float(effective_timeout), float(self._settings.stream_idle_timeout)
+        )
         try:
             status, data, served = await asyncio.wait_for(
-                self._direct_client.forward(model, body, kind=kind),  # type: ignore[attr-defined]
-                timeout=effective_timeout,
+                self._direct_client.forward(  # type: ignore[attr-defined]
+                    model, body, kind=kind, target_seconds=effective_timeout
+                ),
+                timeout=wall_timeout,
             )
         except TimeoutError as exc:
             raise ProviderTimeoutError(
-                f"upstream provider timed out after {effective_timeout}s"
+                f"upstream provider timed out after {wall_timeout}s"
             ) from exc
         except Exception as exc:
             status_code = int(getattr(exc, "status_code", 502))
@@ -2960,16 +2981,23 @@ class GatewayProxy:
             # forwarded as-is and 502 upstream. Strip them for embeddings.
             kwargs.pop("stream", None)
             kwargs.pop("stream_options", None)
+        # Same wall-clock floor as the direct leg: `effective_timeout` is
+        # the route target's timeout_seconds, and on a non-streaming call it
+        # would otherwise cap the whole think + answer. Embeddings are never
+        # slow, so the floor costs nothing there.
+        litellm_wall = max(
+            float(effective_timeout), float(self._settings.stream_idle_timeout)
+        )
         try:
             if is_embedding:
                 response = await asyncio.wait_for(
                     litellm.aembedding(**kwargs),
-                    timeout=effective_timeout,
+                    timeout=litellm_wall,
                 )
             else:
                 response = await asyncio.wait_for(
                     litellm.acompletion(**kwargs),
-                    timeout=effective_timeout,
+                    timeout=litellm_wall,
                 )
         except TimeoutError as exc:
             raise ProviderTimeoutError(

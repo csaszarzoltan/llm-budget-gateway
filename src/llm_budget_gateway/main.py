@@ -225,6 +225,11 @@ def create_app(settings: Settings | None = None) -> FastAPI:
                 direct = DirectProviderClient(
                     registry,
                     timeout=settings.provider_timeout,
+                    # The non-streaming read is a STALL budget, not a whole
+                    # request budget: a route target's timeout_seconds (90)
+                    # must bound the handshake, never a slow think. See
+                    # provider_direct.split_timeout.
+                    idle_timeout=settings.stream_idle_timeout,
                     signature_db_path=_sqlite_path(settings.database_url),
                 )
 

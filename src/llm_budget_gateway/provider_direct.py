@@ -660,11 +660,57 @@ def _clamp_chat_max(payload: dict, endpoint) -> None:
         payload["max_completion_tokens"] = eff
 
 
+def split_timeout(target_seconds: float | None, idle_seconds: float) -> httpx.Timeout:
+    """Phase budgets for a non-streaming upstream call.
+
+    A scalar httpx timeout is a WHOLE-REQUEST budget: it caps the read, and
+    the read of a non-streaming call spans the upstream's entire think plus
+    the entire answer. A route target's `timeout_seconds` (90 for every
+    hermes-default target) applied that way killed any answer that thought
+    for longer than 90s, turned it into a `timeout` provider error, and the
+    fallback manager then parked the model — which is the "the agent stops
+    and waits, and does not continue" symptom.
+
+    The streaming leg already solved this: the idle deadline is
+    `max(target_timeout, stream_idle_timeout)`. Do the same here, by phase:
+
+        connect / write / pool  the target's own timeout — these are
+                                handshake and request-body costs, which are
+                                genuinely small and should be bounded
+                                tightly.
+        read                     floored at the streaming idle budget, so a
+                                slow think can never be cut short by a
+                                per-target setting. This is a STALL budget:
+                                it only fires when no bytes arrive at all
+                                for that long, not on total elapsed time.
+
+    ``target_seconds`` of 0/None means "no per-target setting", which then
+    uses the idle budget throughout.
+    """
+    idle = max(float(idle_seconds or 0.0), 1.0)
+    try:
+        target = float(target_seconds or 0.0)
+    except (TypeError, ValueError):
+        target = 0.0
+    tight = target if target > 0 else idle
+    return httpx.Timeout(
+        connect=tight,
+        read=max(idle, target if target > 0 else 0.0),
+        write=tight,
+        pool=tight,
+    )
+
+
 class DirectProviderClient:
     """Resolves models to configured providers and forwards HTTP calls.
 
     One async httpx client per instance (shared connection pool); callers
     are expected to close it via ``aclose()`` when done.
+
+    ``idle_timeout`` is the stall budget used by `split_timeout` for the
+    read phase of a non-streaming call. It is separate from ``timeout`` for
+    exactly the reason documented there: one scalar cannot serve both the
+    handshake and a slow think.
     """
 
     def __init__(
@@ -672,12 +718,22 @@ class DirectProviderClient:
         registry: dict[str, dict[str, Any]] | None = None,
         *,
         timeout: float = 60.0,
+        idle_timeout: float | None = None,
         client: httpx.AsyncClient | None = None,
         signature_db_path: str | None = None,
     ) -> None:
         self._registry: dict[str, ProviderEndpoint] = {}
         self._timeout = timeout
-        self._client = client or httpx.AsyncClient(timeout=timeout)
+        # The stall budget for a non-streaming read. A scalar `timeout` cannot
+        # serve both the handshake and a slow think (see `split_timeout`), so
+        # the client's own default is already split here; per-request
+        # overrides refine it further.
+        self._idle_timeout = float(
+            idle_timeout if idle_timeout is not None else timeout
+        )
+        self._client = client or httpx.AsyncClient(
+            timeout=split_timeout(self._timeout, self._idle_timeout)
+        )
         self._owns_client = client is None
         self._model_index: dict[str, ProviderEndpoint] = {}
         self._thought_signatures: dict[str, str] = {}
@@ -719,6 +775,7 @@ class DirectProviderClient:
             tmp._registry = {}  # type: ignore[attr-defined]
             tmp._model_index = {}  # type: ignore[attr-defined]
             tmp._timeout = self._timeout  # type: ignore[attr-defined]
+            tmp._idle_timeout = self._idle_timeout  # type: ignore[attr-defined]
             tmp._load_registry(registry)
         except Exception:
             raise
@@ -796,6 +853,7 @@ class DirectProviderClient:
         env: dict[str, str] | None = None,
         *,
         timeout: float = 60.0,
+        idle_timeout: float | None = None,
         client: httpx.AsyncClient | None = None,
     ) -> DirectProviderClient:
         """Build a client from ``GATEWAY_PROVIDER_REGISTRY`` in the env.
@@ -818,7 +876,9 @@ class DirectProviderClient:
                     "GATEWAY_PROVIDER_REGISTRY must be a JSON object"
                 )
             registry = parsed
-        return cls(registry, timeout=timeout, client=client)
+        return cls(
+            registry, timeout=timeout, idle_timeout=idle_timeout, client=client
+        )
 
     def resolve(self, model: str) -> ProviderEndpoint:
         """Return the endpoint configured to serve ``model``."""
@@ -1150,6 +1210,7 @@ class DirectProviderClient:
         body: dict[str, Any],
         *,
         kind: str = "chat",
+        target_seconds: float | None = None,
     ) -> tuple[int, dict[str, Any], str]:
         """Forward an allow-listed body to the provider for ``model``.
 
@@ -1158,11 +1219,19 @@ class DirectProviderClient:
         ``UpstreamProviderError`` for non-2xx upstream responses (the proxy
         maps that to HTTP 502). Streaming bodies are NOT handled here — use
         ``forward_stream`` for ``stream: true`` requests.
+
+        ``target_seconds`` is the route target's ``timeout_seconds``. It
+        bounds the HANDSHAKE, never the read: a scalar applied to the whole
+        request killed any answer that thought for longer than the target's
+        value (90s on every hermes-default target), and the fallback manager
+        then parked the model — see `split_timeout`.
         """
         endpoint = self.resolve(model)
         if kind == "chat" and getattr(endpoint, "api_mode", "") == "codex_responses":
             try:
-                return await self._forward_responses(endpoint, model, body)
+                return await self._forward_responses(
+                    endpoint, model, body, target_seconds=target_seconds
+                )
             except UpstreamProviderError as exc:
                 if not _responses_endpoint_unavailable(exc):
                     raise
@@ -1204,7 +1273,15 @@ class DirectProviderClient:
         tool_name_map = _collect_tool_name_map(payload)
         try:
             response = await self._client.post(
-                url, json=payload, headers=endpoint.headers()
+                url,
+                json=payload,
+                headers=endpoint.headers(),
+                timeout=split_timeout(
+                    target_seconds
+                    if target_seconds is not None
+                    else self._timeout,
+                    self._idle_timeout,
+                ),
             )
         except httpx.TimeoutException as exc:
             raise _transport_error(endpoint.name, exc, "timeout") from exc
@@ -1234,6 +1311,8 @@ class DirectProviderClient:
         endpoint: ProviderEndpoint,
         model: str,
         body: dict[str, Any],
+        *,
+        target_seconds: float | None = None,
     ) -> tuple[int, dict[str, Any], str]:
         """Chat-completions in → Codex /Responses API out (translated).
 
@@ -1305,7 +1384,17 @@ class DirectProviderClient:
         url = self._with_auth_query(endpoint.url("/responses"), endpoint)
         headers = endpoint.headers()
         try:
-            response = await self._client.post(url, json=payload, headers=headers)
+            response = await self._client.post(
+                url,
+                json=payload,
+                headers=headers,
+                timeout=split_timeout(
+                    target_seconds
+                    if target_seconds is not None
+                    else self._timeout,
+                    self._idle_timeout,
+                ),
+            )
         except httpx.TimeoutException as exc:
             raise _transport_error(endpoint.name, exc, "timeout") from exc
         except httpx.HTTPError as exc:

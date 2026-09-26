@@ -173,7 +173,16 @@ class TestProviderTimeout:
     async def test_forward_hung_upstream_raises_provider_timeout(self, mocker) -> None:
         """MEDIUM B unit: forward surfaces a ProviderTimeoutError when the
         upstream does not respond within Settings.provider_timeout."""
-        settings = Settings(virtual_keys={"sk-test": "key1"}, provider_timeout=0.05)
+        # `stream_idle_timeout` is the FLOOR for a non-streaming call's wall
+        # budget, exactly as it is for the stream leg: a per-target 90s must
+        # not kill an answer that is still thinking. So a test that wants a
+        # fast timeout has to lower the floor too, not just provider_timeout —
+        # otherwise it waits out the real 300s idle budget (it did: 300.10s).
+        settings = Settings(
+            virtual_keys={"sk-test": "key1"},
+            provider_timeout=0.05,
+            stream_idle_timeout=0.05,
+        )
         proxy = GatewayProxy(
             settings=settings,
             cost_tracker=Mock(),
