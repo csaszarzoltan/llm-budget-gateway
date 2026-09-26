@@ -229,9 +229,11 @@ class RoutingControlPlane:
             raise ValueError("request capabilities do not satisfy route capabilities")
         local = now.astimezone(ZoneInfo(config["timezone"]))
         schedule = config["schedule"]
-        in_schedule = (
-            local.weekday() in schedule["weekdays"]
-            and schedule["start"] <= local.strftime("%H:%M") < schedule["end"]
+        # `_time_in_window` rather than a raw start<=now<end comparison: an
+        # overnight schedule (22:00-06:00) could never be true across
+        # midnight, so the scheduled premium model was silently unreachable.
+        in_schedule = local.weekday() in schedule["weekdays"] and _time_in_window(
+            local.strftime("%H:%M"), schedule["start"], schedule["end"]
         )
         path = [
             {
@@ -519,6 +521,20 @@ def _canonical(value: dict[str, Any]) -> str:
     return json.dumps(value, sort_keys=True, separators=(",", ":"))
 
 
+def _time_in_window(now_hm: str, start: str, end: str) -> bool:
+    """True when ``now_hm`` (``"HH:MM"``) falls inside ``[start, end)``.
+
+    Handles the OVERNIGHT case: when ``start > end`` the window wraps past
+    midnight (22:00-06:00), so it is open from ``start`` to 23:59 and again
+    from 00:00 to ``end``. The plain ``start <= now < end`` comparison can
+    never be true for such a pair, which made every overnight window
+    permanently closed — the scheduled premium model silently never used.
+    """
+    if start <= end:
+        return start <= now_hm < end
+    return now_hm >= start or now_hm < end
+
+
 def _within_window(local: datetime, window: dict[str, Any]) -> bool:
     """True when ``local`` (timezone-aware) falls inside a service window.
 
@@ -526,16 +542,25 @@ def _within_window(local: datetime, window: dict[str, Any]) -> bool:
     The window is evaluated in the route's own timezone, so the caller must
     pass a ``local`` datetime already converted to that timezone. A missing
     window key means "always allowed".
+
+    An overnight window (``start > end``) belongs to the day it OPENS on: a
+    22:00-06:00 window listed for Monday covers Monday 22:00 through Tuesday
+    06:00, so the post-midnight hours are checked against the previous day's
+    entry. Without that, a Monday-evening window would also apply to
+    Tuesday morning even when Tuesday is not listed.
     """
     if not isinstance(window, dict):
         return True
     weekdays = window.get("weekdays", list(range(7)))
     start = str(window.get("start", "00:00"))
     end = str(window.get("end", "23:59"))
-    return (
-        local.weekday() in weekdays
-        and start <= local.strftime("%H:%M") < end
-    )
+    now_hm = local.strftime("%H:%M")
+    if start <= end:
+        return local.weekday() in weekdays and start <= now_hm < end
+    if now_hm >= start:
+        return local.weekday() in weekdays
+    # before `end` means the window opened yesterday
+    return (local.weekday() - 1) % 7 in weekdays
 
 
 def _utcnow() -> str:
