@@ -330,6 +330,19 @@ def _responses_endpoint_unavailable(exc: UpstreamProviderError) -> bool:
     return False
 
 
+#: How long a learned "this model is on /chat/completions" decision is trusted.
+#: Deliberately shorter than a sticky session: a provider that starts serving
+#: the other endpoint should be re-learned, not kept on the slower path.
+#: 2026-09-26: deepseek moved onto /responses while glm stayed on /chat, so
+#: this class of decision is not permanent even in principle.
+_ENDPOINT_AFFINITY_TTL_SECONDS = 3600.0
+
+#: Hard cap on remembered pairs. A gateway that serves many providers and
+#: thousands of models would otherwise accumulate one row per model forever;
+#: the map is a cache, so dropping the oldest is correct.
+_ENDPOINT_AFFINITY_MAX = 2048
+
+
 _REASONING_ECHO_MODEL_SUBS = ("deepseek", "kimi", "mimo")
 
 
@@ -754,6 +767,10 @@ class DirectProviderClient:
         signature_db_path: str | None = None,
     ) -> None:
         self._registry: dict[str, ProviderEndpoint] = {}
+        # model -> (api_mode, monotonic ts) for endpoint affinity learned from
+        # a /responses refusal, so a chat-only model stops paying the dead
+        # call on every request. See _ENDPOINT_AFFINITY_TTL_SECONDS.
+        self._endpoint_affinity: dict[str, tuple[str, float]] = {}
         self._timeout = timeout
         # The stall budget for a non-streaming read. A scalar `timeout` cannot
         # serve both the handshake and a slow think (see `split_timeout`), so
@@ -1220,6 +1237,29 @@ class DirectProviderClient:
         }[kind]
         return self._with_auth_query(endpoint.url(path), endpoint)
 
+    # -- learned endpoint affinity ---------------------------------------
+
+    def _remember_endpoint(self, model: str, api_mode: str) -> None:
+        """Record which endpoint served ``model`` (bounded, oldest dropped)."""
+        self._endpoint_affinity[model] = (api_mode, time.monotonic())
+        if len(self._endpoint_affinity) > _ENDPOINT_AFFINITY_MAX:
+            # insertion-ordered dict: the leading keys are the oldest
+            for stale in list(self._endpoint_affinity)[
+                : len(self._endpoint_affinity) - _ENDPOINT_AFFINITY_MAX
+            ]:
+                self._endpoint_affinity.pop(stale, None)
+
+    def _known_endpoint(self, model: str) -> str | None:
+        """Return the learned api_mode for ``model``, or None if unknown/stale."""
+        entry = self._endpoint_affinity.get(model)
+        if entry is None:
+            return None
+        api_mode, ts = entry
+        if time.monotonic() - ts > _ENDPOINT_AFFINITY_TTL_SECONDS:
+            self._endpoint_affinity.pop(model, None)
+            return None
+        return api_mode
+
     @staticmethod
     def _with_auth_query(url: str, endpoint: ProviderEndpoint) -> str:
         """Append ``?key=`` for query-auth providers.
@@ -1258,7 +1298,20 @@ class DirectProviderClient:
         then parked the model — see `split_timeout`.
         """
         endpoint = self.resolve(model)
-        if kind == "chat" and getattr(endpoint, "api_mode", "") == "codex_responses":
+        # A learned refusal (see _ENDPOINT_AFFINITY_TTL_SECONDS) short-circuits
+        # the /responses attempt: it costs ~0.48s on opencode-go and can never
+        # succeed, so repeating it per request is pure overhead.
+        _learned = self._known_endpoint(model)
+        if (
+            kind == "chat"
+            and getattr(endpoint, "api_mode", "") == "codex_responses"
+            and _learned == "chat_completions"
+        ):
+            logger.debug(
+                "direct forward %s: /chat/completions preferred from learned "
+                "endpoint affinity", model,
+            )
+        elif kind == "chat" and getattr(endpoint, "api_mode", "") == "codex_responses":
             try:
                 return await self._forward_responses(
                     endpoint, model, body, target_seconds=target_seconds
@@ -1272,6 +1325,8 @@ class DirectProviderClient:
                     model,
                     exc.status_code,
                 )
+                # Learn it, so the next request skips the dead endpoint.
+                self._remember_endpoint(model, "chat_completions")
                 # Fall through to the chat path below with the ORIGINAL body —
                 # this stays one candidate attempt (no cooldown, no chain skip).
         url = self._request_url(endpoint, kind)
