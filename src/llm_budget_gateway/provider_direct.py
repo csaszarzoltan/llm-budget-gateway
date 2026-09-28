@@ -282,6 +282,25 @@ def _chat_tool_choice_to_responses(choice: Any) -> Any:
     return choice
 
 
+#: Upstream texts that mean "this model has no /responses endpoint", as
+#: opposed to a genuine request error. opencode-go phrases the same refusal
+#: two ways depending on the model family (see
+#: ``scripts/probe_responses_support.py``, 14-model sweep 2026-09-26):
+#:
+#:   deepseek-*   both endpoints 200
+#:   glm-5.2/5.3   /chat 200, /responses 400 ModelProtocolUnsupported
+#:   space-bunny-free  /chat 200, /responses 400 ModelProtocolUnsupported
+#:
+#: Only the 503 form was matched, so the 400 models were never retried — and
+#: because that text also sits in ``_TERMINAL_PATTERNS`` they were parked for
+#: 30 days as "retired / unavailable" while working fine on /chat/completions.
+_RESPONSES_ENDPOINT_REFUSALS = (
+    "endpoint is unavailable",   # 503, deepseek/opencode-go family
+    "modelprotocolunsupported",  # 400, glm / space-bunny family
+    "does not support this protocol",
+)
+
+
 def _responses_endpoint_unavailable(exc: UpstreamProviderError) -> bool:
     """True when /responses says the model has no endpoint there (same-attempt retry).
 
@@ -289,14 +308,26 @@ def _responses_endpoint_unavailable(exc: UpstreamProviderError) -> bool:
     answers the other with ``503 {"type":"server_error","message":"Upstream
     request failed: Endpoint is unavailable."}`` in ~0.4s. The provider-wide
     ``api_mode=codex_responses`` sends chat-capable models (glm, mimo, kimi,
-    qwen, …) down the dead path. Narrow match on purpose: any other 5xx
-    (e.g. a real outage, or minimax-m2.7 which is dead on BOTH endpoints)
-    must surface so the route chain can fail over to the next candidate.
+    qwen, …) down the dead path.
+
+    Live 2026-09-26: the same refusal also arrives as
+    ``400 ModelProtocolUnsupported`` for the glm family and for
+    space-bunny-free — measured alive on /chat/completions with the identical
+    credential, so retrying the other endpoint is what makes them work.
+
+    Narrow match on purpose: any other 5xx (e.g. a real outage, or
+    minimax-m2.7 which is dead on BOTH endpoints) and any 400 that is a real
+    client error (unknown parameter, bad schema) must surface so the route
+    chain can fail over to the next candidate.
     """
-    return (
-        exc.status_code == 503
-        and "endpoint is unavailable" in (exc.body or "").lower()
-    )
+    body = (exc.body or "").lower()
+    if not body:
+        return False
+    if exc.status_code == 503:
+        return "endpoint is unavailable" in body
+    if exc.status_code == 400:
+        return any(pat in body for pat in _RESPONSES_ENDPOINT_REFUSALS)
+    return False
 
 
 _REASONING_ECHO_MODEL_SUBS = ("deepseek", "kimi", "mimo")

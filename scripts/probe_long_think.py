@@ -37,7 +37,7 @@ PROMPT = (
 
 
 def main() -> int:
-    print(f"route=hermes-default  (target timeout_seconds=90, idle=300)")
+    print("route=hermes-default  (target timeout_seconds=90, idle=300)")
     print(f"prompt ~{len(PROMPT) // 4} chars\n")
     for attempt in (1, 2):
         body = {
