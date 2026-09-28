@@ -1957,7 +1957,19 @@ class DirectProviderClient:
         chunk.
         """
         endpoint = self.resolve(model)
-        if kind == "chat" and getattr(endpoint, "api_mode", "") == "codex_responses":
+        # Same learned affinity as `forward` (see _ENDPOINT_AFFINITY_TTL_SECONDS):
+        # Hermes streams, so without this every streamed request re-pays the
+        # ~0.48s call to an endpoint that answered 400 the first time.
+        if (
+            kind == "chat"
+            and getattr(endpoint, "api_mode", "") == "codex_responses"
+            and self._known_endpoint(model) == "chat_completions"
+        ):
+            logger.debug(
+                "direct stream %s: /chat/completions preferred from learned "
+                "endpoint affinity", model,
+            )
+        elif kind == "chat" and getattr(endpoint, "api_mode", "") == "codex_responses":
             yielded = 0
             try:
                 async for chunk in self._stream_responses(endpoint, model, body):
@@ -1968,6 +1980,8 @@ class DirectProviderClient:
                     # Partial stream already reached the client: mid-stream
                     # death belongs to the chain's MidStreamFailure recovery,
                     # never to a same-attempt endpoint switch (mixed stream).
+                    # Not learned either: a mid-stream death says nothing
+                    # about which endpoint serves the model.
                     raise
                 logger.info(
                     "direct stream %s: /responses has no endpoint (%s), "
@@ -1975,6 +1989,7 @@ class DirectProviderClient:
                     model,
                     exc.status_code,
                 )
+                self._remember_endpoint(model, "chat_completions")
             else:
                 return
         url = self._request_url(endpoint, kind)
