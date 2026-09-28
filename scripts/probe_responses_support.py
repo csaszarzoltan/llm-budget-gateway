@@ -114,7 +114,7 @@ def main() -> int:
 
     print(
         f"\n  both: {same}   chat-only: {only_chat}   "
-        f"responses-only: {only_responses}   neither: {only}"
+        f"responses-only: {only_responses}   neither: {neither}"
     )
     if only_chat:
         print(
