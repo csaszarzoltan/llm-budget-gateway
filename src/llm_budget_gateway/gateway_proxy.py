@@ -756,8 +756,16 @@ class GatewayProxy:
 
         try:
             response = await self._forward_with_fallback(model, body, api_key, headers)
-        except ProviderTimeoutError:
-            logger.warning("provider timeout request=%s model=%s", request_id, model)
+        except ProviderTimeoutError as exc:
+            # `exception`, not `warning`: four 502s appeared on the `smart`
+            # route with latency=0, tokens=0, finish_reason=None, and the
+            # journal held nothing but health lines for those minutes — the
+            # cause was unrecoverable after the fact. The exception type is
+            # in the message so the line is answerable without a traceback.
+            logger.exception(
+                "provider timeout request=%s model=%s type=%s detail=%s",
+                request_id, model, type(exc).__name__, exc,
+            )
             err_resp = self._error_response(502, "upstream provider timed out", model)
             self._emit_telemetry(
                 trace_id=request_id,
@@ -778,10 +786,13 @@ class GatewayProxy:
             )
             return err_resp
         except Exception as exc:
-            logger.warning(
-                "provider error request=%s model=%s: %s",
+            # See the ProviderTimeoutError branch above: a bare `warning` here
+            # is what made the `smart` 502s undiagnosable.
+            logger.exception(
+                "provider error request=%s model=%s type=%s detail=%s",
                 request_id,
                 model,
+                type(exc).__name__,
                 exc,
             )
             err_resp = self._error_response(502, "upstream provider error", model)
