@@ -168,6 +168,32 @@ _TIMEOUT_COOLDOWN_SECONDS = 60
 _LAST_CANDIDATE_RESERVE = 30.0
 
 
+def _candidate_budget(chain_budget: float, candidate_count: int) -> float:
+    """How much of the chain budget ONE candidate may hold.
+
+    The chain budget caps the whole route, but it is applied per candidate:
+    a candidate that stalls for its full window must not decide that the
+    candidates behind it are unreachable. Each one still gets a bounded
+    attempt, sized so a full chain of them cannot multiply the request's
+    worst-case wait without limit — the cap keeps the total roughly at the
+    configured budget for a typical chain while never returning less than
+    one target's own timeout.
+
+    Measured on the `smart` route (5 candidates, budget 115s): the old
+    global clock let `mimo-v2.6-pro` take all 115s and skip the other four.
+    """
+    if candidate_count <= 1:
+        return chain_budget
+    # A chain of N candidates each allowed the full budget would take N× as
+    # long, which is exactly what the budget exists to prevent. Share it, but
+    # never below a floor: a single candidate still deserves a real window,
+    # and a route whose targets all time out must not collapse to a token
+    # attempt per target.
+    shared = chain_budget / candidate_count
+    floor = min(_LAST_CANDIDATE_RESERVE, chain_budget)
+    return max(shared, floor)
+
+
 def _is_terminal_unavailability(body: str | None) -> bool:
     """True when an upstream body says the model itself is gone."""
     low = (body or "").lower()
@@ -1432,20 +1458,43 @@ class GatewayProxy:
         for index, candidate in enumerate(candidates):
             is_last = index + 1 >= len(candidates)
             remaining = 0
-            # Chain budget. A capped attempt still consumes its whole timeout,
-            # so the budget can only be checked BEFORE an attempt — by the time
-            # the last candidate runs it may already be spent. Middle candidates
-            # are therefore SKIPPED once it is gone, but the last one must still
-            # get a real attempt: handing it 0.01s made the tail fail instantly
-            # and turned a recoverable chain into a 502 after the client had
-            # already waited three minutes (observed 2026-09-19: budget 115s,
-            # 175.6s elapsed, four candidates skipped, 0.01s on the tail).
-            elapsed = time.perf_counter() - chain_started
-            remaining_budget = chain_budget - elapsed
-            if elapsed >= chain_budget and not is_last:
-                fallback = f"chain_budget_{int(chain_budget)}s"
+            # Chain budget — PER CANDIDATE, not per chain.
+            #
+            # It used to be a single clock started once for the whole chain:
+            # whoever ran first spent it, and every later candidate was
+            # SKIPPED without an attempt. Measured 2026-09-29, three `smart`
+            # route 502s (10:33:13, 10:36, 10:41), all with this cause:
+            #
+            #   10:32:43 model=@opencode-go/mimo-v2.6-pro timed out after 90s
+            #   10:32:43 chain budget 115.0s spent (115.0s)
+            #           skipping @opencode-go/muse-spark-1.2-contributor
+            #   10:33:13 model=@xiaomi/mimo-v2.6-pro chain budget spent,
+            #           no timeout retry 1/3  ->  502
+            #
+            # `muse-spark` and the xiaomi fallback were not slow and not
+            # broken — they were never called. A 90s stall on one candidate
+            # disqualified the rest of the chain, so a route with five
+            # targets had three of them unreachable by construction.
+            #
+            # The budget's actual job is to stop ONE candidate from holding
+            # the request open indefinitely, which is a per-attempt concern.
+            # Each candidate now gets its own window; the tail keeps its
+            # reserve so it can never be handed a token timeout (the
+            # 2026-09-19 incident: budget 115s, 175.6s elapsed, four
+            # candidates skipped, 0.01s on the tail, 502 after the client
+            # had waited three minutes).
+            candidate_budget = _candidate_budget(chain_budget, len(candidates))
+            # The candidate's window starts when the candidate starts, not
+            # when the chain started. Measuring from `chain_started` made
+            # `remaining_budget` negative for every candidate behind the
+            # first, and `min(target_timeout, 0.0)` left the target's own
+            # 120s timeout in place — the window existed but did not apply.
+            candidate_started = time.perf_counter()
+            elapsed = candidate_started - chain_started
+            remaining_budget = max(candidate_budget - 0.0, 0.0)
+            if elapsed >= chain_budget:
                 logger.info(
-                    "route=%s chain budget %ss spent (%.1fs) skipping %s "
+                    "route=%s chain budget %ss spent (%.1fs) after %s "
                     "request=%s",
                     route_name,
                     chain_budget,
@@ -1453,7 +1502,18 @@ class GatewayProxy:
                     candidate,
                     request_id,
                 )
-                continue
+                if not is_last:
+                    # Out of chain budget but this candidate has its own
+                    # window — keep going rather than 502 on a route whose
+                    # remaining targets have never been tried.
+                    logger.info(
+                        "route=%s continuing past chain budget for %s "
+                        "(per-candidate window %.1fs) request=%s",
+                        route_name,
+                        candidate,
+                        candidate_budget,
+                        request_id,
+                    )
             if not from_plane:
                 try:
                     remaining = self._cost_tracker.model_in_cooldown(
@@ -1480,14 +1540,21 @@ class GatewayProxy:
             target_timeout, target_retries = self._target_timeout_and_retries(
                 route, candidate, from_plane
             )
-            # Cap the per-target timeout by the remaining chain budget so a
-            # single target cannot burn the whole budget (a 120-180s target
-            # would still blow past the client timeout).
+            # Cap the per-target timeout by what is left of THIS candidate's
+            # window, so a single target cannot hold the request open
+            # indefinitely (a 120-180s target would blow past the client
+            # timeout). The window restarts per candidate, so this is a bound
+            # on one attempt rather than a verdict on the candidates behind.
             if target_timeout is not None:
                 if is_last:
+                    # The reserve exists so the tail is never handed a token
+                    # timeout — but it must not exceed the candidate's own
+                    # window either, or the "reserve" becomes the budget.
                     target_timeout = min(
                         target_timeout,
-                        max(remaining_budget, _LAST_CANDIDATE_RESERVE),
+                        max(remaining_budget, min(
+                            _LAST_CANDIDATE_RESERVE, candidate_budget
+                        )),
                     )
                 else:
                     target_timeout = min(target_timeout, remaining_budget)
@@ -1511,7 +1578,7 @@ class GatewayProxy:
                     target_timeout=target_timeout,
                     is_last=is_last,
                     request_id=request_id,
-                    chain_deadline=chain_started + chain_budget,
+                    chain_deadline=candidate_started + candidate_budget,
                 )
                 if retry_succeeded:
                     served = candidate
@@ -1767,7 +1834,7 @@ class GatewayProxy:
                 target_timeout=target_timeout,
                 is_last=is_last,
                 request_id=request_id,
-                chain_deadline=chain_started + chain_budget,
+                chain_deadline=candidate_started + candidate_budget,
             )
             if transient_succeeded:
                 served = candidate

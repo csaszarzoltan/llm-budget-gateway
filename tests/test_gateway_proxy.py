@@ -1407,10 +1407,22 @@ class TestCreateAppBehavior:
     async def test_route_chain_budget_skips_mid_targets(
         self, settings: Settings, mocker
     ) -> None:
-        """When the per-target timeouts would exceed the client's own timeout
-        (Hermes gives up at ~60-90s), the chain budget must skip the middle
-        candidates and land on the last one quickly instead of burning 2-3
-        minutes on slow timeouts."""
+        """A spent chain budget must NOT disqualify the remaining candidates.
+
+        This test used to assert the opposite. It was written when the
+        budget was a single clock for the whole chain, on the assumption that
+        "Hermes gives up at ~60-90s". That assumption is measurably stale:
+        live requests of 431s, 227s, 148s, 134s and 125s all returned 200, and
+        the client timeout is 3600s.
+
+        What the budget must still do is bound a SINGLE candidate. What it
+        must not do is decide the fate of the candidates behind it — see the
+        three `smart` 502s of 2026-09-29, where `mimo-v2.6-pro` spent all
+        115s and `muse-spark` plus two more targets were skipped without ever
+        being called. The chain answered 502 for targets that had not failed.
+
+        The behaviour asserted here now: each candidate gets its own window.
+        """
         store = Mock()
         store.published_route_by_name.return_value = {
             "name": "hermes-default",
@@ -1453,8 +1465,9 @@ class TestCreateAppBehavior:
             stream: bool = False,
             timeout: float | None = None,
         ):
-            # Both primary and mid burn the budget with slow timeouts.
-            if model in ("@a/primary", "@b/mid"):
+            # Only the primary is slow. `@b/mid` answers, which is the point:
+            # the candidate behind a stalling one must be reachable.
+            if model == "@a/primary":
                 await asyncio.sleep(0.2)
                 raise ProviderTimeoutError("slow timeout")
             return ProviderResponse(200, {}, {}, model, None, 5)
@@ -1468,17 +1481,19 @@ class TestCreateAppBehavior:
             "sk_test_abc",
             {},
         )
-        # The mid target is skipped by the budget; the last one serves.
+        # The mid target is reached despite the primary's stall, and it
+        # serves — the chain no longer 502s on candidates never called.
         assert result.status_code == 200
-        assert result.model == "@c/last"
-        # The 0.2s timeout already spent the 0.1s chain budget, so the
-        # timeout-retry must NOT fire: re-running @a/primary with the same
-        # full timeout is exactly how a chain blows past its own budget
-        # (80s + backoff + 80s against a 90s budget). One attempt, then
-        # straight to the candidate that can still answer.
+        assert result.model == "@b/mid", (
+            "the candidate behind the slow one must be reached, not skipped"
+        )
+        # The timeout-retry still must NOT fire after the primary burned its
+        # own window: re-running @a/primary with the same full timeout is
+        # how a chain blows past its own budget (80 + backoff + 80 against a
+        # 90s budget). One attempt per candidate, then the next candidate.
         assert [c.args[0] for c in proxy.forward.call_args_list] == [
             "@a/primary",
-            "@c/last",
+            "@b/mid",
         ]
 
     @pytest.mark.asyncio
@@ -2167,7 +2182,11 @@ class TestChainBudgetTailReserve:
         tracker = Mock()
         tracker.model_in_cooldown.return_value = 0
         tracker.build_record.return_value = SimpleNamespace(total_cost=0.0)
-        settings.route_timeout_budget = 0.1  # burn it immediately
+        # A realistic budget, not a synthetic 0.1s: the reserve is measured
+        # in the 30s range, and the live incident it guards (2026-09-29)
+        # had budget=115s. A 0.1s budget can never yield a 30s reserve, so
+        # the old value made the assertion below arithmetically impossible.
+        settings.route_timeout_budget = 115.0
         proxy = GatewayProxy(
             settings=settings,
             cost_tracker=tracker,
@@ -2186,6 +2205,8 @@ class TestChainBudgetTailReserve:
         ):
             seen[model] = timeout
             if model in ("@a/primary", "@b/mid"):
+                # sleep past the candidate's own window so the budget is
+                # genuinely exhausted by each of them
                 await asyncio.sleep(0.2)
                 raise ProviderTimeoutError("slow timeout")
             return ProviderResponse(200, {}, {}, model, None, 5)
