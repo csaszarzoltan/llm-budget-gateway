@@ -1183,3 +1183,77 @@ async def test_stream_partial_text_then_empty_finish_no_raise():
     assert any(
         c["choices"][0]["delta"].get("content") == "hello" for c in chunks
     )
+
+
+# ---------------------------------------------------------------------------
+# reasoning_tokens mapping: Codex usage.output_tokens_details.reasoning_tokens
+# must reach (a) Hermes normalize_usage via completion_tokens_details,
+# (b) the gateway cost path via top-level reasoning_tokens. Without this the
+# thinking is invisible on both sides (Hermes deterministic-empty guard sees
+# "no generation").
+# ---------------------------------------------------------------------------
+
+def _usage_with_reasoning() -> dict:
+    return {
+        "id": "resp_r1",
+        "object": "response",
+        "status": "completed",
+        "model": "muse-spark-1.2-contributor",
+        "output": [
+            {"type": "message", "id": "msg_1", "role": "assistant",
+             "status": "completed",
+             "content": [{"type": "output_text", "text": "hi", "annotations": []}]},
+        ],
+        "usage": {
+            "input_tokens": 54,
+            "output_tokens": 115,
+            "total_tokens": 169,
+            "output_tokens_details": {"reasoning_tokens": 72},
+        },
+    }
+
+
+def test_responses_reasoning_tokens_mapped_to_usage():
+    from llm_budget_gateway.provider_direct import _codex_reasoning_tokens
+    payload = _usage_with_reasoning()
+    assert _codex_reasoning_tokens(payload["usage"]) == 72
+    chat = _responses_to_chat(payload, "muse-spark-1.2-contributor")
+    usage = chat["usage"]
+    assert usage["reasoning_tokens"] == 72
+    assert usage["completion_tokens_details"]["reasoning_tokens"] == 72
+    assert usage["completion_tokens"] == 115
+
+
+def test_codex_reasoning_tokens_absent_is_zero():
+    from llm_budget_gateway.provider_direct import _codex_reasoning_tokens
+    assert _codex_reasoning_tokens({}) == 0
+    assert _codex_reasoning_tokens(None) == 0
+    assert _codex_reasoning_tokens({"output_tokens_details": "bogus"}) == 0
+    chat = _responses_to_chat(_reasoning_only_payload(), "muse-spark-1.2-contributor")
+    assert chat["usage"]["reasoning_tokens"] == 0
+
+
+@pytest.mark.asyncio
+async def test_stream_final_usage_carries_reasoning_tokens():
+    """The final stream usage chunk must expose thinking to Hermes + cost path."""
+    import json as _j
+    lines = [
+        'data: {"type":"response.output_text.delta","item_id":"it1","delta":"hi"}',
+        "data: " + _j.dumps({
+            "type": "response.completed",
+            "response": _usage_with_reasoning(),
+        }),
+        "data: [DONE]",
+    ]
+    client = _stream_client(lines)
+    chunks = [
+        c async for c in client.stream_chunks(
+            "muse-spark-1.2-contributor",
+            {"messages": [{"role": "user", "content": "hi"}]},
+        )
+    ]
+    finals = [c for c in chunks if c.get("usage")]
+    assert finals, "stream must end with a usage chunk"
+    usage = finals[-1]["usage"]
+    assert usage["reasoning_tokens"] == 72
+    assert usage["completion_tokens_details"]["reasoning_tokens"] == 72

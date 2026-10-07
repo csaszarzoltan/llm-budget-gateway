@@ -2962,6 +2962,9 @@ class GatewayProxy:
         usage: TokenUsage | None = None
         resp_usage = data.get("usage")
         if isinstance(resp_usage, dict):
+            details = resp_usage.get("completion_tokens_details") or {}
+            if not isinstance(details, dict):
+                details = {}
             usage = TokenUsage(
                 prompt_tokens=int(resp_usage.get("prompt_tokens", 0) or 0),
                 completion_tokens=int(resp_usage.get("completion_tokens", 0) or 0),
@@ -2970,6 +2973,14 @@ class GatewayProxy:
                     or 0
                     or int(resp_usage.get("prompt_tokens", 0) or 0)
                     + int(resp_usage.get("completion_tokens", 0) or 0)
+                ),
+                # Codex-family usage carries reasoning here (mapped by
+                # _codex_reasoning_tokens); without it thinking is billed
+                # and reported as invisible.
+                reasoning_tokens=int(
+                    resp_usage.get("reasoning_tokens", 0)
+                    or details.get("reasoning_tokens", 0)
+                    or 0
                 ),
             )
         return ProviderResponse(
@@ -3305,6 +3316,7 @@ class GatewayProxy:
                 prompt_tokens=_usage_int(usage, "prompt_tokens"),
                 completion_tokens=_usage_int(usage, "completion_tokens"),
                 total_tokens=_usage_int(usage, "total_tokens"),
+                reasoning_tokens=_usage_int(usage, "reasoning_tokens"),
             )
         return None
 

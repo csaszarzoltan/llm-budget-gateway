@@ -172,6 +172,29 @@ def _transport_error(endpoint_name: str, exc: BaseException, kind: str) -> Upstr
     )
 
 
+def _codex_reasoning_tokens(usage_raw: Any) -> int:
+    """Reasoning tokens from a Codex /Responses usage object.
+
+    Measured 2026-10-07: ``usage.output_tokens_details.reasoning_tokens``
+    (e.g. 72 on a 115-output response). Without this the gateway bills and
+    reports the thinking as invisible — Hermes treats usage with zero
+    reasoning as "no generation" in its deterministic-empty guard.
+    """
+    if not isinstance(usage_raw, dict):
+        return 0
+    details = usage_raw.get("output_tokens_details") or {}
+    if not isinstance(details, dict):
+        details = {}
+    try:
+        return int(
+            details.get("reasoning_tokens")
+            or usage_raw.get("reasoning_tokens")
+            or 0
+        )
+    except (TypeError, ValueError):
+        return 0
+
+
 def _responses_to_chat(data: dict[str, Any], fallback_model: str) -> dict[str, Any]:
     """Map a Codex /Responses object onto chat-completions JSON.
 
@@ -242,6 +265,21 @@ def _responses_to_chat(data: dict[str, Any], fallback_model: str) -> dict[str, A
         msg["reasoning_content"] = "\n".join(reasoning_parts)
     if tool_calls:
         msg["tool_calls"] = tool_calls
+    reasoning_tokens = _codex_reasoning_tokens(usage_raw)
+    usage: dict[str, Any] = {
+        "prompt_tokens": int(usage_raw.get("input_tokens", 0) or 0),
+        "completion_tokens": int(usage_raw.get("output_tokens", 0) or 0),
+        "total_tokens": int(
+            usage_raw.get("total_tokens", 0)
+            or (usage_raw.get("input_tokens", 0) or 0)
+            + (usage_raw.get("output_tokens", 0) or 0)
+        ),
+        # Top-level for the gateway cost path; details object for Hermes
+        # (normalize_usage reads completion_tokens_details.reasoning_tokens
+        # on chat wire). Without this the thinking is invisible on both.
+        "reasoning_tokens": reasoning_tokens,
+        "completion_tokens_details": {"reasoning_tokens": reasoning_tokens},
+    }
     return {
         "id": data.get("id", ""),
         "object": "chat.completion",
@@ -254,15 +292,7 @@ def _responses_to_chat(data: dict[str, Any], fallback_model: str) -> dict[str, A
                 "finish_reason": finish,
             }
         ],
-        "usage": {
-            "prompt_tokens": int(usage_raw.get("input_tokens", 0) or 0),
-            "completion_tokens": int(usage_raw.get("output_tokens", 0) or 0),
-            "total_tokens": int(
-                usage_raw.get("total_tokens", 0)
-                or (usage_raw.get("input_tokens", 0) or 0)
-                + (usage_raw.get("output_tokens", 0) or 0)
-            ),
-        },
+        "usage": usage,
         "_responses_status": status,
     }
 
@@ -2132,6 +2162,14 @@ class DirectProviderClient:
                             "usage": {
                                 "prompt_tokens": int(usage_raw.get("input_tokens", 0) or 0),
                                 "completion_tokens": int(usage_raw.get("output_tokens", 0) or 0),
+                                # Thinking tokens travel here: Hermes reads
+                                # completion_tokens_details.reasoning_tokens
+                                # (normalize_usage) and the gateway cost path
+                                # reads top-level reasoning_tokens.
+                                "reasoning_tokens": _codex_reasoning_tokens(usage_raw),
+                                "completion_tokens_details": {
+                                    "reasoning_tokens": _codex_reasoning_tokens(usage_raw)
+                                },
                                 # Fall back to input + output: a provider that
                                 # sends only input_tokens/output_tokens (no
                                 # total_tokens) otherwise billed the stream at
