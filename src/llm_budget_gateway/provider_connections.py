@@ -14,6 +14,11 @@ from typing import Any
 
 import httpx
 from cryptography.hazmat.primitives.ciphers.aead import AESGCM
+try:
+    from llm_budget_gateway.codex_oauth import CODEX_CLI_VERSION
+
+except ImportError:
+    CODEX_CLI_VERSION = "0.160.1"
 
 PROVIDER_TYPES: list[dict[str, Any]] = [
     {
@@ -1342,7 +1347,7 @@ class ProviderDiscovery:
             if provider["provider_type"] == "openai_codex":
                 from pathlib import Path as _PP2
 
-                from llm_budget_gateway.codex_oauth import codex_account_headers
+                from llm_budget_gateway.codex_oauth import CODEX_CLI_VERSION, codex_account_headers
 
                 from llm_budget_gateway.codex_store import CodexOAuthStore
 
@@ -1356,10 +1361,10 @@ class ProviderDiscovery:
                     "Authorization": f"Bearer {_at2}",
                     "Accept": "application/json",
                     "originator": "hermes-agent",
-                    "User-Agent": "codex_cli_rs/0.0.0 (Hermes Agent)",
+                    "User-Agent": f"codex_cli_rs/{CODEX_CLI_VERSION}",
                     **codex_account_headers(_at2),
                 }
-                request.setdefault("params", {})["client_version"] = "1.0.0"
+                request.setdefault("params", {})["client_version"] = CODEX_CLI_VERSION
             async with httpx.AsyncClient(
                 transport=self.transport, timeout=15.0
             ) as client:
@@ -1446,7 +1451,7 @@ def _discovery_request(provider_type: str, config: dict[str, Any]) -> dict[str, 
     # the declared protocol so a new preset cannot land in this gap.
     if provider_type == "openai_codex":
         # actual token lives in .gateway-console/codex-oauth.db (not providers.db vault). sync() injects it.
-        return {"method": "GET", "url": base + "/models", "headers": {"Authorization": f"Bearer {config.get('api_key', '') or config.get('access_token', '') or '__codex_oauth__'}"}, "params": {"client_version": "0.0.0"}}
+        return {"method": "GET", "url": base + "/models", "headers": {"Authorization": f"Bearer {config.get('api_key', '') or config.get('access_token', '') or '__codex_oauth__'}"}, "params": {"client_version": CODEX_CLI_VERSION}}
     if provider_type in {"openai", "openai_compatible"} or _uses_openai_discovery(
         provider_type
     ):

@@ -22,6 +22,7 @@ CODEX_OAUTH_TOKEN_URL = "https://auth.openai.com/oauth/token"
 CODEX_BASE_URL = "https://chatgpt.com/backend-api/codex"
 CODEX_ACCESS_TOKEN_REFRESH_SKEW_SECONDS = 120
 CODEX_RATE_LIMITED_CODE = "codex_rate_limited"
+CODEX_CLI_VERSION = "0.160.1"
 
 
 class CodexAuthError(RuntimeError):
@@ -118,7 +119,7 @@ def codex_oauth_headers(access_token: str, *, base_url: str = CODEX_BASE_URL) ->
             headers["User-Agent"] = "HermesAgent/0.1.0"
     else:
         headers["originator"] = "codex_cli_rs"
-        headers.setdefault("User-Agent", "codex_cli_rs/0.0.0 (Hermes Agent)")
+        headers.setdefault("User-Agent", "codex_cli_rs/0.160.1")
     return headers
 
 
