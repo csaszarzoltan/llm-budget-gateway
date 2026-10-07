@@ -552,6 +552,53 @@ async def test_mid_stream_recovery_serves_next_candidate():
     assert tracker.set_model_cooldown.called
 
 
+@pytest.mark.asyncio
+async def test_mid_stream_stall_after_chunks_gets_short_no_strike_cooldown():
+    """A model that delivered chunks proved it is alive: a mid-stream stall
+    must park it briefly (<=60s) without a strike — not the target's full
+    cooldown. Measured 2026-10-07: 1840 chunks then a 300s upstream pause
+    parked luna ~200s with a strike and darkened smart ~15 min.
+    """
+    async def dying_stream(model, body, kind="chat"):
+        yield {"id": "c1", "object": "chat.completion.chunk", "model": model,
+               "choices": [{"index": 0, "delta": {"content": "partial "}, "finish_reason": None}]}
+        raise UpstreamProviderError(502, "upstream stream stalled for 300.0s", body="")
+
+    class Router:
+        def stream_chunks(self, model, body, kind="chat"):
+            return dying_stream(model, body, kind)
+
+    proxy = GatewayProxy(settings=Settings(virtual_keys={"k": "v"}), cost_tracker=Mock(), budget_enforcer=Mock(), fallback_manager=Mock())
+    tracker = Mock()
+    tracker.model_in_cooldown.return_value = 0
+    tracker.record_success.return_value = None
+    tracker.set_model_cooldown.return_value = None
+    tracker.build_record.side_effect = Exception("no db in test")
+    tracker.resolve_customer_id.return_value = None
+    tracker.record.return_value = None
+    object.__setattr__(proxy, "_cost_tracker", tracker)
+    object.__setattr__(proxy, "_direct_client", Router())
+
+    dead_resp = await proxy._forward_direct("@dead/m", {"model": "@dead/m", "messages": [{"role": "user", "content": "hi"}], "stream": True}, stream=True)
+
+    finalized = await proxy._finalize_route_response(
+        response=dead_resp, body={"model": "r", "messages": []}, api_key="k", headers={},
+        metadata={}, request_id="req1", alias="r", route={}, route_name="r",
+        from_plane=True, session_id=None, sticky_model=None,
+        outbound={"model": "@dead/m", "messages": [{"role": "user", "content": "hi"}], "stream": True},
+        want_cache=False, client_id=None, client_profile=None, conversation_id=None,
+        fallback="none", served="@dead/m", chain_started=0.0,
+        candidates=["@dead/m"], fallback_statuses=[502, 503, 504],
+        target_cooldowns={"@dead/m": {"seconds": 3600, "dynamic": True}},
+    )
+    async for _ in finalized.body:
+        pass
+    assert tracker.set_model_cooldown.called
+    _, kwargs = tracker.set_model_cooldown.call_args
+    assert kwargs.get("count_strike") is False
+    assert tracker.set_model_cooldown.call_args[0][2] <= 60
+
+
 def test_transport_error_keeps_cause():
     """Bare 'upstream provider error: <name>' must not recur — cause kept."""
     import httpx

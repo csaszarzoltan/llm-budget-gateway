@@ -2221,14 +2221,26 @@ class GatewayProxy:
                         # Park the dead candidate even though we are NOT
                         # re-driving: it still just died mid-response, and the
                         # next request must not walk into the same wall.
+                        # But a model that already delivered chunks proved it is
+                        # alive — this is a transient stall, not a dead model
+                        # (measured 2026-10-07: 1840 chunks then a 300s upstream
+                        # pause parked luna ~200s with a strike, and re-parks
+                        # darkened the route ~15 min). Same shape as the timeout
+                        # floor above: a short park, no ladder climb.
                         try:
                             cooldown_info = self._cooldown_info_for(
                                 _target_cooldowns, msf.candidate
                             )
+                            base_seconds = int(cooldown_info.get("seconds", 3600))
+                            cooldown_seconds = (
+                                min(base_seconds, _TIMEOUT_COOLDOWN_SECONDS)
+                                if bool(cooldown_info.get("dynamic", True))
+                                else base_seconds
+                            )
                             self._cost_tracker.set_model_cooldown(
                                 route_name,
                                 msf.candidate,
-                                min(int(cooldown_info.get("seconds", 3600)), 300),
+                                cooldown_seconds,
                                 reason=json.dumps(
                                     {
                                         "type": "mid_stream",
@@ -2236,7 +2248,7 @@ class GatewayProxy:
                                         "body": msf.body[:500],
                                     }
                                 ),
-                                count_strike=True,
+                                count_strike=False,
                             )
                         except Exception:
                             logger.exception(
