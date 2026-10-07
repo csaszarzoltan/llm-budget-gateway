@@ -1359,7 +1359,7 @@ class ProviderDiscovery:
                     "User-Agent": "codex_cli_rs/0.0.0 (Hermes Agent)",
                     **codex_account_headers(_at2),
                 }
-                request.setdefault("params", {})["client_version"] = "0.0.0"
+                request.setdefault("params", {})["client_version"] = "1.0.0"
             async with httpx.AsyncClient(
                 transport=self.transport, timeout=15.0
             ) as client:
@@ -1370,6 +1370,23 @@ class ProviderDiscovery:
                 )
             response.raise_for_status()
             models = _parse_models(provider["provider_type"], response.json(), config)
+            # Codex forward-compat: Hermes synthesizes newer slugs when a compatible template is present.
+            # Keep the live list authoritative, but add the synthetic entries so Plus users see Sol/Luna 6 etc.
+            if provider["provider_type"] == "openai_codex":
+                try:
+                    _live_ids = [str(m.get("id") or m.get("slug") or "") for m in models]
+                    _seen = set(_live_ids)
+                    _compat = [
+                        ("gpt-6-sol", ("gpt-5.6-sol", "gpt-5.5")),
+                        ("gpt-6-luna", ("gpt-5.6-luna", "gpt-5.5")),
+                        ("gpt-6.1-sol", ("gpt-6-sol",)),
+                    ]
+                    for _syn, _tmpls in _compat:
+                        if _syn not in _seen and any(x in _seen for x in _tmpls):
+                            _seen.add(_syn)
+                            models.append({"id": _syn, "display_name": _syn, "owned_by": "openai", "capabilities": ["chat", "tools"], "raw": {"id": _syn}})
+                except Exception:
+                    pass
             self.store.save_models(provider_id, models)
             return {
                 **self.store.get(provider_id),
