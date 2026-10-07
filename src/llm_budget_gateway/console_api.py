@@ -26,6 +26,9 @@ from fastapi.responses import (
 )
 from fastapi.staticfiles import StaticFiles
 
+# PKCE store for Codex OAuth (per-process, survives page reloads)
+_CODEX_PKCE_STORE: dict[str, dict] = {}
+
 from .alert_api import build_alerts_router, create_alerts_app
 from .alert_models import AlertRule
 from .completion_features import MigrationPlanner, PolicyRouteSimulator
@@ -1014,10 +1017,32 @@ def create_console_app(
 
         body = await request.json() if request.headers.get("content-type", "").startswith("application/json") else {}
         code = str(body.get("code", "") or body.get("oauth_code", "")).strip()
+        # allow pasting full "http://localhost:1455/auth/callback?code=...&state=...&scope=..." URL
+        if code and "code=" in code:
+            import urllib.parse as _up
+            try:
+                q = _up.urlparse(code)
+                c2 = _up.parse_qs(q.query).get("code", [""])[0]
+                if c2:
+                    code = c2
+                else:
+                    import re as _re
+                    m = _re.search(r"[?&]code=([^&\s]+)", code)
+                    if m:
+                        code = _up.unquote(m.group(1))
+            except Exception:
+                pass
         verifier = str(body.get("code_verifier", "")).strip()
         redirect_uri = str(body.get("redirect_uri", "")).strip()
+        # auto-fill from PKCE store when UI lost pending (page reload)
+        if (not verifier or not redirect_uri) and provider_id in _CODEX_PKCE_STORE:
+            stored = _CODEX_PKCE_STORE[provider_id]
+            if not verifier:
+                verifier = str(stored.get("code_verifier", ""))
+            if not redirect_uri:
+                redirect_uri = str(stored.get("redirect_uri", ""))
         if not code:
-            raise HTTPException(422, detail="missing 'code'")
+            raise HTTPException(422, detail="missing 'code' — paste the full address from the browser address bar (it contains ?code=...)")
         data: dict[str, str] = {"grant_type": "authorization_code", "code": code, "client_id": CODEX_CLIENT_ID}
         if verifier:
             data["code_verifier"] = verifier
@@ -1055,6 +1080,12 @@ def create_console_app(
         state = _sec.token_urlsafe(16)
         redirect_uri = "http://localhost:1455/auth/callback"
         url = codex_browser_authorize_url(redirect_uri=redirect_uri, state=state, code_challenge=challenge)
+        # persist PKCE so exchange works even after page reload (VPS needs full-URL paste)
+        _CODEX_PKCE_STORE[provider_id] = {"code_verifier": verifier, "state": state, "redirect_uri": redirect_uri}
+        # keep only recent entries
+        if len(_CODEX_PKCE_STORE) > 32:
+            oldest = next(iter(_CODEX_PKCE_STORE))
+            _CODEX_PKCE_STORE.pop(oldest, None)
         return {"authorize_url": url, "code_verifier": verifier, "state": state, "redirect_uri": redirect_uri}
 
     @app.get("/v1/product/providers")
