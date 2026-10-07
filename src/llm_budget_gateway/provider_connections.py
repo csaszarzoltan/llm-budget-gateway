@@ -1338,6 +1338,28 @@ class ProviderDiscovery:
         )
         try:
             request = _discovery_request(provider["provider_type"], config)
+            # openai_codex: token lives in gateway-owned codex-oauth.db; inject Codex wire headers + client_version
+            if provider["provider_type"] == "openai_codex":
+                from pathlib import Path as _PP2
+
+                from llm_budget_gateway.codex_oauth import codex_account_headers
+
+                from llm_budget_gateway.codex_store import CodexOAuthStore
+
+                _data_dir2 = _PP2(__file__).resolve().parents[2] / ".gateway-console"
+                _cs2 = CodexOAuthStore(_data_dir2 / "codex-oauth.db", key_path=_data_dir2 / "codex-oauth.key")
+                _loaded2 = _cs2.load(provider_id)
+                if not _loaded2 or not _loaded2.get("access_token"):
+                    raise ValueError("Codex OAuth not connected — use Connect ChatGPT on the provider card")
+                _at2 = str(_loaded2["access_token"])
+                request["headers"] = {
+                    "Authorization": f"Bearer {_at2}",
+                    "Accept": "application/json",
+                    "originator": "hermes-agent",
+                    "User-Agent": "codex_cli_rs/0.0.0 (Hermes Agent)",
+                    **codex_account_headers(_at2),
+                }
+                request.setdefault("params", {})["client_version"] = "0.0.0"
             async with httpx.AsyncClient(
                 transport=self.transport, timeout=15.0
             ) as client:
@@ -1406,7 +1428,8 @@ def _discovery_request(provider_type: str, config: dict[str, Any]) -> dict[str, 
     # while create() had already given them the OpenAI defaults. Branch on
     # the declared protocol so a new preset cannot land in this gap.
     if provider_type == "openai_codex":
-        return {"method": "GET", "url": base + "/models", "headers": {"Authorization": f"Bearer {config.get('api_key', '') or config.get('access_token', '')}"}}
+        # actual token lives in .gateway-console/codex-oauth.db (not providers.db vault). sync() injects it.
+        return {"method": "GET", "url": base + "/models", "headers": {"Authorization": f"Bearer {config.get('api_key', '') or config.get('access_token', '') or '__codex_oauth__'}"}, "params": {"client_version": "0.0.0"}}
     if provider_type in {"openai", "openai_compatible"} or _uses_openai_discovery(
         provider_type
     ):
@@ -1449,6 +1472,8 @@ def _parse_models(
     config = config or {}
     if provider_type == "custom":
         source = payload.get(str(config.get("models_field", "data")), [])
+    elif provider_type == "openai_codex":
+        source = payload.get("models", payload.get("data", payload.get("value", [])))
     else:
         source = (
             payload.get("models", [])
@@ -1463,7 +1488,7 @@ def _parse_models(
             else None
         )
         model_id = str(
-            configured_id or raw.get("id") or raw.get("name") or raw.get("model") or ""
+            configured_id or raw.get("id") or raw.get("slug") or raw.get("name") or raw.get("model") or ""
         ).removeprefix("models/")
         if not model_id:
             continue
