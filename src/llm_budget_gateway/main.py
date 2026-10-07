@@ -189,13 +189,29 @@ def create_app(settings: Settings | None = None) -> FastAPI:
                 base_url = str(secret.get("base_url", "")).rstrip("/")
                 if not base_url or not models:
                     continue
+                # openai_codex: token lives in codex-oauth.db, not providers.db vault
+                _is_codex = str(connection.get("provider_type")) == "openai_codex"
+                _codex_at = ""
+                _codex_auth = "bearer"
+                if _is_codex:
+                    try:
+                        from pathlib import Path as _PC1
+                        from llm_budget_gateway.codex_store import CodexOAuthStore
+                        _cs1 = CodexOAuthStore(data_dir / "codex-oauth.db", key_path=data_dir / "codex-oauth.key")
+                        _loaded1 = _cs1.load(str(connection["id"]))
+                        if _loaded1 and _loaded1.get("access_token"):
+                            _codex_at = str(_loaded1["access_token"])
+                            _codex_auth = "oauth_codex"
+                    except Exception:
+                        pass
                 registry[slug] = {
                     "base_url": base_url,
-                    "api_key_env": f"__vault_{slug}__",  # unused: key passed directly
-                    "api_key": str(secret.get("api_key", "")),
+                    "api_key_env": f"__vault_{slug}__",
+                    "api_key": _codex_at if _is_codex and _codex_at else str(secret.get("api_key", "")),
+                    "auth": _codex_auth if _is_codex and _codex_at else "bearer",
                     "user_agent": str(secret.get("user_agent", "")).strip() or None,
                     "models": models,
-                    "api_mode": str(secret.get("api_mode", "") or "chat_completions"),
+                    "api_mode": str(secret.get("api_mode", "") or ("codex_responses" if _is_codex else "chat_completions")),
                 }
                 extra_body_raw = str(secret.get("extra_body_json", "") or "").strip()
                 if extra_body_raw:
@@ -243,13 +259,28 @@ def create_app(settings: Settings | None = None) -> FastAPI:
                         base = str(secret.get("base_url", "")).rstrip("/")
                         if not base or not models:
                             continue
+                        _is_codex2 = str(connection.get("provider_type")) == "openai_codex"
+                        _codex_at2 = ""
+                        _codex_auth2 = "bearer"
+                        if _is_codex2:
+                            try:
+                                from pathlib import Path as _PC2
+                                from llm_budget_gateway.codex_store import CodexOAuthStore
+                                _cs2 = CodexOAuthStore(data_dir / "codex-oauth.db", key_path=data_dir / "codex-oauth.key")
+                                _loaded2 = _cs2.load(str(connection["id"]))
+                                if _loaded2 and _loaded2.get("access_token"):
+                                    _codex_at2 = str(_loaded2["access_token"])
+                                    _codex_auth2 = "oauth_codex"
+                            except Exception:
+                                pass
                         rebuilt[slug] = {
                             "base_url": base,
                             "api_key_env": f"__vault_{slug}__",
-                            "api_key": str(secret.get("api_key", "")),
+                            "api_key": _codex_at2 if _is_codex2 and _codex_at2 else str(secret.get("api_key", "")),
+                            "auth": _codex_auth2 if _is_codex2 and _codex_at2 else "bearer",
                             "user_agent": str(secret.get("user_agent", "")).strip() or None,
                             "models": models,
-                            "api_mode": str(secret.get("api_mode", "") or "chat_completions"),
+                            "api_mode": str(secret.get("api_mode", "") or ("codex_responses" if _is_codex2 else "chat_completions")),
                         }
                         extra_body_raw_sync = str(secret.get("extra_body_json", "") or "").strip()
                         if extra_body_raw_sync:
@@ -289,6 +320,11 @@ def create_app(settings: Settings | None = None) -> FastAPI:
             from llm_budget_gateway.codex_oauth import is_access_token_expiring, refresh_codex_token
 
             _codex_store = CodexOAuthStore(_codex_db, key_path=_codex_key)
+            # slug -> provider_id for oauth lookup (store keys are provider_ids, but endpoints are keyed by slug)
+            _codex_slug_to_id: dict[str, str] = {}
+            for _c in connections:
+                if str(_c.get("provider_type")) == "openai_codex":
+                    _codex_slug_to_id[str(_c.get("slug"))] = str(_c.get("id"))
 
             def _ensure_codex_fresh(provider_id: str) -> None:
                 loaded = _codex_store.load(provider_id)
@@ -310,7 +346,9 @@ def create_app(settings: Settings | None = None) -> FastAPI:
                     )
                     # also update the in-memory endpoint so the current request uses the fresh token
                     try:
-                        ep = direct._registry.get(provider_id)  # type: ignore[attr-defined]
+                        # registry is keyed by slug, not provider_id
+                        _slug2 = next((k for k, v in _codex_slug_to_id.items() if v == provider_id), provider_id)
+                        ep = direct._registry.get(_slug2)  # type: ignore[attr-defined]
                         if ep is not None:
                             ep.api_key_value = str(refreshed["access_token"])
                     except Exception:
@@ -329,9 +367,9 @@ def create_app(settings: Settings | None = None) -> FastAPI:
             def _wrapped_resolve(model: str):  # type: ignore[no-redef]
                 ep = _orig_direct_resolve(model)
                 if getattr(ep, "auth", "") == "oauth_codex":
-                    _ensure_codex_fresh(ep.name)
-                    # re-read fresh token into endpoint for this request
-                    fresh = _codex_store.load(ep.name)
+                    _pid = _codex_slug_to_id.get(ep.name, ep.name)
+                    _ensure_codex_fresh(_pid)
+                    fresh = _codex_store.load(_pid)
                     if fresh and fresh.get("access_token"):
                         ep.api_key_value = str(fresh["access_token"])
                 return ep

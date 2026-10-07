@@ -545,8 +545,16 @@ def _restore_tool_names(data: Any, mapping: dict[str, str]) -> None:
                     fn["name"] = original
 
 
-@dataclass(frozen=True)
+@dataclass
 class ProviderEndpoint:
+    """One configured provider connection.
+
+    NOT frozen: a rotating OAuth access_token must be writable on the live
+    endpoint (Codex refresh). Freezing it made the resolver raise
+    FrozenInstanceError, which the gateway swallowed as "direct resolve
+    failed" and re-sent the request to litellm — the reason every
+    @chatgpt/* call answered "LLM Provider NOT provided".
+    """
     """One configured provider connection."""
 
     name: str
@@ -774,6 +782,12 @@ class DirectProviderClient:
         signature_db_path: str | None = None,
     ) -> None:
         self._registry: dict[str, ProviderEndpoint] = {}
+        # Live OAuth token override per provider name. `ProviderEndpoint` is a
+        # frozen dataclass, so a rotating Codex access_token cannot be written
+        # onto the endpoint — assigning raised FrozenInstanceError inside the
+        # resolver and every chatgpt request fell through to litellm
+        # ("LLM Provider NOT provided"). The mutable state lives here instead.
+        self._live_api_keys: dict[str, str] = {}
         # model -> (api_mode, monotonic ts) for endpoint affinity learned from
         # a /responses refusal, so a chat-only model stops paying the dead
         # call on every request. See _ENDPOINT_AFFINITY_TTL_SECONDS.
@@ -1419,10 +1433,13 @@ class DirectProviderClient:
         # become proper function_call / function_call_output items and arguments
         # are normalized to valid JSON (Console Go strict check).
         instructions, input_items = self._responses_input_from_messages(body, bare)
+        # chatgpt.com Codex backend requires stream=true even for non-stream callers (otherwise 400 "Stream must be set to true")
+        _is_codex_backend = getattr(endpoint, "auth", "") == "oauth_codex" and "chatgpt.com" in (endpoint.base_url or "")
         payload: dict[str, Any] = {
             "model": bare,
             "input": input_items,
-            "stream": bool(body.get("stream")),
+            "stream": True if _is_codex_backend else bool(body.get("stream")),
+            "store": False,
         }
         if instructions:
             payload["instructions"] = instructions
@@ -1498,6 +1515,46 @@ class DirectProviderClient:
                 f"upstream provider error: {endpoint.name} (HTTP {response.status_code})",
                 body=response.text[:2000],
             )
+        if _is_codex_backend and not body.get("stream"):
+            # SSE -> drain to a single chat-completions response (gateway handles non-stream aggregation)
+            ctype = response.headers.get("content-type", "")
+            if "text/event-stream" in ctype or response.text.lstrip().startswith("event:") or "data:" in response.text[:200]:
+                # collect deltas from SSE lines like: event: response.output_text.delta / data: {...}
+                import json as _js2
+                text_parts: list[str] = []
+                usage = None
+                for line in response.text.splitlines():
+                    line=line.strip()
+                    if not line.startswith("data:"):
+                        continue
+                    payload_raw = line[5:].strip()
+                    if not payload_raw or payload_raw == "[DONE]":
+                        continue
+                    try:
+                        evt = _js2.loads(payload_raw)
+                    except: continue
+                    if isinstance(evt, dict):
+                        et = evt.get("type")
+                        if et == "response.output_text.delta" and isinstance(evt.get("delta"), str):
+                            text_parts.append(evt["delta"])
+                        elif et == "response.output_text.done" and isinstance(evt.get("text"), str):
+                            # final text already aggregated; if deltas were partial, prefer this
+                            if not text_parts:
+                                text_parts.append(evt["text"])
+                        elif et == "response.completed" and isinstance(evt.get("response"), dict):
+                            usage = evt["response"].get("usage") or usage
+                            # completed may carry full output via _responses_to_chat
+                            try:
+                                cand = _responses_to_chat(evt["response"], bare)
+                                # _responses_to_chat may still be empty if output was [] — but check content
+                                if cand.get("choices", [{}])[0].get("message", {}).get("content"):
+                                    return response.status_code, cand, evt["response"].get("model") or bare
+                            except: pass
+                        elif "delta" in evt and isinstance(evt["delta"], str):
+                            text_parts.append(evt["delta"])
+                full_text = "".join(text_parts)
+                chat = {"id": "chatcmpl-codex", "object": "chat.completion", "model": bare, "choices": [{"index":0,"message":{"role":"assistant","content": full_text},"finish_reason":"stop"}], "usage": usage or {}}
+                return response.status_code, chat, bare
         try:
             data = response.json()
         except ValueError as exc:
@@ -1729,6 +1786,7 @@ class DirectProviderClient:
             "model": bare,
             "input": input_items,
             "stream": True,
+            "store": False,
         }
         if instructions:
             payload["instructions"] = instructions
