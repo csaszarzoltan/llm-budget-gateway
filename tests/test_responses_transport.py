@@ -18,6 +18,8 @@ from llm_budget_gateway.provider_direct import (
     DirectProviderClient,
     ProviderEndpoint,
     UpstreamProviderError,
+    _codex_chat_is_empty,
+    _responses_to_chat,
 )
 from collections.abc import AsyncIterator
 from unittest.mock import Mock
@@ -879,4 +881,189 @@ async def test_stream_chunks_endpoint_unavailable_falls_back_to_chat():
     assert [u.rsplit("/", 1)[-1] for u in seen] == ["responses", "completions"]
     assert any(
         c.get("choices", [{}])[0].get("delta", {}).get("content") == "pong" for c in chunks
+    )
+
+
+# ---------------------------------------------------------------------------
+# 2026-10-07 incident: luna burned 300-775 output tokens with no visible text
+# (reasoning items with encrypted_content, empty message). The old mapping
+# returned HTTP 200 with content="" — Hermes classified every retry as empty
+# ("No reply ... even after retries") while the route looked green.
+# ---------------------------------------------------------------------------
+
+def _reasoning_only_payload() -> dict:
+    """Measured luna shape: reasoning burned tokens, message content empty."""
+    return {
+        "id": "resp_empty1",
+        "object": "response",
+        "status": "completed",
+        "model": "muse-spark-1.2-contributor",
+        "output": [
+            {
+                "type": "reasoning",
+                "id": "rs_1",
+                "summary": [],
+                "content": [],
+                "encrypted_content": "opaque-not-forwardable",
+            },
+            {
+                "type": "message",
+                "id": "msg_1",
+                "role": "assistant",
+                "status": "completed",
+                "content": [],
+            },
+        ],
+        "usage": {"input_tokens": 157646, "output_tokens": 696, "total_tokens": 158342},
+    }
+
+
+def test_responses_reasoning_summary_maps_to_reasoning_content():
+    """Visible reasoning summaries must reach Hermes as reasoning_content."""
+    payload = _reasoning_only_payload()
+    payload["output"][0]["summary"] = [
+        {"type": "summary_text", "text": "The user wants a summary."},
+        {"type": "summary_text", "text": "Checking the numbers."},
+    ]
+    chat = _responses_to_chat(payload, "muse-spark-1.2-contributor")
+    msg = chat["choices"][0]["message"]
+    assert msg["content"] == ""
+    assert "summary" in msg["reasoning_content"].lower() or "Checking" in msg["reasoning_content"]
+    assert not _codex_chat_is_empty(chat)
+
+
+def test_responses_refusal_maps_to_content():
+    """A refusal is information — it must not become an empty reply."""
+    payload = _reasoning_only_payload()
+    payload["output"][1]["content"] = [
+        {"type": "refusal", "refusal": "I cannot help with that."}
+    ]
+    chat = _responses_to_chat(payload, "muse-spark-1.2-contributor")
+    assert chat["choices"][0]["message"]["content"] == "I cannot help with that."
+    assert not _codex_chat_is_empty(chat)
+
+
+def test_responses_fully_empty_counts_as_empty():
+    """Encrypted reasoning + empty message = nothing Hermes can use."""
+    chat = _responses_to_chat(_reasoning_only_payload(), "muse-spark-1.2-contributor")
+    assert chat["choices"][0]["message"]["content"] == ""
+    assert _codex_chat_is_empty(chat)
+
+
+def test_codex_chat_is_empty_tool_calls_only_not_empty():
+    """Tool-call-only replies are legitimate work, never 'empty'."""
+    chat = {
+        "choices": [{
+            "message": {
+                "role": "assistant",
+                "content": "",
+                "tool_calls": [{
+                    "id": "call_1", "type": "function",
+                    "function": {"name": "get_time", "arguments": "{}"},
+                }],
+            }
+        }]
+    }
+    assert not _codex_chat_is_empty(chat)
+    assert _codex_chat_is_empty({"choices": [{"message": {"role": "assistant", "content": "   "}}]})
+
+
+@pytest.mark.asyncio
+async def test_responses_empty_completed_raises_502_for_fallback(monkeypatch):
+    """An empty Codex reply must fall back, never 200-empty (the No-reply fix)."""
+    client, _calls = _client_with(monkeypatch, lambda _p: _reasoning_only_payload())
+    ep = client.resolve("muse-spark-1.2-contributor")
+    object.__setattr__(ep, "api_mode", "codex_responses")
+    with pytest.raises(UpstreamProviderError) as excinfo:
+        await client.forward(
+            "muse-spark-1.2-contributor",
+            {"messages": [{"role": "user", "content": "Summarize this."}]},
+        )
+    assert excinfo.value.status_code == 502
+
+
+@pytest.mark.asyncio
+async def test_responses_tool_calls_only_stays_200(monkeypatch):
+    """The empty-guard must not break the agentic tool-call flow."""
+    def _tool_payload(payload):
+        data = _reasoning_only_payload()
+        data["output"][1]["content"] = []
+        data["output"].append({
+            "type": "function_call",
+            "call_id": "call_9",
+            "name": "get_time",
+            "arguments": "{}",
+        })
+        return data
+
+    client, _calls = _client_with(monkeypatch, _tool_payload)
+    ep = client.resolve("muse-spark-1.2-contributor")
+    object.__setattr__(ep, "api_mode", "codex_responses")
+    status, data, _served = await client.forward(
+        "muse-spark-1.2-contributor",
+        {
+            "messages": [{"role": "user", "content": "What time is it?"}],
+            "tools": [{
+                "type": "function",
+                "function": {
+                    "name": "get_time", "description": "time",
+                    "parameters": {"type": "object", "properties": {}},
+                },
+            }],
+        },
+    )
+    assert status == 200
+    assert data["choices"][0]["message"]["tool_calls"][0]["function"]["name"] == "get_time"
+
+
+@pytest.mark.asyncio
+async def test_stream_reasoning_delta_yields_reasoning_content():
+    """Reasoning progress must stream as reasoning_content deltas."""
+    lines = [
+        'data: {"type":"response.reasoning_summary_text.delta","item_id":"rs1","delta":"Thinking: "}',
+        'data: {"type":"response.reasoning_summary_text.delta","item_id":"rs1","delta":"checking numbers"}',
+        'data: {"type":"response.output_text.delta","item_id":"it1","delta":"pong"}',
+        'data: {"type":"response.completed","response":{"id":"resp_r","model":"muse-spark-1.2-contributor","status":"completed","usage":{"input_tokens":10,"output_tokens":20,"total_tokens":30}}}',
+        "data: [DONE]",
+    ]
+
+    class _Ctx:
+        async def __aenter__(self):
+            class R:
+                status_code = 200
+
+                async def aread(self):
+                    return b""
+
+                async def aiter_lines(self):
+                    for ln in lines:
+                        yield ln
+
+            return R()
+
+        async def __aexit__(self, *exc):
+            return False
+
+    def _stream(method, url, json=None, headers=None):  # noqa: A002
+        return _Ctx()
+
+    client = DirectProviderClient(registry={})
+    ep = _endpoint()
+    object.__setattr__(ep, "api_mode", "codex_responses")
+    client._registry["opencode-go"] = ep
+    client._model_index["muse-spark-1.2-contributor"] = ep
+    object.__setattr__(client, "_client", type("C", (), {"stream": staticmethod(_stream)})())
+
+    chunks = [
+        c async for c in client.stream_chunks(
+            "muse-spark-1.2-contributor",
+            {"messages": [{"role": "user", "content": "hi"}]},
+        )
+    ]
+    thinking = "".join(
+        c["choices"][0]["delta"].get("reasoning_content", "") for c in chunks
+    )
+    assert thinking == "Thinking: checking numbers"
+    assert any(
+        c["choices"][0]["delta"].get("content") == "pong" for c in chunks
     )

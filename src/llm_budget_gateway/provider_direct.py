@@ -176,10 +176,20 @@ def _responses_to_chat(data: dict[str, Any], fallback_model: str) -> dict[str, A
     """Map a Codex /Responses object onto chat-completions JSON.
 
     Text comes from output items of type ``message`` (content parts of type
-    ``output_text``); usage maps input/output/total → prompt/completion/
-    total tokens; finish_reason mirrors ``status``.
+    ``output_text``); ``refusal`` parts are surfaced as content (a refusal is
+    information — Hermes can react to it, unlike to an empty string);
+    ``reasoning`` item summaries become ``reasoning_content`` (DeepSeek/Kimi
+    convention, which Hermes accepts as a non-empty response); usage maps
+    input/output/total → prompt/completion/total tokens; finish_reason
+    mirrors ``status``.
+
+    Measured 2026-10-07: luna burned 300-775 output tokens with no visible
+    text and the old mapping returned content="" — Hermes classified every
+    retry as empty ("No reply ... even after retries") while the route
+    looked green.
     """
     text_parts: list[str] = []
+    reasoning_parts: list[str] = []
     tool_calls: list[dict[str, Any]] = []
     for item in data.get("output", []) or []:
         itype = item.get("type")
@@ -187,6 +197,16 @@ def _responses_to_chat(data: dict[str, Any], fallback_model: str) -> dict[str, A
             for part in item.get("content", []) or []:
                 if part.get("type") == "output_text" and part.get("text"):
                     text_parts.append(str(part["text"]))
+                elif part.get("type") == "refusal" and part.get("refusal"):
+                    text_parts.append(str(part["refusal"]))
+        elif itype == "reasoning":
+            # Visible summary text only; encrypted_content is opaque and
+            # stays server-side (nothing to forward).
+            for summary in item.get("summary", []) or []:
+                if isinstance(summary, dict):
+                    text = summary.get("text") or ""
+                    if text:
+                        reasoning_parts.append(str(text))
         elif itype == "function_call":
             # Codex / Responses function_call → chat tool_calls
             tool_calls.append(
@@ -218,6 +238,8 @@ def _responses_to_chat(data: dict[str, Any], fallback_model: str) -> dict[str, A
     else:
         finish = "stop" if status == "completed" else ("length" if status == "incomplete" else status)
     msg: dict[str, Any] = {"role": "assistant", "content": "".join(text_parts)}
+    if reasoning_parts:
+        msg["reasoning_content"] = "\n".join(reasoning_parts)
     if tool_calls:
         msg["tool_calls"] = tool_calls
     return {
@@ -243,6 +265,27 @@ def _responses_to_chat(data: dict[str, Any], fallback_model: str) -> dict[str, A
         },
         "_responses_status": status,
     }
+
+
+def _codex_chat_is_empty(chat: dict[str, Any]) -> bool:
+    """True when a mapped Codex reply carries nothing Hermes can use.
+
+    Empty text + no tool calls + no reasoning content. Tool-call-only
+    replies are legitimate (Hermes executes the tools) and must NOT count
+    as empty. An empty reply must never be served as HTTP 200 success —
+    the route chain has fallbacks exactly for this.
+    """
+    try:
+        message = (chat.get("choices") or [{}])[0].get("message", {}) or {}
+    except (AttributeError, IndexError, TypeError):
+        return True
+    if str(message.get("content") or "").strip():
+        return False
+    if message.get("tool_calls"):
+        return False
+    if str(message.get("reasoning_content") or "").strip():
+        return False
+    return True
 
 
 def _chat_tools_to_responses(tools: Any) -> list[dict[str, Any]]:
@@ -1546,14 +1589,29 @@ class DirectProviderClient:
                             # completed may carry full output via _responses_to_chat
                             try:
                                 cand = _responses_to_chat(evt["response"], bare)
-                                # _responses_to_chat may still be empty if output was [] — but check content
-                                if cand.get("choices", [{}])[0].get("message", {}).get("content"):
+                                # Serve anything Hermes can use: text, tool
+                                # calls, or reasoning content. A reasoning-only
+                                # reply still satisfies Hermes's
+                                # "(no content or reasoning)" check.
+                                if not _codex_chat_is_empty(cand):
                                     return response.status_code, cand, evt["response"].get("model") or bare
-                            except: pass
+                            except UpstreamProviderError:
+                                raise
+                            except Exception:
+                                pass
                         elif "delta" in evt and isinstance(evt["delta"], str):
                             text_parts.append(evt["delta"])
                 full_text = "".join(text_parts)
                 chat = {"id": "chatcmpl-codex", "object": "chat.completion", "model": bare, "choices": [{"index":0,"message":{"role":"assistant","content": full_text},"finish_reason":"stop"}], "usage": usage or {}}
+                if _codex_chat_is_empty(chat):
+                    # Upstream burned tokens but produced no text, tool calls
+                    # or reasoning — never serve as 200 success; the route
+                    # chain falls back to the next candidate instead of
+                    # Hermes seeing another deterministic "empty" retry.
+                    raise UpstreamProviderError(
+                        502,
+                        f"upstream returned empty response (no text, tool calls or reasoning): {endpoint.name}",
+                    )
                 return response.status_code, chat, bare
         try:
             data = response.json()
@@ -1561,7 +1619,13 @@ class DirectProviderClient:
             raise UpstreamProviderError(
                 502, f"upstream provider returned invalid JSON: {endpoint.name}"
             ) from exc
-        return response.status_code, _responses_to_chat(data, bare), data.get("model") or bare
+        chat = _responses_to_chat(data, bare)
+        if _codex_chat_is_empty(chat):
+            raise UpstreamProviderError(
+                502,
+                f"upstream returned empty response (no text, tool calls or reasoning): {endpoint.name}",
+            )
+        return response.status_code, chat, data.get("model") or bare
 
     async def forward_stream(
         self,
@@ -1884,6 +1948,47 @@ class DirectProviderClient:
                                 {
                                     "index": 0,
                                     "delta": {"content": delta},
+                                    "finish_reason": None,
+                                }
+                            ],
+                        }
+                        index += 1
+                    elif etype in ("response.reasoning_summary_text.delta", "response.reasoning_text.delta"):
+                        # Thinking progress. Forwarded as reasoning_content
+                        # (DeepSeek/Kimi convention): this is what lets Hermes
+                        # tell "model is reasoning" apart from "dead stream".
+                        # Without it a reasoning-only reply accumulates to
+                        # empty and the turn ends with "No reply ... even
+                        # after retries" (measured 2026-10-07: luna burned
+                        # 300-775 output tokens with no visible text).
+                        delta = str(event.get("delta", ""))
+                        if not delta:
+                            continue
+                        yield {
+                            "id": str(event.get("item_id") or f"resp-{index}"),
+                            "object": "chat.completion.chunk",
+                            "model": bare,
+                            "choices": [
+                                {
+                                    "index": 0,
+                                    "delta": {"reasoning_content": delta},
+                                    "finish_reason": None,
+                                }
+                            ],
+                        }
+                        index += 1
+                    elif etype in ("response.reasoning_summary_text.done", "response.reasoning_text.done"):
+                        text = str(event.get("text", ""))
+                        if not text:
+                            continue
+                        yield {
+                            "id": str(event.get("item_id") or f"resp-{index}"),
+                            "object": "chat.completion.chunk",
+                            "model": bare,
+                            "choices": [
+                                {
+                                    "index": 0,
+                                    "delta": {"reasoning_content": text},
                                     "finish_reason": None,
                                 }
                             ],

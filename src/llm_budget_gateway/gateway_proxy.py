@@ -2293,7 +2293,10 @@ class GatewayProxy:
                         request_id,
                         str(msf)[:300],
                     )
-                    # Park the dead candidate (capped 300s).
+                    # Park the dead candidate: same transient class as a
+                    # mid-stream stall after chunks — cap at the timeout
+                    # cooldown, no strike (measured 2026-10-07: re-parks
+                    # darkened smart ~15 min while direct luna stayed green).
                     try:
                         cooldown_info = self._cooldown_info_for(
                             _target_cooldowns, msf.candidate
@@ -2301,7 +2304,7 @@ class GatewayProxy:
                         self._cost_tracker.set_model_cooldown(
                             route_name,
                             msf.candidate,
-                            min(int(cooldown_info.get("seconds", 3600)), 300),
+                            min(int(cooldown_info.get("seconds", 3600)), 60),
                             reason=json.dumps(
                                 {
                                     "type": "mid_stream",
@@ -2309,7 +2312,7 @@ class GatewayProxy:
                                     "body": msf.body[:500],
                                 }
                             ),
-                            count_strike=True,
+                            count_strike=False,
                         )
                     except Exception:
                         logger.exception(
