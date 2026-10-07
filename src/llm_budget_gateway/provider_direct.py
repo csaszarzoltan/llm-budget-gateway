@@ -1904,6 +1904,13 @@ class DirectProviderClient:
         index = 0
         chunk_id = ""
         usage_raw: dict[str, Any] = {}
+        # Usable output accumulated for the client. A stream that completes
+        # with zero text, zero tool calls and zero reasoning is an empty
+        # reply (measured 2026-10-07: luna stop/324 tokens, nothing visible)
+        # and must fail over, never complete as 200-empty.
+        text_len = 0
+        tool_n = 0
+        think_len = 0
         try:
             async with self._client.stream(
                 "POST", url, json=payload, headers=endpoint.headers()
@@ -1940,6 +1947,7 @@ class DirectProviderClient:
                         delta = str(event.get("delta", ""))
                         if not delta:
                             continue
+                        text_len += len(delta)
                         yield {
                             "id": chunk_id or f"resp-{index}",
                             "object": "chat.completion.chunk",
@@ -1964,6 +1972,7 @@ class DirectProviderClient:
                         delta = str(event.get("delta", ""))
                         if not delta:
                             continue
+                        think_len += len(delta)
                         yield {
                             "id": str(event.get("item_id") or f"resp-{index}"),
                             "object": "chat.completion.chunk",
@@ -1981,6 +1990,7 @@ class DirectProviderClient:
                         text = str(event.get("text", ""))
                         if not text:
                             continue
+                        think_len += len(text)
                         yield {
                             "id": str(event.get("item_id") or f"resp-{index}"),
                             "object": "chat.completion.chunk",
@@ -1996,6 +2006,7 @@ class DirectProviderClient:
                         index += 1
                     elif etype in ("response.function_call.delta", "response.tool_call.delta"):
                         # Streaming function call arguments
+                        tool_n += 1
                         yield {
                             "id": str(event.get("item_id") or f"resp-{index}"),
                             "object": "chat.completion.chunk",
@@ -2041,6 +2052,7 @@ class DirectProviderClient:
                         # If there are function calls, emit them as tool_calls deltas before final
                         for it in resp.get("output", []) or []:
                             if isinstance(it, dict) and it.get("type") in ("function_call", "tool_call"):
+                                tool_n += 1
                                 yield {
                                     "id": str(resp.get("id", "")) or f"resp-{index}",
                                     "object": "chat.completion.chunk",
@@ -2065,6 +2077,47 @@ class DirectProviderClient:
                                     ],
                                 }
                                 index += 1
+                        if not has_fn and text_len == 0 and tool_n == 0 and think_len == 0:
+                            # The stream completed without a single usable
+                            # chunk: no text, no tool calls, no reasoning.
+                            # A refusal is still information — surface it as
+                            # content so Hermes can react instead of seeing
+                            # another deterministic "empty".
+                            refusal = ""
+                            for it in resp.get("output", []) or []:
+                                if not isinstance(it, dict):
+                                    continue
+                                if it.get("type") == "message":
+                                    for part in it.get("content", []) or []:
+                                        if isinstance(part, dict) and part.get("type") == "refusal" and part.get("refusal"):
+                                            refusal = str(part["refusal"])
+                                            break
+                                if refusal:
+                                    break
+                            if refusal:
+                                text_len += len(refusal)
+                                yield {
+                                    "id": str(resp.get("id", "")) or f"resp-{index}",
+                                    "object": "chat.completion.chunk",
+                                    "model": str(resp.get("model", "")) or bare,
+                                    "choices": [
+                                        {
+                                            "index": 0,
+                                            "delta": {"content": refusal},
+                                            "finish_reason": None,
+                                        }
+                                    ],
+                                }
+                                index += 1
+                            else:
+                                # Nothing usable reached the client, so the
+                                # chain can re-drive the remaining candidates
+                                # as a fresh stream (zero-chunk recovery) —
+                                # never complete this as 200-empty.
+                                raise UpstreamProviderError(
+                                    502,
+                                    f"upstream returned empty response (no text, tool calls or reasoning): {endpoint.name}",
+                                )
                         yield {
                             "id": str(resp.get("id", "")) or f"resp-{index}",
                             "object": "chat.completion.chunk",

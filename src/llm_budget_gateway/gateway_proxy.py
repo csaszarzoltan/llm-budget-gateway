@@ -2481,9 +2481,12 @@ class GatewayProxy:
                         # Truncation diagnosis: why the stream ended, and did
                         # the client actually receive any output?
                         record.finish_reason = self._extract_finish_reason(gen_chunks)
+                        # NOTE: completion (output) tokens, not total: a 181k
+                        # prompt with 0 output tokens is an empty reply
+                        # (measured 2026-10-07 — total_tokens never catches it).
                         record.empty_response = bool(
                             record.status == "success"
-                            and record.total_tokens == 0
+                            and (getattr(record, "completion_tokens", 0) or 0) == 0
                         )
                         record.client_id = client_id
                         record.client_profile = client_profile
@@ -2529,7 +2532,7 @@ class GatewayProxy:
             # received no output for (scored as a failure by the usage API).
             record.finish_reason = self._extract_finish_reason(response.body)
             record.empty_response = bool(
-                record.status == "success" and record.total_tokens == 0
+                record.status == "success" and (getattr(record, "completion_tokens", 0) or 0) == 0
             )
             # Tag the record with client identity and cache status.
             record.client_id = client_id

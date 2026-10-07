@@ -1067,3 +1067,119 @@ async def test_stream_reasoning_delta_yields_reasoning_content():
     assert any(
         c["choices"][0]["delta"].get("content") == "pong" for c in chunks
     )
+
+
+# ---------------------------------------------------------------------------
+# 2026-10-07 12:33 EDT incident: luna streamed to completion (stop,
+# 224-324 output tokens) with zero text/tool/reasoning deltas — Hermes got
+# 200-empty on all retries ("No reply ... even after retries"). A stream that
+# completes with nothing usable must fail over, never complete empty.
+# ---------------------------------------------------------------------------
+
+def _stream_client(lines):
+    from llm_budget_gateway.provider_direct import DirectProviderClient
+
+    class _Ctx:
+        async def __aenter__(self):
+            class R:
+                status_code = 200
+
+                async def aread(self):
+                    return b""
+
+                async def aiter_lines(self):
+                    for ln in lines:
+                        yield ln
+
+            return R()
+
+        async def __aexit__(self, *exc):
+            return False
+
+    def _stream(method, url, json=None, headers=None):  # noqa: A002
+        return _Ctx()
+
+    client = DirectProviderClient(registry={})
+    ep = _endpoint()
+    object.__setattr__(ep, "api_mode", "codex_responses")
+    client._registry["opencode-go"] = ep
+    client._model_index["muse-spark-1.2-contributor"] = ep
+    object.__setattr__(client, "_client", type("C", (), {"stream": staticmethod(_stream)})())
+    return client
+
+
+def _completed_line(output, usage_out=324):
+    import json as _j
+    return "data: " + _j.dumps({
+        "type": "response.completed",
+        "response": {
+            "id": "resp_empty9",
+            "model": "muse-spark-1.2-contributor",
+            "status": "completed",
+            "output": output,
+            "usage": {"input_tokens": 181394, "output_tokens": usage_out,
+                      "total_tokens": 181394 + usage_out},
+        },
+    })
+
+
+def _reasoning_only_output():
+    return [
+        {"type": "reasoning", "id": "rs_1", "summary": [], "content": [],
+         "encrypted_content": "opaque-not-forwardable"},
+        {"type": "message", "id": "msg_1", "role": "assistant",
+         "status": "completed", "content": []},
+    ]
+
+
+@pytest.mark.asyncio
+async def test_stream_empty_completed_raises_502_for_fallback():
+    """Zero usable chunks + completed = 502, so the chain re-drives (no 200-empty)."""
+    client = _stream_client([
+        _completed_line(_reasoning_only_output()),
+        "data: [DONE]",
+    ])
+    with pytest.raises(UpstreamProviderError) as excinfo:
+        async for _c in client.stream_chunks(
+            "muse-spark-1.2-contributor",
+            {"messages": [{"role": "user", "content": "Summarize this."}]},
+        ):
+            pass
+    assert excinfo.value.status_code == 502
+
+
+@pytest.mark.asyncio
+async def test_stream_refusal_completed_yields_content_not_raise():
+    """A refusal in the completed object is surfaced, not failed over."""
+    output = _reasoning_only_output()
+    output[1]["content"] = [{"type": "refusal", "refusal": "I cannot help with that."}]
+    client = _stream_client([_completed_line(output), "data: [DONE]"])
+    chunks = [
+        c async for c in client.stream_chunks(
+            "muse-spark-1.2-contributor",
+            {"messages": [{"role": "user", "content": "hi"}]},
+        )
+    ]
+    assert any(
+        c["choices"][0]["delta"].get("content") == "I cannot help with that."
+        for c in chunks
+    )
+
+
+@pytest.mark.asyncio
+async def test_stream_partial_text_then_empty_finish_no_raise():
+    """Partial text already delivered = usable; never fail over a live prefix."""
+    client = _stream_client([
+        'data: {"type":"response.output_text.delta","item_id":"it1","delta":"hello"}',
+        _completed_line([], usage_out=5),
+        "data: [DONE]",
+    ])
+    chunks = [
+        c async for c in client.stream_chunks(
+            "muse-spark-1.2-contributor",
+            {"messages": [{"role": "user", "content": "hi"}]},
+        )
+    ]
+    assert any(
+        c["choices"][0]["delta"].get("content") == "hello" for c in chunks
+    )
