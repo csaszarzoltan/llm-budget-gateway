@@ -980,6 +980,83 @@ def create_console_app(
         except KeyError as exc:
             raise HTTPException(404, "unknown provider connection") from exc
 
+    @app.post("/v1/product/providers/{provider_id}/codex-oauth/refresh")
+    async def refresh_codex_oauth(provider_id: str) -> dict[str, object]:
+        """Refresh Codex OAuth tokens for a provider (own vault, no Hermes dependency)."""
+        from llm_budget_gateway.codex_oauth import CodexAuthError, refresh_codex_token
+        from llm_budget_gateway.codex_store import CodexOAuthStore
+        from pathlib import Path as _P
+
+        data_dir = _P(__file__).resolve().parents[2] / ".gateway-console"
+        store = CodexOAuthStore(data_dir / "codex-oauth.db", key_path=data_dir / "codex-oauth.key")
+        loaded = store.load(provider_id)
+        if not loaded or not loaded.get("refresh_token"):
+            raise HTTPException(404, detail="no Codex OAuth credentials for this provider")
+        try:
+            refreshed = refresh_codex_token(refresh_token=str(loaded["refresh_token"]), timeout_seconds=20.0)
+        except CodexAuthError as exc:
+            if getattr(exc, "relogin_required", False):
+                raise HTTPException(401, detail=str(exc)) from exc
+            raise HTTPException(502, detail=str(exc)) from exc
+        store.save(
+            provider_id=provider_id,
+            access_token=str(refreshed["access_token"]),
+            refresh_token=str(refreshed.get("refresh_token", loaded["refresh_token"])),
+            account_id=loaded.get("account_id"),
+        )
+        return {"ok": True, "provider_id": provider_id}
+
+    @app.post("/v1/product/providers/{provider_id}/codex-oauth/exchange")
+    async def exchange_codex_oauth(provider_id: str, request: Request) -> dict[str, object]:
+        """Exchange an OAuth authorization code for tokens (device/browser flow)."""
+        import httpx as _httpx
+        from llm_budget_gateway.codex_oauth import CODEX_CLIENT_ID, CODEX_OAUTH_TOKEN_URL
+
+        body = await request.json() if request.headers.get("content-type", "").startswith("application/json") else {}
+        code = str(body.get("code", "") or body.get("oauth_code", "")).strip()
+        verifier = str(body.get("code_verifier", "")).strip()
+        redirect_uri = str(body.get("redirect_uri", "")).strip()
+        if not code:
+            raise HTTPException(422, detail="missing 'code'")
+        data: dict[str, str] = {"grant_type": "authorization_code", "code": code, "client_id": CODEX_CLIENT_ID}
+        if verifier:
+            data["code_verifier"] = verifier
+        if redirect_uri:
+            data["redirect_uri"] = redirect_uri
+        async with _httpx.AsyncClient(timeout=20.0) as client:
+            resp = await client.post(
+                CODEX_OAUTH_TOKEN_URL,
+                headers={"Content-Type": "application/x-www-form-urlencoded"},
+                data=data,
+            )
+        if resp.status_code != 200:
+            raise HTTPException(502, detail=f"token exchange failed: {resp.status_code} {resp.text[:500]}")
+        payload = resp.json()
+        at = str(payload.get("access_token", "")).strip()
+        rt = str(payload.get("refresh_token", "")).strip()
+        if not at or not rt:
+            raise HTTPException(502, detail="token exchange did not return access_token/refresh_token")
+        from llm_budget_gateway.codex_store import CodexOAuthStore
+        from pathlib import Path as _P2
+
+        data_dir2 = _P2(__file__).resolve().parents[2] / ".gateway-console"
+        store2 = CodexOAuthStore(data_dir2 / "codex-oauth.db", key_path=data_dir2 / "codex-oauth.key")
+        store2.save(provider_id=provider_id, access_token=at, refresh_token=rt)
+        return {"ok": True, "provider_id": provider_id}
+
+    @app.get("/v1/product/providers/{provider_id}/codex-oauth/start")
+    async def start_codex_oauth(provider_id: str) -> dict[str, object]:
+        """Return a browser authorize URL for Codex OAuth (PKCE)."""
+        import secrets as _sec
+        import hashlib as _hl, base64 as _b64
+        from llm_budget_gateway.codex_oauth import codex_browser_authorize_url
+        verifier = _b64.urlsafe_b64encode(_sec.token_bytes(32)).decode().rstrip("=")
+        challenge = _b64.urlsafe_b64encode(_hl.sha256(verifier.encode()).digest()).decode().rstrip("=")
+        state = _sec.token_urlsafe(16)
+        redirect_uri = "http://localhost:1455/auth/callback"
+        url = codex_browser_authorize_url(redirect_uri=redirect_uri, state=state, code_challenge=challenge)
+        return {"authorize_url": url, "code_verifier": verifier, "state": state, "redirect_uri": redirect_uri}
+
     @app.get("/v1/product/providers")
     async def product_providers() -> dict[str, object]:
         return {"providers": product.providers()}

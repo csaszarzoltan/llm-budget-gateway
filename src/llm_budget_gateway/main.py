@@ -276,6 +276,75 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         except Exception:
             logger.exception("failed to attach direct provider transport")
 
+    # Codex OAuth auto-refresh: before each request, refresh expiring access_tokens
+    # from the gateway-owned vault (no Hermes auth.json reuse).
+    try:
+        from pathlib import Path as _P3
+
+        _codex_data_dir = data_dir
+        _codex_db = _codex_data_dir / "codex-oauth.db"
+        _codex_key = _codex_data_dir / "codex-oauth.key"
+        if _codex_db.exists() and _codex_key.exists():
+            from llm_budget_gateway.codex_store import CodexOAuthStore
+            from llm_budget_gateway.codex_oauth import is_access_token_expiring, refresh_codex_token
+
+            _codex_store = CodexOAuthStore(_codex_db, key_path=_codex_key)
+
+            def _ensure_codex_fresh(provider_id: str) -> None:
+                loaded = _codex_store.load(provider_id)
+                if not loaded:
+                    return
+                at = str(loaded.get("access_token", "") or "")
+                rt = str(loaded.get("refresh_token", "") or "")
+                if not at or not rt:
+                    return
+                if not is_access_token_expiring(at, skew_seconds=120):
+                    return
+                try:
+                    refreshed = refresh_codex_token(refresh_token=rt, timeout_seconds=20.0)
+                    _codex_store.save(
+                        provider_id=provider_id,
+                        access_token=str(refreshed["access_token"]),
+                        refresh_token=str(refreshed.get("refresh_token", rt)),
+                        account_id=loaded.get("account_id"),
+                    )
+                    # also update the in-memory endpoint so the current request uses the fresh token
+                    try:
+                        ep = direct._registry.get(provider_id)  # type: ignore[attr-defined]
+                        if ep is not None:
+                            ep.api_key_value = str(refreshed["access_token"])
+                    except Exception:
+                        pass
+                except Exception:
+                    # refresh failure is not fatal here; the request will 401 and the caller can re-auth
+                    import logging as _lg
+
+                    _lg.getLogger(__name__).warning("codex auto-refresh failed for %s", provider_id, exc_info=True)
+
+            # Patch the proxy to call _ensure_codex_fresh for oauth_codex endpoints
+            _orig_resolve = getattr(proxy, "_resolve_for_forward", None)
+            # Alternatively hook via DirectProviderClient.resolve — simplest: wrap direct.resolve
+            _orig_direct_resolve = direct.resolve  # type: ignore[attr-defined]
+
+            def _wrapped_resolve(model: str):  # type: ignore[no-redef]
+                ep = _orig_direct_resolve(model)
+                if getattr(ep, "auth", "") == "oauth_codex":
+                    _ensure_codex_fresh(ep.name)
+                    # re-read fresh token into endpoint for this request
+                    fresh = _codex_store.load(ep.name)
+                    if fresh and fresh.get("access_token"):
+                        ep.api_key_value = str(fresh["access_token"])
+                return ep
+
+            direct.resolve = _wrapped_resolve  # type: ignore[method-assign]
+            import logging as _lg2
+
+            _lg2.getLogger(__name__).info("codex OAuth auto-refresh armed for %s", _codex_store.list_ids())
+    except Exception:
+        import logging as _lg3
+
+        _lg3.getLogger(__name__).exception("codex OAuth auto-refresh setup failed")
+
     # Attach the LLM request telemetry logger (roadmap #1 observability).
     # Uses the same SQLite database as the cost ledger. Telemetry is
     # best-effort: if the DB is unavailable the logger falls back to

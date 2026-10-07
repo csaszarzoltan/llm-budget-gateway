@@ -851,6 +851,23 @@ PROVIDER_TYPES: list[dict[str, Any]] = [
             },
         ],
     },
+    {
+        "id": "openai_codex",
+        "name": "OpenAI Codex (ChatGPT Plus/Pro)",
+        "description": "ChatGPT subscription via chatgpt.com/backend-api/codex OAuth (Plus/Pro)",
+        "default_base_url": "https://chatgpt.com/backend-api/codex",
+        "discovery": "openai",
+        "protocol": "openai",
+        "docs_url": "https://chat.openai.com",
+        "group": "Frontier providers",
+        "fields": [
+            {"name": "oauth_code", "label": "OAuth code or tokens JSON (one-time setup)", "type": "secret_multiline", "required": False},
+            {"name": "api_key", "label": "Access token (auto-refreshed, leave empty if using OAuth code)", "type": "secret", "required": False},
+            {"name": "base_url", "label": "Base URL", "type": "url", "required": True},
+            {"name": "api_mode", "label": "API mode (chat_completions or codex_responses)", "type": "text", "required": False},
+            {"name": "min_output_tokens", "label": "Min output tokens (reasoning clamp)", "type": "text", "required": False},
+        ],
+    },
 ]
 
 
@@ -963,6 +980,9 @@ CREATE TABLE IF NOT EXISTS provider_models(provider_id TEXT NOT NULL,model_id TE
             for field in schema["fields"]
             if field["required"] and not str(merged.get(field["name"], "")).strip()
         ]
+        # openai_codex: OAuth flow — api_key / oauth_code are optional at create time
+        if provider_type == "openai_codex":
+            missing = [m for m in missing if m not in {"API key", "Access token (auto-refreshed, leave empty if using OAuth code)", "OAuth code or tokens JSON (one-time setup)"}]
         if missing:
             raise ValueError("missing connection fields: " + ", ".join(missing))
         # Validate min_output_tokens if provided
@@ -1013,6 +1033,26 @@ CREATE TABLE IF NOT EXISTS provider_models(provider_id TEXT NOT NULL,model_id TE
             self.db.commit()
         except sqlite3.IntegrityError as exc:
             raise ValueError("provider slug already exists") from exc
+        # openai_codex: if oauth_code carries tokens JSON, persist to gateway-owned codex-oauth.db
+        if provider_type == "openai_codex":
+            _oauth_code = str(config.get("oauth_code", "") or config.get("oauth_tokens", "") or "").strip()
+            if _oauth_code:
+                try:
+                    import json as _js
+                    from pathlib import Path as _PP
+
+                    _tok = _js.loads(_oauth_code) if _oauth_code.strip().startswith("{") else {}
+                    _at = str(_tok.get("access_token", "") or "").strip() if isinstance(_tok, dict) else ""
+                    _rt = str(_tok.get("refresh_token", "") or "").strip() if isinstance(_tok, dict) else ""
+                    if _at and _rt:
+                        # gateway-owned store (independent from Hermes auth.json)
+                        _data_dir = _PP(__file__).resolve().parents[2] / ".gateway-console"
+                        from llm_budget_gateway.codex_store import CodexOAuthStore
+
+                        _cs = CodexOAuthStore(_data_dir / "codex-oauth.db", key_path=_data_dir / "codex-oauth.key")
+                        _cs.save(provider_id=pid, access_token=_at, refresh_token=_rt)
+                except Exception:
+                    pass
         return self.get(pid)
 
     def update(self, provider_id: str, config: dict[str, Any]) -> dict[str, Any]:
@@ -1099,6 +1139,24 @@ CREATE TABLE IF NOT EXISTS provider_models(provider_id TEXT NOT NULL,model_id TE
             self.db.commit()
         except sqlite3.IntegrityError as exc:
             raise ValueError("provider slug already exists") from exc
+        if provider_type == "openai_codex":
+            _oauth_code2 = str(config.get("oauth_code", "") or config.get("oauth_tokens", "") or "").strip()
+            if _oauth_code2:
+                try:
+                    import json as _js2
+                    from pathlib import Path as _PP2
+
+                    _tok2 = _js2.loads(_oauth_code2) if _oauth_code2.strip().startswith("{") else {}
+                    _at2 = str(_tok2.get("access_token", "") or "").strip() if isinstance(_tok2, dict) else ""
+                    _rt2 = str(_tok2.get("refresh_token", "") or "").strip() if isinstance(_tok2, dict) else ""
+                    if _at2 and _rt2:
+                        _data_dir2 = _PP2(__file__).resolve().parents[2] / ".gateway-console"
+                        from llm_budget_gateway.codex_store import CodexOAuthStore
+
+                        _cs2 = CodexOAuthStore(_data_dir2 / "codex-oauth.db", key_path=_data_dir2 / "codex-oauth.key")
+                        _cs2.save(provider_id=provider_id, access_token=_at2, refresh_token=_rt2)
+                except Exception:
+                    pass
         return self.get(provider_id)
 
     def get(self, provider_id: str) -> dict[str, Any]:
@@ -1347,6 +1405,8 @@ def _discovery_request(provider_type: str, config: dict[str, Any]) -> dict[str, 
     # raise "not available for this provider type" for all 13 of them,
     # while create() had already given them the OpenAI defaults. Branch on
     # the declared protocol so a new preset cannot land in this gap.
+    if provider_type == "openai_codex":
+        return {"method": "GET", "url": base + "/models", "headers": {"Authorization": f"Bearer {config.get('api_key', '') or config.get('access_token', '')}"}}
     if provider_type in {"openai", "openai_compatible"} or _uses_openai_discovery(
         provider_type
     ):

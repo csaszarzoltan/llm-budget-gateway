@@ -586,6 +586,13 @@ class ProviderEndpoint:
             headers = {"x-api-key": key}
         elif self.auth == "query":
             headers = {}
+        elif self.auth == "oauth_codex":
+            # Codex OAuth: Bearer + ChatGPT-Account-ID + residency + originator
+            try:
+                from llm_budget_gateway.codex_oauth import codex_oauth_headers
+                headers = codex_oauth_headers(key, base_url=self.base_url)
+            except Exception:
+                headers = {"Authorization": f"Bearer {key}"}
         else:
             headers = {"Authorization": f"Bearer {key}"}
         # Client emulation: some gateways (e.g. opencode.ai/zen) serve their
@@ -849,7 +856,7 @@ class DirectProviderClient:
                     f"provider '{name}': api_key_env is required"
                 )
             auth = str(raw.get("auth", "bearer"))
-            if auth not in {"bearer", "x-api-key", "query"}:
+            if auth not in {"bearer", "x-api-key", "query", "oauth_codex"}:
                 raise ProviderConfigError(
                     f"provider '{name}': unsupported auth type {auth!r}"
                 )
