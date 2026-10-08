@@ -38,3 +38,6 @@ dist/
 
 # Rotated logs (logrotate): gateway.log.1.gz etc. — *.log alone misses them.
 *.log.[0-9]*
+
+# OAuth token key for the codex-oauth connector — secret, never commit.
+.gateway-console/codex-oauth.key
