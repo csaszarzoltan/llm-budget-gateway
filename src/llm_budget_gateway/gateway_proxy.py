@@ -12,6 +12,7 @@ import asyncio
 import inspect
 import json
 import logging
+import math
 import random
 import time
 from collections.abc import AsyncIterator, Callable
@@ -22,8 +23,10 @@ from uuid import uuid4
 import litellm
 
 from .budget_enforcement import (
+    DEFAULT_HOLD_OUTPUT_TOKENS,
     BudgetEnforcer,
     BudgetExceededError,
+    BudgetReservation,
     BudgetScope,
     RateLimitExceededError,
 )
@@ -769,6 +772,7 @@ class GatewayProxy:
             check = self._budget_enforcer.check_hard(scopes)
             if inspect.isawaitable(check):
                 await check
+            reservation = await self._reserve_hold(scopes, model, body)
         except BudgetExceededError as exc:
             err_resp = self._error_response(412, str(exc), model)
             self._emit_telemetry(
@@ -781,104 +785,180 @@ class GatewayProxy:
             return err_resp
 
         try:
-            response = await self._forward_with_fallback(model, body, api_key, headers)
-        except ProviderTimeoutError as exc:
-            # `exception`, not `warning`: four 502s appeared on the `smart`
-            # route with latency=0, tokens=0, finish_reason=None, and the
-            # journal held nothing but health lines for those minutes — the
-            # cause was unrecoverable after the fact. The exception type is
-            # in the message so the line is answerable without a traceback.
-            logger.exception(
-                "provider timeout request=%s model=%s type=%s detail=%s",
-                request_id, model, type(exc).__name__, exc,
-            )
-            err_resp = self._error_response(502, "upstream provider timed out", model)
-            self._emit_telemetry(
-                trace_id=request_id,
-                provider="litellm",
-                response=err_resp,
-                scope=scopes[0],
-                customer_id=self._resolve_request_customer(body, headers),
-            )
-            await self._record(
-                request_id=request_id,
-                scope=scopes[0],
-                model=model,
-                usage=None,
-                latency_ms=0,
-                status="timeout",
-                status_code=502,
-                customer_id=self._resolve_request_customer(body, headers),
-            )
-            return err_resp
-        except Exception as exc:
-            # See the ProviderTimeoutError branch above: a bare `warning` here
-            # is what made the `smart` 502s undiagnosable.
-            logger.exception(
-                "provider error request=%s model=%s type=%s detail=%s",
-                request_id,
-                model,
-                type(exc).__name__,
-                exc,
-            )
-            err_resp = self._error_response(502, "upstream provider error", model)
-            self._emit_telemetry(
-                trace_id=request_id,
-                provider="litellm",
-                response=err_resp,
-                scope=scopes[0],
-                customer_id=self._resolve_request_customer(body, headers),
-            )
-            await self._record(
-                request_id=request_id,
-                scope=scopes[0],
-                model=model,
-                usage=None,
-                latency_ms=0,
-                status="error",
-                status_code=502,
-                customer_id=self._resolve_request_customer(body, headers),
-            )
-            return err_resp
+            try:
+                response = await self._forward_with_fallback(model, body, api_key, headers)
+            except ProviderTimeoutError as exc:
+                # `exception`, not `warning`: four 502s appeared on the `smart`
+                # route with latency=0, tokens=0, finish_reason=None, and the
+                # journal held nothing but health lines for those minutes — the
+                # cause was unrecoverable after the fact. The exception type is
+                # in the message so the line is answerable without a traceback.
+                logger.exception(
+                    "provider timeout request=%s model=%s type=%s detail=%s",
+                    request_id, model, type(exc).__name__, exc,
+                )
+                err_resp = self._error_response(502, "upstream provider timed out", model)
+                self._emit_telemetry(
+                    trace_id=request_id,
+                    provider="litellm",
+                    response=err_resp,
+                    scope=scopes[0],
+                    customer_id=self._resolve_request_customer(body, headers),
+                )
+                await self._record(
+                    request_id=request_id,
+                    scope=scopes[0],
+                    model=model,
+                    usage=None,
+                    latency_ms=0,
+                    status="timeout",
+                    status_code=502,
+                    customer_id=self._resolve_request_customer(body, headers),
+                )
+                return err_resp
+            except Exception as exc:
+                # See the ProviderTimeoutError branch above: a bare `warning` here
+                # is what made the `smart` 502s undiagnosable.
+                logger.exception(
+                    "provider error request=%s model=%s type=%s detail=%s",
+                    request_id,
+                    model,
+                    type(exc).__name__,
+                    exc,
+                )
+                err_resp = self._error_response(502, "upstream provider error", model)
+                self._emit_telemetry(
+                    trace_id=request_id,
+                    provider="litellm",
+                    response=err_resp,
+                    scope=scopes[0],
+                    customer_id=self._resolve_request_customer(body, headers),
+                )
+                await self._record(
+                    request_id=request_id,
+                    scope=scopes[0],
+                    model=model,
+                    usage=None,
+                    latency_ms=0,
+                    status="error",
+                    status_code=502,
+                    customer_id=self._resolve_request_customer(body, headers),
+                )
+                return err_resp
 
-        await self._record(
-            request_id=request_id,
-            scope=scopes[0],
-            model=response.model,
-            usage=response.usage,
-            latency_ms=response.latency_ms,
-            status="success",
-            customer_id=self._resolve_request_customer(body, headers),
-        )
-        # Emit LLM request telemetry (roadmap #1 observability).
-        self._emit_telemetry(
-            trace_id=request_id,
-            provider="litellm",
-            response=response,
-            scope=scopes[0],
-            customer_id=self._resolve_request_customer(body, headers),
-            conversation_id=self._extract_session_id(body) or None,
-        )
-        # Rate-limit visibility: attach standard X-RateLimit-* headers from
-        # the last check_sync so clients (Hermes) can show remaining quota.
+            await self._record(
+                request_id=request_id,
+                scope=scopes[0],
+                model=response.model,
+                usage=response.usage,
+                latency_ms=response.latency_ms,
+                status="success",
+                customer_id=self._resolve_request_customer(body, headers),
+            )
+            # Emit LLM request telemetry (roadmap #1 observability).
+            self._emit_telemetry(
+                trace_id=request_id,
+                provider="litellm",
+                response=response,
+                scope=scopes[0],
+                customer_id=self._resolve_request_customer(body, headers),
+                conversation_id=self._extract_session_id(body) or None,
+            )
+            # Rate-limit visibility: attach standard X-RateLimit-* headers from
+            # the last check_sync so clients (Hermes) can show remaining quota.
+            try:
+                rl = getattr(self._budget_enforcer, "_last_rate_limit_state", {})
+                if rl:
+                    first = next(iter(rl.values()))
+                    response.headers = dict(response.headers or {})
+                    if "tpm_remaining" in first:
+                        response.headers["X-RateLimit-Remaining"] = str(
+                            first["tpm_remaining"]
+                        )
+                    if "rpm_remaining" in first:
+                        response.headers["X-RateLimit-RPM-Remaining"] = str(
+                            first["rpm_remaining"]
+                        )
+                    if "reset_at" in first:
+                        response.headers["X-RateLimit-Reset"] = str(first["reset_at"])
+            except Exception:
+                logger.exception("rate limit header attach failed request=%s", request_id)
+            return response
+        finally:
+            self._release_hold(reservation)
+
+    def _hold_amount(self, model: str, body: dict) -> float:
+        """Upper-bound cost the request may incur: input estimate plus the
+        declared output cap (or DEFAULT_HOLD_OUTPUT_TOKENS when undeclared).
+
+        A cost that cannot be estimated returns ``inf``, so a capped scope
+        refuses the request (fail closed).
+        """
         try:
-            rl = getattr(self._budget_enforcer, "_last_rate_limit_state", {})
-            if rl:
-                first = next(iter(rl.values()))
-                response.headers = dict(response.headers or {})
-                if "tpm_remaining" in first:
-                    response.headers["X-RateLimit-Remaining"] = str(
-                        first["tpm_remaining"]
-                    )
-                if "rpm_remaining" in first:
-                    response.headers["X-RateLimit-RPM-Remaining"] = str(
-                        first["rpm_remaining"]
-                    )
-                if "reset_at" in first:
-                    response.headers["X-RateLimit-Reset"] = str(first["reset_at"])
+            max_out = body.get("max_completion_tokens", body.get("max_tokens"))
+            if isinstance(max_out, bool) or not isinstance(max_out, int) or max_out < 0:
+                max_out = DEFAULT_HOLD_OUTPUT_TOKENS
+            input_tokens = self._fallback_manager.estimate_tokens(body)
+            _, _, total = self._cost_tracker.estimate_cost(model, input_tokens, max_out)
+            return float(total)
         except Exception:
-            logger.exception("rate limit header attach failed request=%s", request_id)
+            logger.exception("cost estimate failed for hold model=%s", model)
+            return math.inf
+
+    async def _reserve_hold(
+        self, scopes: list[BudgetScope], model: str, body: dict
+    ) -> BudgetReservation | None:
+        """Take the pre-dispatch hold. Raises BudgetExceededError when it does
+        not fit under any hard limit."""
+        reserve = getattr(self._budget_enforcer, "reserve", None)
+        if reserve is None:
+            return None
+        result = reserve(scopes, self._hold_amount(model, body))
+        if inspect.isawaitable(result):
+            result = await result
+        return result
+
+    async def _reserve_route_hold(
+        self, api_key: str, headers: dict, candidates: list[str], body: dict
+    ) -> BudgetReservation | None:
+        """Managed-route hold. A route may serve any candidate, so the hold is
+        priced at the most expensive one."""
+        reserve = getattr(self._budget_enforcer, "reserve", None)
+        if reserve is None:
+            return None
+        amount = max((self._hold_amount(str(c), body) for c in candidates), default=0.0)
+        result = reserve(self._scopes_for(str(api_key), headers), amount)
+        if inspect.isawaitable(result):
+            result = await result
+        return result
+
+    def _hand_over_hold(
+        self, response: ProviderResponse, reservation: BudgetReservation | None
+    ) -> ProviderResponse:
+        """Release now, or — for a live stream — once the stream has finished,
+        because the stream's cost is recorded only at its end."""
+        if reservation is None:
+            return response
+        if not isinstance(response.body, AsyncIterator):
+            self._release_hold(reservation)
+            return response
+        original = response.body
+
+        async def _held() -> AsyncIterator[str]:
+            try:
+                async for chunk in original:
+                    yield chunk
+            finally:
+                self._release_hold(reservation)
+
+        response.body = _held()
         return response
+
+    def _release_hold(self, reservation: BudgetReservation | None) -> None:
+        """Release the hold after the cost record is written (or on failure)."""
+        release = getattr(self._budget_enforcer, "release", None)
+        if reservation is not None and release is not None:
+            release(reservation)
 
     async def _handle_logical_route(
         self, body: dict, api_key: str, headers: dict, request_id: str
@@ -921,49 +1001,60 @@ class GatewayProxy:
         fallback = cache_state["fallback"]
         session_id = sticky["session_id"]
         sticky_model = sticky["model"]
-        response, served, fallback, chain_started = await self._run_candidate_chain(
-            candidates=candidates,
-            outbound=outbound,
-            route=route,
-            route_name=route_name,
-            from_plane=from_plane,
-            fallback_statuses=fallback_statuses,
-            target_cooldowns=target_cooldowns,
-            fallback=fallback,
-            request_id=request_id,
-        )
-        finalize_kwargs = dict(
-            body=body,
-            api_key=api_key,
-            headers=headers,
-            metadata=metadata,
-            request_id=request_id,
-            alias=alias,
-            route=route,
-            route_name=route_name,
-            from_plane=from_plane,
-            session_id=session_id,
-            sticky_model=sticky_model,
-            outbound=outbound,
-            want_cache=cache_state["want_cache"],
-            client_id=client_id,
-            client_profile=client_profile,
-            conversation_id=conversation_id,
-            fallback=fallback,
-            served=served,
-            chain_started=chain_started,
-            candidates=candidates,
-            fallback_statuses=fallback_statuses,
-            target_cooldowns=target_cooldowns,
-        )
-        # NOTE: mid-stream upstream death (opencode [server_error] after the
-        # first chunk) is recovered INSIDE _finalize_route_response's
-        # _wrapped_stream generator — it re-drives the remaining candidates
-        # as a fresh stream there, because the failure surfaces during SSE
-        # iteration (after this function returned), not during this call.
-        return await self._finalize_route_response(
-            response=response, **finalize_kwargs
-        )
+        try:
+            reservation = await self._reserve_route_hold(
+                api_key, headers, candidates, body
+            )
+        except BudgetExceededError as exc:
+            return self._error_response(412, str(exc), alias)
+        try:
+            response, served, fallback, chain_started = await self._run_candidate_chain(
+                candidates=candidates,
+                outbound=outbound,
+                route=route,
+                route_name=route_name,
+                from_plane=from_plane,
+                fallback_statuses=fallback_statuses,
+                target_cooldowns=target_cooldowns,
+                fallback=fallback,
+                request_id=request_id,
+            )
+            finalize_kwargs = dict(
+                body=body,
+                api_key=api_key,
+                headers=headers,
+                metadata=metadata,
+                request_id=request_id,
+                alias=alias,
+                route=route,
+                route_name=route_name,
+                from_plane=from_plane,
+                session_id=session_id,
+                sticky_model=sticky_model,
+                outbound=outbound,
+                want_cache=cache_state["want_cache"],
+                client_id=client_id,
+                client_profile=client_profile,
+                conversation_id=conversation_id,
+                fallback=fallback,
+                served=served,
+                chain_started=chain_started,
+                candidates=candidates,
+                fallback_statuses=fallback_statuses,
+                target_cooldowns=target_cooldowns,
+            )
+            # NOTE: mid-stream upstream death (opencode [server_error] after the
+            # first chunk) is recovered INSIDE _finalize_route_response's
+            # _wrapped_stream generator — it re-drives the remaining candidates
+            # as a fresh stream there, because the failure surfaces during SSE
+            # iteration (after this function returned), not during this call.
+            response = await self._finalize_route_response(
+                response=response, **finalize_kwargs
+            )
+        except BaseException:
+            self._release_hold(reservation)
+            raise
+        return self._hand_over_hold(response, reservation)
 
     @staticmethod
     def _plan_fields(plan: dict) -> tuple:
@@ -3393,6 +3484,10 @@ class GatewayProxy:
         key_id = self._settings.virtual_keys.get(api_key)
         if key_id is None:
             raise ApiKeyError("invalid or missing api key")
+        return self._scopes_for(key_id, headers)
+
+    def _scopes_for(self, key_id: str, headers: dict) -> list[BudgetScope]:
+        """Key scope, header-mapped user/team scopes, then the global scope."""
         scopes = [BudgetScope(kind="key", key=key_id)]
         lowered = {str(name).lower(): value for name, value in headers.items()}
         for header, kind in self._settings.user_header_mappings.items():

@@ -10,11 +10,13 @@ Import direction (acyclic): budget_enforcement -> cost_tracking (type-only).
 
 from __future__ import annotations
 
+import asyncio
 import calendar
+import math
 import time
 from collections import OrderedDict
 from collections.abc import Callable
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from pathlib import Path
 from threading import Lock
 from typing import TYPE_CHECKING, Protocol
@@ -30,6 +32,14 @@ _SCOPE_KINDS = ("global", "team", "user", "key")
 #: past this size so long uptime does not grow memory without bound (review
 #: minor: InMemoryCounterStore keys were never pruned).
 _MAX_COUNTER_BUCKETS = 10_000
+
+#: Seconds an in-flight hold lives before it is treated as abandoned. A request
+#: that never reaches its release (process crash, lost task) must not block the
+#: budget forever, so holds expire on their own.
+DEFAULT_HOLD_TTL_SECONDS = 900
+
+#: Output-token allowance held for a request that declares no max_tokens.
+DEFAULT_HOLD_OUTPUT_TOKENS = 4096
 
 
 @dataclass(frozen=True)
@@ -54,6 +64,24 @@ class BudgetConfig:
     window: str = "30d"  # "30s" | "30m" | "30h" | "30d" | "daily" | "monthly"
     tpm_limit: int | None = None  # tokens per minute (sync ceiling, 429)
     rpm_limit: int | None = None  # requests per minute (sync ceiling, 429)
+
+
+@dataclass
+class BudgetHold:
+    """An in-flight claim on one scope's hard limit, released after settlement."""
+
+    hold_id: int
+    scope_key: str
+    amount: float
+    expires_at: int
+
+
+@dataclass
+class BudgetReservation:
+    """The holds taken for one request. ``release`` is idempotent."""
+
+    holds: list[BudgetHold] = field(default_factory=list)
+    released: bool = False
 
 
 class BudgetExceededError(Exception):
@@ -163,12 +191,19 @@ class BudgetEnforcer:
         cost_tracker: CostTracker,
         counter_store: CounterStore | None = None,
         now_fn: Callable[[], int] | None = None,
+        hold_ttl_seconds: int = DEFAULT_HOLD_TTL_SECONDS,
     ) -> None:
         self.configs = configs
         self.cost_tracker = cost_tracker
         self.counter_store = counter_store
         self._now_fn = now_fn if now_fn is not None else (lambda: int(time.time()))
         self._last_rate_limit_state: dict[str, dict[str, object]] = {}
+        self._hold_ttl_seconds = hold_ttl_seconds
+        self._holds: dict[int, BudgetHold] = {}
+        self._next_hold_id = 0
+        # Serializes check-then-hold so concurrent requests see each other's
+        # holds. Created here; asyncio binds it to the running loop on first use.
+        self._reserve_lock = asyncio.Lock()
 
     def config_for(self, scope: BudgetScope) -> BudgetConfig | None:
         """Return the config whose scope matches ``scope`` (by scope_key)."""
@@ -228,6 +263,76 @@ class BudgetEnforcer:
             spend = await self.cost_tracker.spend_since(scope.scope_key(), since)
             if spend >= cfg.hard_limit:
                 raise BudgetExceededError(scope, spend, cfg.hard_limit)
+
+    async def reserve(
+        self, scopes: list[BudgetScope], amount: float
+    ) -> BudgetReservation:
+        """Hold ``amount`` against every hard-limited scope, or refuse.
+
+        Committed spend plus the in-flight holds for each scope must stay within
+        its hard limit after the new hold. The check and the hold happen under one
+        lock, so a concurrent caller cannot pass on headroom this call is about to
+        take. All scopes succeed or none is held. ``amount`` may be ``inf`` for a
+        request whose cost cannot be estimated; that fails closed on any capped scope.
+        """
+        if amount < 0 or math.isnan(amount):
+            raise ValueError("reservation amount must be a non-negative number")
+        reservation = BudgetReservation()
+        if self.cost_tracker is None:
+            return reservation
+        async with self._reserve_lock:
+            now = int(self._now_fn())
+            self._expire_holds(now)
+            capped: list[BudgetScope] = []
+            for scope in scopes:
+                cfg = self.config_for(scope)
+                if cfg is None or cfg.hard_limit is None:
+                    continue
+                since = now - self.window_seconds(cfg.window)
+                committed = await self.cost_tracker.spend_since(scope.scope_key(), since)
+                in_flight = self._held_for(scope.scope_key(), now)
+                # ``>=`` on committed + in-flight matches check_hard: a scope
+                # already at its cap refuses even a zero-cost request.
+                used = committed + in_flight
+                if used >= cfg.hard_limit or used + amount > cfg.hard_limit:
+                    raise BudgetExceededError(
+                        scope, committed + in_flight, cfg.hard_limit
+                    )
+                capped.append(scope)
+            for scope in capped:
+                self._next_hold_id += 1
+                hold = BudgetHold(
+                    hold_id=self._next_hold_id,
+                    scope_key=scope.scope_key(),
+                    amount=amount,
+                    expires_at=now + self._hold_ttl_seconds,
+                )
+                self._holds[hold.hold_id] = hold
+                reservation.holds.append(hold)
+        return reservation
+
+    def release(self, reservation: BudgetReservation) -> None:
+        """Drop a reservation's holds. Safe to call more than once."""
+        if reservation.released:
+            return
+        for hold in reservation.holds:
+            self._holds.pop(hold.hold_id, None)
+        reservation.released = True
+
+    def held_amount(self, scope_key: str) -> float:
+        """Sum of unexpired in-flight holds on ``scope_key``."""
+        return self._held_for(scope_key, int(self._now_fn()))
+
+    def _held_for(self, scope_key: str, now: int) -> float:
+        return sum(
+            hold.amount
+            for hold in self._holds.values()
+            if hold.scope_key == scope_key and hold.expires_at > now
+        )
+
+    def _expire_holds(self, now: int) -> None:
+        for hold_id in [h.hold_id for h in self._holds.values() if h.expires_at <= now]:
+            del self._holds[hold_id]
 
     def soft_exceeded(self, scopes: list[BudgetScope]) -> list[BudgetScope]:
         """Return scopes past their soft limit; never raises."""

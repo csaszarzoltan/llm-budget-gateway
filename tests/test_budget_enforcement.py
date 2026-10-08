@@ -192,6 +192,7 @@ class TestBudgetEnforcementInterface:
             "cost_tracker",
             "counter_store",
             "now_fn",
+            "hold_ttl_seconds",
         ]
         assert sig.parameters["counter_store"].default is None
         assert sig.parameters["now_fn"].default is None
