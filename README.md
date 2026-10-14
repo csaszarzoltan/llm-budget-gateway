@@ -7,7 +7,7 @@ Point your existing OpenAI SDK or tool at the gateway. Each request is checked a
 ## Features
 
 - **Budget enforcement:** set spending limits per key, user or team. A request that would exceed a hard budget is refused with HTTP 412 before it reaches the provider.
-- **Logical routes and fallback:** call a route by name instead of a provider model. Routes have immutable versions, weighted splits and fallback chains, so one provider outage does not stop your app.
+- **Logical routes and fallback:** call a route by name instead of a provider model. Routes have immutable versions, weighted splits and fallback chains, so a failing provider can fall through to the next target.
 - **Cockpit:** a web UI for routes, providers, activity traces, usage and cost, alerts and governance.
 - **Safety tools:** a Runaway Cost Firewall that fails closed before an agent exceeds its cost, token, tool-call or time limits; an Agent Runtime Governor that detects repeated actions and intent drift; a Provider Compatibility Lab; and an incident timeline built from real routing decisions.
 - **Opt-in request features:** exact-response cache (`X-Gateway-Cache: 1`), PII redaction (`X-Gateway-Redact-Pii: 1`) and cost-aware routing (`metadata.cost_aware`).
