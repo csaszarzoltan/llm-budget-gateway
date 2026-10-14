@@ -1,60 +1,100 @@
 # LLM Budget Gateway
 
-A local-first, OpenAI-compatible AI gateway and operations control plane with budget enforcement, logical routing, provider discovery, trace analytics, governance, and a React product cockpit.
+A local-first, OpenAI-compatible AI gateway that enforces spending budgets, routes requests across models with automatic fallback, and includes a web cockpit to see and control it all.
 
-## Requirements
+Point your existing OpenAI SDK or tool at the gateway. Each request is checked against your budgets, recorded in a local ledger, and sent to the provider you configured. Provider keys stay on your server.
 
-- Python 3.11+
-- `uv`
-- Node.js 20+ and npm when rebuilding the cockpit
+## Features
 
-## Install
+- **Budget enforcement:** set spending limits per key, user or team. A request that would exceed a hard budget is refused with HTTP 412 before it reaches the provider.
+- **Logical routes and fallback:** call a route by name instead of a provider model. Routes have immutable versions, weighted splits and fallback chains, so one provider outage does not stop your app.
+- **Cockpit:** a web UI for routes, providers, activity traces, usage and cost, alerts and governance.
+- **Safety tools:** a Runaway Cost Firewall that fails closed before an agent exceeds its cost, token, tool-call or time limits; an Agent Runtime Governor that detects repeated actions and intent drift; a Provider Compatibility Lab; and an incident timeline built from real routing decisions.
+- **Opt-in request features:** exact-response cache (`X-Gateway-Cache: 1`), PII redaction (`X-Gateway-Redact-Pii: 1`) and cost-aware routing (`metadata.cost_aware`).
+- **Observability:** request, cost, latency and success summaries, and trace export as OpenTelemetry/OpenInference-shaped documents.
+- **Governance:** MCP tool governance with per-tool budgets and audit trails, versioned prompts with A/B assignment, quality gates, and budget alerts by webhook, Slack, Telegram or email.
+
+## Quick start
+
+**Requirements:** Python 3.11+, [uv](https://docs.astral.sh/uv/), and Node.js 20+ (to build the cockpit).
 
 ```bash
+git clone https://github.com/csaszarzoltan/llm-budget-gateway.git
+cd llm-budget-gateway
 uv sync --extra dev --frozen
+
+# Git checkouts do not include the built cockpit (ui/dist is not tracked)
+cd ui && npm ci && npm run build && cd ..
+
+uv run gateway-system
 ```
 
-The release archive includes the built cockpit in `ui/dist`. To rebuild it:
+This starts the proxy on `http://127.0.0.1:8000` and the cockpit on `http://127.0.0.1:8013/cockpit`, and opens the cockpit in your browser. To run the same system without opening a browser:
 
 ```bash
-cd ui
-npm ci
-npm test
-npm run build
-cd ..
+uv run uvicorn llm_budget_gateway.system_launcher:create_system_app --factory --host 127.0.0.1 --port 8013
 ```
 
-## Run the complete local product
+Check readiness with `curl -s http://127.0.0.1:8013/v1/system/status`.
+
+## Use it from your code
+
+Start the proxy with at least one client key. Client keys map to internal key ids. Provider credentials stay on the server, either as environment variables or as encrypted connections added in the cockpit:
 
 ```bash
-uv run gateway-system --no-browser
-```
-
-Open `http://127.0.0.1:8013/cockpit`. Remove `--no-browser` to open it automatically.
-
-The launcher owns only child services it starts and exposes readiness at:
-
-```text
-GET http://127.0.0.1:8013/v1/system/status
-```
-
-## Run only the OpenAI-compatible gateway
-
-```bash
-export GATEWAY_VIRTUAL_KEYS='{"sk-test-123":"key1"}'
+export GATEWAY_VIRTUAL_KEYS='{"sk-local-123":"my-app"}'
+export OPENAI_API_KEY="sk-..."   # or any other provider key LiteLLM supports
 uv run uvicorn llm_budget_gateway.main:create_app --factory --host 127.0.0.1 --port 8000
 ```
 
-Verify:
+Send a request with curl:
 
 ```bash
-curl -s http://127.0.0.1:8000/health
-curl -s http://127.0.0.1:8000/v1/models
+curl http://127.0.0.1:8000/v1/chat/completions \
+  -H "Authorization: Bearer sk-local-123" \
+  -H "Content-Type: application/json" \
+  -d '{"model": "gpt-4o", "messages": [{"role": "user", "content": "Hello!"}]}'
 ```
 
-Provider credentials are read from the server environment. Client request bodies cannot override provider keys, base URLs, or headers.
+Or point the OpenAI Python SDK at it:
 
-## Test and quality gates
+```python
+from openai import OpenAI
+
+client = OpenAI(base_url="http://127.0.0.1:8000/v1", api_key="sk-local-123")
+reply = client.chat.completions.create(
+    model="gpt-4o",
+    messages=[{"role": "user", "content": "Hello!"}],
+)
+print(reply.choices[0].message.content)
+```
+
+Responses follow the provider's shape. Errors use these status codes:
+
+| Status | Meaning |
+|---|---|
+| 401 | Missing or unknown client key |
+| 404 | Unknown model |
+| 412 | Hard budget exhausted |
+| 429 | Rate ceiling reached |
+| 502 | Upstream provider failed |
+
+Full details: [Proxy setup](docs/proxy-setup.md#http-semantics).
+
+## Configuration
+
+Settings are read from environment variables with the `GATEWAY_` prefix. The most common ones:
+
+| Variable | Purpose |
+|---|---|
+| `GATEWAY_VIRTUAL_KEYS` | JSON map of client API keys to internal key ids |
+| `GATEWAY_BUDGET_CONFIG_PATH` | Budget YAML file (default `budgets.yaml`); start from `examples/budgets.example.yaml` |
+| `GATEWAY_DATABASE_URL` | SQLite ledger location |
+| `GATEWAY_ENABLE_SATELLITES` | Set to `1` to also start the legacy standalone services |
+
+The full reference is in [Configuration](docs/CONFIGURATION.md), and [`.env.example`](.env.example) is a template.
+
+## Development
 
 ```bash
 uv run pytest -q
@@ -62,140 +102,38 @@ uv run ruff check src tests examples
 cd ui && npm test && npm run build
 ```
 
-## Primary product areas
+See [CONTRIBUTING.md](CONTRIBUTING.md) for the workflow, code conventions and commit format. Engineering standards are in [docs/engineering-standards.md](docs/engineering-standards.md), decision records in [docs/decisions/](docs/decisions/), and specifications in [docs/specs/](docs/specs/).
 
-- **Home:** health, activation, KPIs, attention, active routes, recent decisions
-- **Applications:** application identities and stable route assignment
-- **Routes:** logical aliases, immutable versions, simulation, publishing, fallback
-- **Providers:** encrypted named connections and model discovery
-- **Activity:** explainable routing decisions and trace evidence
-- **Usage:** request, cost, latency, and success summaries
-- **Safety:** Runaway Cost Firewall, Provider Compatibility Lab, and Explain-and-Fix Incident Timeline
-- **Intelligence:** PII redaction, exact-response cache, anomaly detection and cost-aware routing (integrated into the proxy path, opt-in per request)
-- **Alerts:** Budget alert notification dispatch — webhook (HMAC-signed), Slack, Telegram, and email channels with cooldown dedup and retry
-- **Prompts:** immutable versioned prompt registry with deterministic A/B assignment
-- **Quality:** rule-based output evaluation, release gates, batch manifests and audit reports
-- **Advanced:** services, nested traces, governance, security, supply chain, and API access
+To build a release archive (after building the cockpit):
 
-## Integrated intelligence (14.1.0)
+```bash
+uv run python scripts/build_release.py dist/llm-budget-gateway.zip
+```
 
-The legacy satellite services (control, intelligence, operations, quality, security, resilience,
-optimization, collaboration, platform, agentops, fleet, assurance) are no longer auto-started.
-Their useful capabilities are folded into the cockpit product API and the proxy path:
+The builder fails if `ui/dist` is missing. It excludes virtual environments, node modules, caches, databases, logs, generated keys and TypeScript build metadata.
 
-- **Exact-response cache** — identical requests answered from SQLite cache (`X-Gateway-Cache: 1`
-  header or `metadata.cache: true`); successful responses are stored with a 5-minute TTL.
-- **PII redaction** — emails, cards and phones in user messages are masked locally before the
-  request reaches the provider (`X-Gateway-Redact-Pii: 1` header or `metadata.redact_pii: true`).
-- **Cost-aware routing** — eligible route targets reordered by lowest cost among healthy models
-  (`metadata.cost_aware: true`); falls back to fixed priority on any error.
-- **Prompt registry** — `GET/POST /v1/product/prompts`, `POST /v1/product/prompts/assign`.
-- **Quality** — `POST /v1/product/quality/evaluate`, `/release-gate`, `/batch`, `/audit`,
-  `GET /v1/product/quality/runs`.
-- **SLO monitor** — `GET /v1/product/slo` over the last 24h of cost records.
-
-Only the proxy (8000) and cockpit (8013) run by default. Set `GATEWAY_ENABLE_SATELLITES=1` to
-restore the legacy standalone services.
-
-## Key documentation
+## Documentation
 
 - [Getting started](docs/getting-started.md)
-- [GUI architecture](docs/gui-architecture-12.md)
-- [Logical routing API](docs/logical-routing-api.md)
+- [Proxy setup and HTTP semantics](docs/proxy-setup.md)
+- [Configuration reference](docs/CONFIGURATION.md)
+- [Budget configuration](docs/budget-configuration.md) and [cost tracking](docs/cost-tracking.md)
+- [Logical routing API](docs/logical-routing-api.md), [fallback chains](docs/fallback-chains.md) and [Route Studio](docs/route-studio.md)
 - [Provider connections](docs/provider-connections-13.2.md)
-- [Proxy setup](docs/proxy-setup.md)
-- [Budget configuration](docs/budget-configuration.md)
-- [Alert notifications](docs/alert-notifications.md)
+- [Safety operations API](docs/api/safety-operations-api.md)
 - [MCP governance](docs/mcp-governance.md)
-- [Market research](research-findings.md)
-- [Changelog](CHANGELOG.md)
+- [Alert notifications](docs/alert-notifications.md)
+- [Architecture](docs/ARCHITECTURE.md) and [deployment](docs/DEPLOYMENT.md)
+- [Feature history](docs/feature-history.md) (per-release notes) and [CHANGELOG](CHANGELOG.md)
 
-## Security and deployment notes
+## Security notes
 
-- Runtime databases, environment files, logs, provider master keys, virtual environments, and Node modules are excluded from source control.
-- SQLite is the default local/single-node store. Review the production-readiness APIs and documentation before multi-instance deployment.
-- MCP governance v1 is intentionally single-tenant and must not be exposed as a multi-tenant service without tenant-partitioned persistence.
+- Provider credentials stay on the server. Client requests cannot override provider keys, base URLs or headers.
+- Databases, logs, `.env` files and the provider master key are git-ignored. Keep them out of commits.
+- Services bind to `127.0.0.1` by default. Read [deployment](docs/DEPLOYMENT.md) before exposing them on a network.
+- SQLite is the default store and is meant for a single node. Check the production-readiness docs before running several instances.
+- MCP governance is single-tenant. Do not expose it as a multi-tenant service without tenant-partitioned storage.
 
 ## License
 
 MIT. See [LICENSE](LICENSE).
-
-
-## Research-ranked safety workflows (13.4.0)
-
-The validated market research prioritized three workflows because users repeatedly struggle with surprise agent bills, provider configuration failures, and operational ambiguity:
-
-1. **Runaway Cost Firewall:** use `POST /v1/console/runaway/evaluate` to fail closed before an agent exceeds cost, token, tool-call, depth, time, retry, or emergency-stop boundaries.
-2. **Provider Compatibility Lab:** open **Safety** or call `POST /v1/console/compatibility/{provider_id}/run`. The gateway uses the stored encrypted connection to execute non-destructive authentication, model discovery, chat, streaming, tool, structured-output, and embedding checks. Measured history is available from `GET /v1/console/compatibility/{provider_id}/history`. The older `/evaluate` endpoint is only for importing externally measured offline evidence.
-3. **Explain-and-Fix Incident Timeline:** select a real recent routing decision in **Safety** or call `GET /v1/console/incidents/from-request/{request_id}`. The response derives route, model, outcome, latency, reason, and cost evidence from the product activity ledger. Manual evidence import remains available for external systems.
-
-The complete Safety UI flow is responsive, keyboard accessible, includes loading/result/error states, and is built into `ui/dist` by `npm run build`. See [Safety Operations API](docs/api/safety-operations-api.md).
-
-
-
-## Market-priority workflows (13.5.0)
-
-Research identified three high-value jobs that now have dedicated product workflows:
-
-1. **Production Replay and Change Impact Lab** compares privacy-safe production evidence with a candidate model or configuration and reports semantic similarity, cost, token, latency, tool and safety-policy deltas. Use `POST /v1/console/replay/compare` or open **Safety** in the cockpit.
-2. **Agent Runtime Governor 2.0** detects repeated actions, intent drift and unapproved irreversible work before the next agent step. Use `POST /v1/console/governor/evaluate`.
-3. **Verified Compatibility and Pricing Catalog** stores measured provider/model capability contracts and exposes a freshness-aware matrix through `POST /v1/console/contracts` and `GET /v1/console/contracts/{provider_id}`.
-
-These workflows address the market-research findings that teams will pay for exact production replay, need enforcement before runaway agent spend occurs, and repeatedly lose time to provider capability and pricing uncertainty. All safety-evidence endpoints are local-only by default.
-
-
-## OpenTelemetry evidence plane (13.6.0)
-
-The local console now records gateway, model, agent, tool, policy, and budget evidence as tenant-isolated spans and exports OTLP-shaped documents with OpenInference semantic attributes. Sensitive prompt, output, authorization, password, token, and secret fields are redacted before SQLite persistence.
-
-- `POST /v1/console/evidence/spans` records one validated span.
-- `GET /v1/console/evidence/traces/{trace_id}?tenant_id=...` exports a portable trace.
-- Canonical JSON Lines export is available through the `EvidencePlane` domain service for offline ingestion.
-
-This addresses the market-research priority for telemetry portability and avoids locking operational evidence into a single observability vendor.
-
-
-## Safe releases and outcome-aware autopilot (13.7.0)
-
-The control plane now turns release and optimization evidence into fail-closed decisions:
-
-- **Verified backup and recovery:** creates consistent SQLite backups, binds them to SHA-256 evidence, runs SQLite integrity checks, and refuses tampered restores.
-- **Canary release gate:** requires provenance, backup, migration readiness, and full regression evidence before routing a bounded canary percentage.
-- **Measured promote/rollback decision:** rolls back when error rate, p95 latency, or quality crosses a configured guardrail.
-- **Outcome-aware autopilot:** recommends the lowest-cost measured candidate only when quality, success rate, and latency floors remain satisfied. It never applies a production change automatically and always requires approval.
-
-Console endpoints are `POST /v1/console/releases/plan`, `POST /v1/console/releases/canary-decision`, and `POST /v1/console/autopilot/recommend`.
-
-
-## Route Studio 14.0
-
-Routes are now managed through a production-oriented workspace rather than a single-model creation form.
-
-- Searchable, filterable route inventory with live/draft/archive status, strategy, versions and health.
-- Full-screen visual fallback-chain designer with Start, Model and End nodes, condition, weighted split and budget controls.
-- Inspector for model, timeout, retries, schedule, capability requirements, fallback HTTP status codes and per-request cost ceilings.
-- Mouse and keyboard reordering through explicit Move up/Move down controls.
-- Immutable draft versions, validation, no-call simulation, live publication and version history.
-- Dependency-aware archive, restore and exact-name-confirmed permanent deletion.
-- Responsive desktop, tablet and mobile layouts.
-
-See [Route Studio](docs/route-studio.md) for the interaction model and API.
-
-## Clean release packaging
-
-Build the cockpit first, then create a publication-safe archive:
-
-```bash
-cd ui && npm ci && npm test && npm run build && cd ..
-uv run python scripts/build_release.py dist/llm-budget-gateway.zip
-```
-
-The builder fails closed when `ui/dist` is missing and excludes virtual environments, Node modules, caches, databases, WAL/SHM files, logs, generated keys, and TypeScript build metadata.
-
-## Dokumentáció
-
-- [Engineering Standards](docs/engineering-standards.md) — kötelező olvasmány kódírás előtt
-- [Döntések / tanulságok](docs/decisions/) — javított hibák és anti-minták
-- [Specifikációk](docs/specs/) — feature-ök kanonikus követelményei
-
-- [Módszertan](docs/METHODOLOGY.md) — a lab fejlesztési módszertana (kötelező olvasmány)
