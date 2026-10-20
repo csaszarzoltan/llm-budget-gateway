@@ -3379,15 +3379,23 @@ class GatewayProxy:
                     return "completed"
             return None
         # Stream chunks: scan from the end for the terminal choice.
+        # The direct transport appends RAW upstream chunks, which are litellm /
+        # pydantic objects, not dicts. A dict-only read left finish_reason NULL
+        # on those streams, so read dicts and objects alike.
         if isinstance(source, (list, tuple)):
+
+            def field(obj: object, key: str) -> object:
+                return obj.get(key) if isinstance(obj, dict) else getattr(obj, key, None)
+
             for chunk in reversed(list(source)):
-                if not isinstance(chunk, dict):
-                    continue
-                for choice in chunk.get("choices") or []:
-                    if isinstance(choice, dict) and choice.get("finish_reason"):
-                        return str(choice["finish_reason"])
-                if chunk.get("status") in ("completed", "incomplete"):
-                    return "length" if chunk["status"] == "incomplete" else "completed"
+                choices = field(chunk, "choices")
+                for choice in choices if isinstance(choices, (list, tuple)) else []:
+                    reason = field(choice, "finish_reason")
+                    if reason:
+                        return str(reason)
+                status = field(chunk, "status")
+                if status in ("completed", "incomplete"):
+                    return "length" if status == "incomplete" else "completed"
         return None
 
     @staticmethod
