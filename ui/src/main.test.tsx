@@ -70,3 +70,11 @@ it('usage page shows the share of input tokens served from the prompt cache', ()
   expect(source).toContain('Prompt cache')
   expect(source).toContain('d?.cache?.cached_share')
 })
+
+it('usage toolbar wraps on narrow screens and the skip link is hidden until focused', () => {
+  expect(styles).toMatch(/\.usage-toolbar\{[^}]*flex-wrap:wrap/)
+  expect(styles).toMatch(/\.skip\{[^}]*left:-9999px/)
+  expect(styles).toContain('.skip:focus')
+  expect(styles).toMatch(/@media\s*\(max-width:640px\)\{[^@]*min-height:40px/)
+  expect(styles).toMatch(/@media\s*\(max-width:640px\)\{[^@]*\.calls-panel\{overflow-x:auto\}/)
+})
