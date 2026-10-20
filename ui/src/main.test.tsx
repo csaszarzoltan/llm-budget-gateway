@@ -54,3 +54,8 @@ it('home gateway banner is driven by the reported status, not hard-coded', () =>
   expect(source).toContain('Gateway unreachable')
   expect(source).not.toMatch(/<span className="healthy">● Gateway healthy<\/span>/)
 })
+
+it('usage page warns when traffic ran on models with no known price', () => {
+  expect(source).toContain('d?.unpriced?.requests')
+  expect(source).toContain('no known price')
+})

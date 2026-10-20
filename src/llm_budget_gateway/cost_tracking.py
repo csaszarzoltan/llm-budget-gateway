@@ -122,6 +122,10 @@ class UsageRecord:
     #: True when status="success" but total_tokens==0: the client received an
     #: EMPTY answer, which the usage page must not score as a success.
     empty_response: bool = False
+    #: True when tokens were recorded for a model with no known price, so
+    #: ``total_cost`` is 0.0 because the price is unknown, not because the
+    #: model is free. Budgets cannot protect such traffic.
+    unpriced: bool = False
 
 
 def accumulate_usage(chunks: list[dict]) -> TokenUsage:
@@ -172,6 +176,23 @@ class PriceMap:
             output_cost_per_million=float(output_per_token) * 1e6,
         )
 
+    def is_priced(self, model: str) -> bool:
+        """True when the price is known: an override (even an explicit zero
+        for a free model) or a complete litellm entry."""
+        if model in self._overrides:
+            return True
+        try:
+            import litellm
+
+            info = litellm.model_cost.get(model)
+        except Exception:
+            info = None
+        return bool(
+            info
+            and info.get("input_cost_per_token") is not None
+            and info.get("output_cost_per_token") is not None
+        )
+
     def add_override(self, model: str, price: ModelPrice) -> None:
         """Register a manual price that beats the litellm baseline."""
         self._overrides[model] = price
@@ -182,6 +203,10 @@ class CostCalculator:
 
     def __init__(self, price_map: PriceMap) -> None:
         self._price_map = price_map
+
+    def is_priced(self, model: str) -> bool:
+        """Whether ``model`` has a known price (see ``PriceMap.is_priced``)."""
+        return self._price_map.is_priced(model)
 
     def calculate(
         self, model: str, prompt_tokens: int, completion_tokens: int,
@@ -321,6 +346,7 @@ class CostStore:
             # / 0 and stay readable by every existing query.
             ("finish_reason", "TEXT"),
             ("empty_response", "INTEGER NOT NULL DEFAULT 0"),
+            ("unpriced", "INTEGER NOT NULL DEFAULT 0"),
         ):
             if column not in existing:
                 self._conn.execute(
@@ -358,8 +384,8 @@ class CostStore:
                     latency_ms, status, status_code, timestamp,
                     tool_name, project, route,
                     client_id, client_profile, cache_hit, conversation_id,
-                    customer_id, finish_reason, empty_response
-                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    customer_id, finish_reason, empty_response, unpriced
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 """,
                 (
                     record.request_id,
@@ -390,6 +416,7 @@ class CostStore:
                     record.customer_id,
                     record.finish_reason,
                     1 if record.empty_response else 0,
+                    1 if record.unpriced else 0,
                 ),
             )
             self._conn.commit()
@@ -697,6 +724,33 @@ class CostStore:
                 (route, model),
             )
             self._conn.commit()
+
+    def unpriced_summary(self, days: int = 1) -> dict[str, object]:
+        """Traffic recorded for models with no known price in the last ``days``.
+
+        Such rows carry ``total_cost`` 0.0 because the price is unknown, so
+        budgets cannot see them. Returns request and token totals plus the
+        per-model breakdown (largest first).
+        """
+        since = int(time.time()) - max(1, int(days)) * 86400
+        with self.shared_lock:
+            rows = self._conn.execute(
+                """
+                SELECT model, COUNT(*), COALESCE(SUM(total_tokens), 0)
+                FROM cost_records
+                WHERE unpriced = 1 AND timestamp >= ?
+                GROUP BY model ORDER BY SUM(total_tokens) DESC
+                """,
+                (since,),
+            ).fetchall()
+        return {
+            "requests": sum(int(r[1]) for r in rows),
+            "tokens": sum(int(r[2]) for r in rows),
+            "models": [
+                {"model": r[0], "requests": int(r[1]), "tokens": int(r[2])}
+                for r in rows
+            ],
+        }
 
     def usage_by_period(
         self,
@@ -1008,7 +1062,9 @@ class CostTracker:
             completion_tokens = usage.completion_tokens
             total_tokens = usage.total_tokens
             reasoning_tokens = usage.reasoning_tokens
+            unpriced = total_tokens > 0 and not self._calculator.is_priced(model)
         else:
+            unpriced = False
             input_cost = output_cost = reasoning_cost = total_cost = 0.0
             prompt_tokens = completion_tokens = total_tokens = reasoning_tokens = 0
         return UsageRecord(
@@ -1037,6 +1093,7 @@ class CostTracker:
             route=route,
             reasoning_tokens=reasoning_tokens,
             conversation_id=conversation_id,
+            unpriced=unpriced,
         )
 
     def estimate_cost(

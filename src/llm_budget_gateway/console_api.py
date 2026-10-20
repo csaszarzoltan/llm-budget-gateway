@@ -866,6 +866,21 @@ def create_console_app(
                     "action": "Start the gateway proxy",
                 },
             )
+        # Models with no known price record $0.00, which budgets cannot see.
+        # Surface them so unpriced traffic is never mistaken for free traffic.
+        unpriced = cost_store.unpriced_summary(days=1)
+        if unpriced["requests"]:
+            payload["attention"].append(  # type: ignore[attr-defined]
+                {
+                    "kind": "unpriced",
+                    "severity": "warning",
+                    "title": (
+                        f"{unpriced['requests']} requests in the last 24h used "
+                        "models with no known price"
+                    ),
+                    "action": "Add a pricing override (use 0 for free models)",
+                }
+            )
         connection_count = len(provider_store.list())
         payload["counts"]["providers"] = connection_count  # type: ignore[index]
         if connection_count:
@@ -1296,6 +1311,7 @@ def create_console_app(
             page=page,
             page_size=page_size,
         )
+        base["unpriced"] = cost_store.unpriced_summary(days=max(1, min(days, 90)))
         return base
 
     # -- Cost attribution (US-001) -----------------------------------------
