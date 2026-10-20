@@ -31,7 +31,13 @@ from .budget_enforcement import (
     RateLimitExceededError,
 )
 from .config import Settings
-from .cost_tracking import CostTracker, TokenUsage, UsageRecord, accumulate_usage
+from .cost_tracking import (
+    CostTracker,
+    TokenUsage,
+    UsageRecord,
+    accumulate_usage,
+    extract_cached_tokens,
+)
 from .model_fallback import FallbackManager
 from .request_telemetry import RequestTelemetryLogger
 
@@ -3073,6 +3079,7 @@ class GatewayProxy:
                     or details.get("reasoning_tokens", 0)
                     or 0
                 ),
+                cached_tokens=extract_cached_tokens(resp_usage),
             )
         return ProviderResponse(
             status_code=status,
@@ -3232,6 +3239,7 @@ class GatewayProxy:
                     completion_tokens=completion_tokens,
                     total_tokens=total_tokens,
                     reasoning_tokens=getattr(resp_usage, "reasoning_tokens", 0) or 0,
+                    cached_tokens=extract_cached_tokens(resp_usage),
                 )
             body_out = self._serializable_body(response, stream)
 
@@ -3277,6 +3285,7 @@ class GatewayProxy:
                         ),
                         "total_tokens": (getattr(chunk_usage, "total_tokens", 0) or 0),
                         "reasoning_tokens": (getattr(chunk_usage, "reasoning_tokens", 0) or 0),
+                        "cached_tokens": extract_cached_tokens(chunk_usage),
                     }
                 )
         usage = accumulate_usage(usage_parts) if usage_parts else None
@@ -3408,6 +3417,7 @@ class GatewayProxy:
                 completion_tokens=_usage_int(usage, "completion_tokens"),
                 total_tokens=_usage_int(usage, "total_tokens"),
                 reasoning_tokens=_usage_int(usage, "reasoning_tokens"),
+                cached_tokens=extract_cached_tokens(usage),
             )
         return None
 

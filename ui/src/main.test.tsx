@@ -65,3 +65,8 @@ it('usage page lists active provider plan limits with time until reset', () => {
   expect(source).toContain('Plan limits')
   expect(source).toContain('remaining_seconds')
 })
+
+it('usage page shows the share of input tokens served from the prompt cache', () => {
+  expect(source).toContain('Prompt cache')
+  expect(source).toContain('d?.cache?.cached_share')
+})

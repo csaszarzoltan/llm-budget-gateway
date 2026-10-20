@@ -1318,6 +1318,7 @@ def create_console_app(
             page_size=page_size,
         )
         base["unpriced"] = cost_store.unpriced_summary(days=max(1, min(days, 90)))
+        base["cache"] = cost_store.cache_summary(days=max(1, min(days, 90)))
         return base
 
     # -- Cost attribution (US-001) -----------------------------------------

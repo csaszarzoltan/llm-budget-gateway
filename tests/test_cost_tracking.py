@@ -88,7 +88,10 @@ class TestTokenUsageInterface:
 
     def test_fields(self) -> None:
         names = {f.name for f in fields(TokenUsage)}
-        assert names == {"prompt_tokens", "completion_tokens", "total_tokens", "reasoning_tokens"}
+        assert names == {
+            "prompt_tokens", "completion_tokens", "total_tokens", "reasoning_tokens",
+            "cached_tokens",
+        }
 
     def test_constructible(self) -> None:
         u = TokenUsage(prompt_tokens=10, completion_tokens=5, total_tokens=15)
@@ -143,6 +146,8 @@ class TestUsageRecordInterface:
             "customer_id",
             "finish_reason",
             "empty_response",
+            "unpriced",
+            "cached_tokens",
         }
 
     def test_constructible(self) -> None:

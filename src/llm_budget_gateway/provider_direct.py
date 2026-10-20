@@ -279,6 +279,13 @@ def _responses_to_chat(data: dict[str, Any], fallback_model: str) -> dict[str, A
         # on chat wire). Without this the thinking is invisible on both.
         "reasoning_tokens": reasoning_tokens,
         "completion_tokens_details": {"reasoning_tokens": reasoning_tokens},
+        # OpenAI chat shape, so the cost path and clients read cache use the
+        # same way as for every other provider.
+        "prompt_tokens_details": {
+            "cached_tokens": int(
+                (usage_raw.get("input_tokens_details") or {}).get("cached_tokens", 0) or 0
+            )
+        },
     }
     return {
         "id": data.get("id", ""),
@@ -2167,6 +2174,14 @@ class DirectProviderClient:
                                 # (normalize_usage) and the gateway cost path
                                 # reads top-level reasoning_tokens.
                                 "reasoning_tokens": _codex_reasoning_tokens(usage_raw),
+                                "prompt_tokens_details": {
+                                    "cached_tokens": int(
+                                        (usage_raw.get("input_tokens_details") or {}).get(
+                                            "cached_tokens", 0
+                                        )
+                                        or 0
+                                    )
+                                },
                                 "completion_tokens_details": {
                                     "reasoning_tokens": _codex_reasoning_tokens(usage_raw)
                                 },

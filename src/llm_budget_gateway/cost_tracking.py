@@ -77,6 +77,9 @@ class TokenUsage:
     completion_tokens: int
     total_tokens: int
     reasoning_tokens: int = 0
+    #: Prompt tokens the provider served from its prompt cache (0 when the
+    #: provider does not report it).
+    cached_tokens: int = 0
 
 
 @dataclass
@@ -126,6 +129,40 @@ class UsageRecord:
     #: ``total_cost`` is 0.0 because the price is unknown, not because the
     #: model is free. Budgets cannot protect such traffic.
     unpriced: bool = False
+    #: Prompt tokens served from the provider's prompt cache.
+    cached_tokens: int = 0
+
+
+def extract_cached_tokens(usage: object) -> int:
+    """Cached prompt tokens from a provider ``usage`` payload (dict or object).
+
+    Providers disagree on the field: OpenAI chat ``prompt_tokens_details.
+    cached_tokens``, OpenAI responses/Codex ``input_tokens_details.
+    cached_tokens``, Anthropic ``cache_read_input_tokens``, DeepSeek
+    ``prompt_cache_hit_tokens``, or a flat ``cached_tokens``. Returns 0 when
+    none is present or the value is malformed.
+    """
+
+    def get(source: object, key: str) -> object:
+        if source is None:
+            return None
+        return source.get(key) if isinstance(source, dict) else getattr(source, key, None)
+
+    def as_int(value: object) -> int:
+        try:
+            return int(value or 0)  # type: ignore[call-overload]
+        except (TypeError, ValueError):
+            return 0
+
+    for parent in ("prompt_tokens_details", "input_tokens_details"):
+        value = as_int(get(get(usage, parent), "cached_tokens"))
+        if value:
+            return value
+    for key in ("cache_read_input_tokens", "prompt_cache_hit_tokens", "cached_tokens"):
+        value = as_int(get(usage, key))
+        if value:
+            return value
+    return 0
 
 
 def accumulate_usage(chunks: list[dict]) -> TokenUsage:
@@ -134,16 +171,19 @@ def accumulate_usage(chunks: list[dict]) -> TokenUsage:
     completion_tokens = 0
     total_tokens = 0
     reasoning_tokens = 0
+    cached_tokens = 0
     for chunk in chunks:
         prompt_tokens += int(chunk.get("prompt_tokens", 0) or 0)
         completion_tokens += int(chunk.get("completion_tokens", 0) or 0)
         total_tokens += int(chunk.get("total_tokens", 0) or 0)
         reasoning_tokens += int(chunk.get("reasoning_tokens", 0) or 0)
+        cached_tokens += int(chunk.get("cached_tokens", 0) or 0)
     return TokenUsage(
         prompt_tokens=prompt_tokens,
         completion_tokens=completion_tokens,
         total_tokens=total_tokens,
         reasoning_tokens=reasoning_tokens,
+        cached_tokens=cached_tokens,
     )
 
 
@@ -347,6 +387,7 @@ class CostStore:
             ("finish_reason", "TEXT"),
             ("empty_response", "INTEGER NOT NULL DEFAULT 0"),
             ("unpriced", "INTEGER NOT NULL DEFAULT 0"),
+            ("cached_tokens", "INTEGER NOT NULL DEFAULT 0"),
         ):
             if column not in existing:
                 self._conn.execute(
@@ -384,8 +425,8 @@ class CostStore:
                     latency_ms, status, status_code, timestamp,
                     tool_name, project, route,
                     client_id, client_profile, cache_hit, conversation_id,
-                    customer_id, finish_reason, empty_response, unpriced
-                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    customer_id, finish_reason, empty_response, unpriced, cached_tokens
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 """,
                 (
                     record.request_id,
@@ -417,6 +458,7 @@ class CostStore:
                     record.finish_reason,
                     1 if record.empty_response else 0,
                     1 if record.unpriced else 0,
+                    record.cached_tokens,
                 ),
             )
             self._conn.commit()
@@ -724,6 +766,26 @@ class CostStore:
                 (route, model),
             )
             self._conn.commit()
+
+    def cache_summary(self, days: int = 1) -> dict[str, object]:
+        """Share of prompt tokens the provider served from its prompt cache.
+
+        ``cached_share`` is ``None`` when no prompt tokens were recorded.
+        A low share on a high prompt volume means the agent re-sends a
+        changing prefix, which is the usual cause of runaway input cost.
+        """
+        since = int(time.time()) - max(1, int(days)) * 86400
+        with self.shared_lock:
+            prompt, cached = self._conn.execute(
+                "SELECT COALESCE(SUM(prompt_tokens), 0), COALESCE(SUM(cached_tokens), 0) "
+                "FROM cost_records WHERE timestamp >= ?",
+                (since,),
+            ).fetchone()
+        return {
+            "prompt_tokens": int(prompt),
+            "cached_tokens": int(cached),
+            "cached_share": (int(cached) / int(prompt)) if prompt else None,
+        }
 
     def unpriced_summary(self, days: int = 1) -> dict[str, object]:
         """Traffic recorded for models with no known price in the last ``days``.
@@ -1062,8 +1124,10 @@ class CostTracker:
             completion_tokens = usage.completion_tokens
             total_tokens = usage.total_tokens
             reasoning_tokens = usage.reasoning_tokens
+            cached_tokens = usage.cached_tokens
             unpriced = total_tokens > 0 and not self._calculator.is_priced(model)
         else:
+            cached_tokens = 0
             unpriced = False
             input_cost = output_cost = reasoning_cost = total_cost = 0.0
             prompt_tokens = completion_tokens = total_tokens = reasoning_tokens = 0
@@ -1094,6 +1158,7 @@ class CostTracker:
             reasoning_tokens=reasoning_tokens,
             conversation_id=conversation_id,
             unpriced=unpriced,
+            cached_tokens=cached_tokens,
         )
 
     def estimate_cost(
