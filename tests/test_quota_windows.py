@@ -182,3 +182,18 @@ def test_models_without_provider_prefix_group_under_unknown():
     ])
 
     assert quota_accounts(limits)[0]["provider"] == "unknown"
+
+
+def test_oversized_provider_message_is_parsed_in_bounded_time():
+    import time as _time
+
+    huge = "Weekly usage limit reached." + " " * 20000 + "x"
+    reason = json.dumps({"type": "http", "status_code": 429, "body": json.dumps(
+        {"error": {"type": "GoUsageLimitError", "message": huge}, "metadata": {"limitName": "weekly"}})})
+
+    started = _time.perf_counter()
+    parsed = parse_quota_reason(reason)
+
+    assert _time.perf_counter() - started < 0.5
+    assert parsed["window"] == "weekly"
+    assert len(parsed["message"]) <= 500

@@ -31,7 +31,9 @@ _UNITS = (
     (re.compile(r"(\d+)\s*h(?:rs?|ours?)?\b", re.I), 3600),
     (re.compile(r"(\d+)\s*m(?:in(?:ute)?s?)?\b", re.I), 60),
 )
-_URL = re.compile(r"\s*(?:To continue[^:]*:\s*)?https?://\S+", re.I)
+_URL = re.compile(r"(?:To continue[^:]*:\s*)?https?://\S+", re.I)
+#: Provider text is untrusted; bound it before any regex runs on it.
+_MAX_MESSAGE = 500
 _DANGLING = re.compile(r"\s+(?:at|on|here)\s*[.:]?$", re.I)
 _CREDITS = re.compile(r"no credits|insufficient[_ ]quota|out of credits", re.I)
 
@@ -83,7 +85,7 @@ def parse_quota_reason(reason: str) -> dict[str, object] | None:
     body = _loads(outer.get("body")) if outer.get("body") else None
     body = body if isinstance(body, dict) else {}
     error = body.get("error") if isinstance(body.get("error"), dict) else {}
-    message = str(error.get("message") or "")
+    message = str(error.get("message") or "")[:_MAX_MESSAGE]
     err_type = str(error.get("type") or "").lower()
     metadata = body.get("metadata") if isinstance(body.get("metadata"), dict) else {}
     limit_name = str(metadata.get("limitName") or "").lower()
