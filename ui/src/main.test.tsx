@@ -78,3 +78,13 @@ it('usage toolbar wraps on narrow screens and the skip link is hidden until focu
   expect(styles).toMatch(/@media\s*\(max-width:640px\)\{[^@]*min-height:40px/)
   expect(styles).toMatch(/@media\s*\(max-width:640px\)\{[^@]*\.calls-panel\{overflow-x:auto\}/)
 })
+
+it('plan limits panel summarises exhausted provider accounts', () => {
+  expect(source).toContain('q.accounts')
+  expect(source).toContain('Accounts parked')
+})
+
+it('plan limits label the gateway retry time, not a provider reset time', () => {
+  expect(source).toContain('retry in')
+  expect(source).not.toContain('back in {fmtWait')
+})

@@ -62,6 +62,18 @@ def _safe_message(message: str) -> str:
     return _DANGLING.sub("", _URL.sub("", cut).strip()).strip()
 
 
+def _provider_of(model: str) -> str:
+    """Provider connection prefix of a direct-transport model id.
+
+    Direct models are ``@<provider>/<model>``; two accounts of one service
+    (``opencode-go``, ``opencode-go2``) are two providers, so the prefix
+    identifies the account whose plan limit was hit.
+    """
+    if model.startswith("@") and "/" in model:
+        return model[1:].split("/", 1)[0]
+    return "unknown"
+
+
 def parse_quota_reason(reason: str) -> dict[str, object] | None:
     """Return ``{window, message, reset_hint_seconds}`` for a usage-limit
     reason, or ``None`` when the reason is not a plan-limit answer."""
@@ -110,6 +122,7 @@ def quota_windows(cooldowns: list[dict[str, object]]) -> list[dict[str, object]]
         if entry is None:
             merged[key] = {
                 "model": cooldown["model"],
+                "provider": _provider_of(str(cooldown["model"])),
                 "window": parsed["window"],
                 "message": parsed["message"],
                 "reset_hint_seconds": parsed["reset_hint_seconds"],
@@ -123,3 +136,25 @@ def quota_windows(cooldowns: list[dict[str, object]]) -> list[dict[str, object]]
                 entry["remaining_seconds"] = remaining
                 entry["until"] = cooldown.get("until")
     return sorted(merged.values(), key=lambda e: int(e["remaining_seconds"]))  # type: ignore[call-overload]
+
+
+def quota_accounts(limits: list[dict[str, object]]) -> list[dict[str, object]]:
+    """One row per provider account that has parked models, soonest back first.
+
+    Fallback between accounts already works (the same model from two
+    connections as consecutive route targets, each parked separately by its
+    own cooldown); this shows which accounts are exhausted and for how long.
+    """
+    accounts: dict[str, dict[str, object]] = {}
+    for limit in limits:
+        provider = str(limit.get("provider") or "unknown")
+        remaining = int(limit.get("remaining_seconds") or 0)  # type: ignore[call-overload]
+        row = accounts.setdefault(
+            provider,
+            {"provider": provider, "models": 0, "windows": [], "remaining_seconds": 0},
+        )
+        row["models"] += 1  # type: ignore[operator]
+        if limit["window"] not in row["windows"]:  # type: ignore[operator]
+            row["windows"].append(limit["window"])  # type: ignore[attr-defined]
+        row["remaining_seconds"] = max(int(row["remaining_seconds"]), remaining)  # type: ignore[call-overload]
+    return sorted(accounts.values(), key=lambda a: int(a["remaining_seconds"]))  # type: ignore[call-overload]

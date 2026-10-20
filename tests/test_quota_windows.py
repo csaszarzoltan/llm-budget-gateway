@@ -139,3 +139,46 @@ def test_out_of_credits_is_labelled_credits_and_message_has_no_dangling_preposit
 
     assert parsed["window"] == "credits"
     assert parsed["message"].endswith("continue using the API")
+
+
+def test_quota_entries_carry_the_provider_account():
+    now = int(time.time())
+    reason = _opencode("monthly", "Monthly usage limit reached. Resets in 2 days.")
+    result = quota_windows([
+        {"route": "r", "model": "@opencode-go2/m1", "until": now + 10, "remaining_seconds": 10,
+         "reason": reason, "strikes": 0},
+    ])
+
+    assert result[0]["provider"] == "opencode-go2"
+
+
+def test_quota_accounts_group_parked_models_per_provider_account():
+    from llm_budget_gateway.quota_windows import quota_accounts
+
+    now = int(time.time())
+    reason = _opencode("weekly", "Weekly usage limit reached. Resets in 1hr.")
+    limits = quota_windows([
+        {"route": "r", "model": "@opencode-go/a", "until": now + 100, "remaining_seconds": 100, "reason": reason, "strikes": 0},
+        {"route": "r", "model": "@opencode-go/b", "until": now + 400, "remaining_seconds": 400, "reason": reason, "strikes": 0},
+        {"route": "r", "model": "@opencode-go2/a", "until": now + 50, "remaining_seconds": 50, "reason": reason, "strikes": 0},
+    ])
+
+    accounts = quota_accounts(limits)
+
+    by_provider = {a["provider"]: a for a in accounts}
+    assert by_provider["opencode-go"]["models"] == 2
+    assert by_provider["opencode-go"]["remaining_seconds"] == 400
+    assert by_provider["opencode-go2"]["models"] == 1
+    assert [a["provider"] for a in accounts] == ["opencode-go2", "opencode-go"]  # soonest back first
+
+
+def test_models_without_provider_prefix_group_under_unknown():
+    from llm_budget_gateway.quota_windows import quota_accounts
+
+    now = int(time.time())
+    reason = _opencode("weekly", "Weekly usage limit reached. Resets in 1hr.")
+    limits = quota_windows([
+        {"route": "r", "model": "plain-model", "until": now + 5, "remaining_seconds": 5, "reason": reason, "strikes": 0},
+    ])
+
+    assert quota_accounts(limits)[0]["provider"] == "unknown"

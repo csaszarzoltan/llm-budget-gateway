@@ -82,6 +82,23 @@ without their own config default to 60s). `cooldown_seconds: 0`
 disables cooldown entirely. This prevents stampedes onto a model that
 just proved unhealthy.
 
+## Subscription accounts and plan limits
+
+Flat-rate and subscription providers answer `429` with a usage-limit error
+("Weekly usage limit reached. Resets in 1hr 18min.") once a plan window is
+used up. To spread load across several accounts of one service, add each
+account as its own provider connection (for example `opencode-go` and
+`opencode-go2`) and list the same model from both as consecutive targets in
+the route. Each `route + model` pair is parked by its own cooldown, so when
+one account hits its limit the next target takes over and the exhausted one
+is retried after its cooldown.
+
+`GET /v1/product/quota` and the **Plan limits** panel on the Usage page list
+the models currently parked by a plan limit (window, the provider's own
+reset text, and when the gateway retries the model) and
+group them per provider account. The window and reset hint are read from the
+provider's `429` body; credit exhaustion is labelled `credits`.
+
 ## Streaming caveat
 
 Fallback triggers only *before* the upstream stream starts: a stream
