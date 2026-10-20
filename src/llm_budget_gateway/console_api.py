@@ -847,6 +847,25 @@ def create_console_app(
     async def product_home(role: str = "developer") -> dict[str, object]:
         """Return the role-aware product home state."""
         payload = product.home(role)
+        # The proxy state comes from a real port probe, not a constant: a
+        # "healthy" banner over a dead proxy hides the one failure that
+        # matters. A manager without a gateway entry reports "unknown".
+        try:
+            reachable = bool(service_manager.status("gateway")["reachable"])
+            gateway_status = "healthy" if reachable else "unreachable"
+        except (ValueError, KeyError):
+            gateway_status = "unknown"
+        payload["gateway"]["status"] = gateway_status  # type: ignore[index]
+        if gateway_status == "unreachable":
+            payload["attention"].insert(  # type: ignore[attr-defined]
+                0,
+                {
+                    "kind": "gateway",
+                    "severity": "critical",
+                    "title": "Gateway is unreachable",
+                    "action": "Start the gateway proxy",
+                },
+            )
         connection_count = len(provider_store.list())
         payload["counts"]["providers"] = connection_count  # type: ignore[index]
         if connection_count:

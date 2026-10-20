@@ -48,3 +48,9 @@ it('exposes the portable OpenTelemetry evidence plane',()=>{expect(source).toCon
 it('exposes safe releases and outcome-aware autopilot',()=>{expect(source).toContain('Safe releases');expect(source).toContain('/v1/console/releases/plan');expect(source).toContain('Optimization autopilot');expect(source).toContain('/v1/console/autopilot/recommend')})
 
 it('ships the complete Route Studio lifecycle and visual workflow',()=>{for(const text of ['Open designer','Search routes','Archived routes','Route Studio sections','Validate graph','Simulate','Save draft','Review & publish','Delete permanently','Type the route name to confirm','Required capabilities','Move up','Move down'])expect(source).toContain(text);expect(source).toContain('/dependencies');expect(source).toContain('/archive');expect(source).toContain('/restore');expect(source).toContain("'DELETE'")})
+
+it('home gateway banner is driven by the reported status, not hard-coded', () => {
+  expect(source).toContain('d.gateway.status')
+  expect(source).toContain('Gateway unreachable')
+  expect(source).not.toMatch(/<span className="healthy">● Gateway healthy<\/span>/)
+})
