@@ -59,3 +59,9 @@ it('usage page warns when traffic ran on models with no known price', () => {
   expect(source).toContain('d?.unpriced?.requests')
   expect(source).toContain('no known price')
 })
+
+it('usage page lists active provider plan limits with time until reset', () => {
+  expect(source).toContain('/v1/product/quota')
+  expect(source).toContain('Plan limits')
+  expect(source).toContain('remaining_seconds')
+})

@@ -99,6 +99,7 @@ from .provider_connections import (
     ProviderDiscovery,
 )
 from .routing_control_plane import RoutingControlPlane
+from .quota_windows import quota_windows
 from .service_manager import ServiceManager
 from .supply_chain import SBOMService, UpgradeRiskService
 from .trace_outcomes import OutcomeAnalytics, OutcomeRecord, TraceSpan, TraceStore
@@ -903,6 +904,11 @@ def create_console_app(
         except Exception:
             pass
         return payload
+
+    @app.get("/v1/product/quota")
+    async def product_quota() -> dict[str, object]:
+        """Active provider plan limits (weekly/monthly/5-hour windows)."""
+        return {"limits": quota_windows(cost_store.active_cooldowns())}
 
     @app.get("/v1/product/templates")
     async def product_templates() -> dict[str, object]:
